@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest
+      - name: Compile Python files
+        run: python -m py_compile __init__.py core.py cli_smoke.py
+      - name: Run tests
+        run: python -m pytest . -q
+      - name: Secret pattern scan
+        run: |
+          python - <<'PY'
+          import os, re, sys
+          patterns=[r'github_pat_[A-Za-z0-9_]+', r'ghp_[A-Za-z0-9]{20,}', r'sk-[A-Za-z0-9]{20,}', r'AKIA[0-9A-Z]{16}', r'BEGIN (?:RSA|OPENSSH|EC|DSA)? ?PRIVATE KEY']
+          hits=[]
+          for dp, dns, fns in os.walk('.'):
+              dns[:] = [d for d in dns if d not in {'.git','__pycache__','.pytest_cache'}]
+              for fn in fns:
+                  p=os.path.join(dp, fn)
+                  try: data=open(p,'rb').read()
+                  except Exception: continue
+                  if b'\0' in data[:4096]: continue
+                  text=data.decode('utf-8','ignore')
+                  if any(re.search(x,text) for x in patterns): hits.append(p)
+          print('secret_hits=', len(hits))
+          for h in hits: print(h)
+          sys.exit(1 if hits else 0)
+          PY

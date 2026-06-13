@@ -1,0 +1,11 @@
+name: profile-delegate
+version: "0.2.0-alpha"
+description: "Profile Delegate 🤝: experimental bounded model-callable cross-profile task delegation with safety guardrails."
+author: Adan
+requires_env: []
+provides_tools:
+  - profile_delegate
+  - profile_delegate_status
+  - profile_delegate_list
+  - profile_delegate_prune
+provides_hooks: []
