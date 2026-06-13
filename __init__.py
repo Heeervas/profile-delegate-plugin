@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, Optional
 
 try:
@@ -205,6 +206,8 @@ def _profile_delegate_preview(args: Dict[str, Any], max_len: int | None = None) 
 
 def _install_tool_preview_patch() -> None:
     """Patch Hermes' display preview for this plugin until core exposes a preview hook."""
+    if os.getenv("PROFILE_DELEGATE_ENABLE_PREVIEW_PATCH", "true").strip().lower() in {"0", "false", "no", "off"}:
+        return
     try:
         import agent.display as display
     except Exception:

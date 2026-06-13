@@ -7,7 +7,9 @@ import random
 import re
 import shutil
 import string
+import selectors
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,11 +25,12 @@ MAX_TIMEOUT_SECONDS = 900
 MAX_TASK_CHARS = 30_000
 MAX_CONTEXT_CHARS = 60_000
 MAX_OUTPUT_CONTRACT_CHARS = 8_000
+DEFAULT_MAX_STDOUT_CHARS = 200_000
+DEFAULT_MAX_STDERR_CHARS = 100_000
 DEFAULT_MAX_DEPTH = 1
 DEFAULT_MAX_CONCURRENT = 1
 VALID_RESULT_STATUSES = {"ok", "blocked", "failed"}
 TRUTHY = {"1", "true", "yes", "on"}
-SENSITIVE_WORKDIR_PREFIXES = ("/", "/etc", "/proc", "/sys", "/dev", "/run", "/root", "/var/run")
 
 
 class ProfileDelegateError(Exception):
@@ -374,6 +377,108 @@ def resolve_workdir(workdir: str = "") -> Path:
     return cwd
 
 
+
+
+def capped_text(text: str, limit: int) -> Tuple[str, bool]:
+    if limit < 0:
+        limit = 0
+    if len(text) <= limit:
+        return text, False
+    return text[:limit], True
+
+
+def output_limits() -> Tuple[int, int]:
+    stdout_limit = env_int("PROFILE_DELEGATE_MAX_STDOUT_CHARS", DEFAULT_MAX_STDOUT_CHARS, 0, 10_000_000)
+    stderr_limit = env_int("PROFILE_DELEGATE_MAX_STDERR_CHARS", DEFAULT_MAX_STDERR_CHARS, 0, 10_000_000)
+    return stdout_limit, stderr_limit
+
+
+def append_capped(path: Path, chunk: str, written: int, limit: int) -> Tuple[int, bool]:
+    if not chunk or written >= limit:
+        return written, bool(chunk)
+    remaining = limit - written
+    kept = chunk[:remaining]
+    with path.open("a", encoding="utf-8", errors="replace") as handle:
+        handle.write(kept)
+    return written + len(kept), len(chunk) > remaining
+
+
+def run_capped_subprocess(cmd: List[str], cwd: Path, env: Dict[str, str], timeout: int, stdout_path: Path, stderr_path: Path) -> Dict[str, Any]:
+    """Run child process while streaming stdout/stderr to capped files."""
+    stdout_limit, stderr_limit = output_limits()
+    text_safe_write(stdout_path, "")
+    text_safe_write(stderr_path, "")
+    stdout_written = 0
+    stderr_written = 0
+    stdout_truncated = False
+    stderr_truncated = False
+    timed_out = False
+    exit_code: Optional[int] = None
+
+    with subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as proc:
+        assert proc.stdout is not None
+        assert proc.stderr is not None
+        sel = selectors.DefaultSelector()
+        sel.register(proc.stdout, selectors.EVENT_READ, "stdout")
+        sel.register(proc.stderr, selectors.EVENT_READ, "stderr")
+        deadline = time.monotonic() + timeout
+
+        while sel.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                proc.kill()
+                break
+            events = sel.select(timeout=min(0.2, remaining))
+            if not events:
+                if proc.poll() is not None:
+                    continue
+                continue
+            for key, _mask in events:
+                stream = key.fileobj
+                chunk_bytes = os.read(stream.fileno(), 8192)
+                if not chunk_bytes:
+                    try:
+                        sel.unregister(stream)
+                    except Exception:
+                        pass
+                    continue
+                chunk = chunk_bytes.decode("utf-8", "replace")
+                if key.data == "stdout":
+                    stdout_written, truncated = append_capped(stdout_path, chunk, stdout_written, stdout_limit)
+                    stdout_truncated = stdout_truncated or truncated
+                else:
+                    stderr_written, truncated = append_capped(stderr_path, chunk, stderr_written, stderr_limit)
+                    stderr_truncated = stderr_truncated or truncated
+
+        if timed_out:
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+        else:
+            exit_code = proc.wait(timeout=max(1, int(deadline - time.monotonic()) + 1))
+
+    os.chmod(stdout_path, 0o600)
+    os.chmod(stderr_path, 0o600)
+    return {
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+        "stdout_chars": stdout_written,
+        "stderr_chars": stderr_written,
+        "stdout_limit": stdout_limit,
+        "stderr_limit": stderr_limit,
+    }
+
 def build_prompt(task: str, context: str = "", output_contract: str = "") -> str:
     contract = output_contract.strip() or "Use the default JSON schema exactly."
     context_block = context.strip() or "(none provided)"
@@ -561,29 +666,19 @@ def delegate_profile(
     with acquire_concurrency_slot() as slot:
         status["concurrency_slot"] = slot.slot
         json_safe_write(run_dir / "status.json", status)
-        try:
-            completed = subprocess.run(
-                cmd,
-                cwd=str(cwd),
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout,
-                check=False,
-            )
-            stdout = ensure_text(completed.stdout)
-            stderr = ensure_text(completed.stderr)
-            exit_code = int(completed.returncode)
-            timed_out = False
-        except subprocess.TimeoutExpired as exc:
-            stdout = ensure_text(exc.stdout)
-            stderr = ensure_text(exc.stderr)
-            exit_code = None
-            timed_out = True
+        run_meta = run_capped_subprocess(
+            cmd,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            stdout_path=run_dir / "stdout.txt",
+            stderr_path=run_dir / "stderr.txt",
+        )
+        exit_code = run_meta["exit_code"]
+        timed_out = bool(run_meta["timed_out"])
 
-    text_safe_write(run_dir / "stdout.txt", stdout)
-    text_safe_write(run_dir / "stderr.txt", stderr)
+    stdout = tail_text(run_dir / "stdout.txt", run_meta["stdout_limit"])
+    stderr = tail_text(run_dir / "stderr.txt", run_meta["stderr_limit"])
 
     if timed_out:
         result = {
@@ -605,6 +700,10 @@ def delegate_profile(
             result["status"] = "failed"
             errors = coerce_list(result.get("errors"))
             errors.append(f"hermes_exit_code_{exit_code}")
+            if run_meta.get("stdout_truncated"):
+                errors.append("stdout_truncated")
+            if run_meta.get("stderr_truncated"):
+                errors.append("stderr_truncated")
             if stderr.strip():
                 errors.append("stderr_nonempty")
             result["errors"] = errors
@@ -620,6 +719,12 @@ def delegate_profile(
             "exit_code": exit_code,
             "timed_out": timed_out,
             "error_code": error_code,
+            "stdout_truncated": run_meta.get("stdout_truncated"),
+            "stderr_truncated": run_meta.get("stderr_truncated"),
+            "stdout_chars": run_meta.get("stdout_chars"),
+            "stderr_chars": run_meta.get("stderr_chars"),
+            "stdout_limit": run_meta.get("stdout_limit"),
+            "stderr_limit": run_meta.get("stderr_limit"),
         }
     )
     json_safe_write(run_dir / "status.json", status)
@@ -635,6 +740,8 @@ def delegate_profile(
         "paths": base_paths(run_dir),
         "exit_code": exit_code,
         "timed_out": timed_out,
+        "stdout_truncated": run_meta.get("stdout_truncated"),
+        "stderr_truncated": run_meta.get("stderr_truncated"),
     }
 
 
@@ -671,6 +778,8 @@ def profile_delegate_status(task_id: str, tail_chars: Any = 4000) -> Dict[str, A
         "error_code": status.get("error_code"),
         "exit_code": status.get("exit_code"),
         "timed_out": bool(status.get("timed_out", False)),
+        "stdout_truncated": bool(status.get("stdout_truncated", False)),
+        "stderr_truncated": bool(status.get("stderr_truncated", False)),
         "created_at": status.get("created_at"),
         "started_at": status.get("started_at"),
         "ended_at": status.get("ended_at"),

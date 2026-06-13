@@ -1,8 +1,8 @@
 # Profile Delegate 🤝
 
-Version: `0.2.0-alpha`
+Version: `1.0.0`
 
-> Experimental/alpha Hermes Agent plugin. This is useful for local power users, but it is **not a sandbox** and should be configured deliberately before broad use.
+> Stable local-power-user Hermes Agent plugin. It is **not a sandbox** and should be configured deliberately before broad use.
 
 A Hermes Agent plugin for bounded, model-callable delegation between Hermes profiles.
 
@@ -23,6 +23,7 @@ Example uses:
 - Explicit target-profile allowlist by default.
 - Recursion/depth guard via `PROFILE_DELEGATE_MAX_DEPTH`.
 - Global concurrency guard via lock files and `PROFILE_DELEGATE_MAX_CONCURRENT`.
+- Bounded streaming stdout/stderr capture via `PROFILE_DELEGATE_MAX_STDOUT_CHARS` and `PROFILE_DELEGATE_MAX_STDERR_CHARS`.
 - Optional working-directory allowlist via `PROFILE_DELEGATE_ALLOWED_WORKDIRS`.
 - Absolute/configurable Hermes binary path resolution.
 - Defensive JSON extraction and schema normalization.
@@ -110,8 +111,11 @@ export PROFILE_DELEGATE_ALLOW_ALL_PROFILES=true
 | `PROFILE_DELEGATE_MAX_DEPTH` | `1` | Maximum nested delegation depth. `1` allows caller → target, but blocks target → another target. |
 | `PROFILE_DELEGATE_DEPTH` | `0` | Internal depth counter passed to child Hermes processes. Do not set manually except for tests. |
 | `PROFILE_DELEGATE_MAX_CONCURRENT` | `1` | Number of concurrent profile delegation subprocesses allowed per Hermes home. |
+| `PROFILE_DELEGATE_MAX_STDOUT_CHARS` | `200000` | Maximum stdout characters stored and parsed from the delegated Hermes process. Extra output is truncated. |
+| `PROFILE_DELEGATE_MAX_STDERR_CHARS` | `100000` | Maximum stderr characters stored from the delegated Hermes process. Extra output is truncated. |
 | `PROFILE_DELEGATE_HERMES_BIN` | resolved from `PATH` | Absolute Hermes binary override. If unset, the plugin resolves `hermes` with `shutil.which()` and uses the absolute path. |
 | `PROFILE_DELEGATE_ALLOWED_WORKDIRS` | empty | Comma-separated allowed roots for explicit `workdir`. If unset, explicit `workdir` is rejected. |
+| `PROFILE_DELEGATE_ENABLE_PREVIEW_PATCH` | `true` | Toggle the compatibility monkeypatch for one-line tool previews. Set `false` if a future Hermes preview API conflicts. |
 | `PROFILE_DELEGATE_RUNS_ROOT` | `$HERMES_HOME/profile_delegate/runs` | Private run artifact directory. |
 | `PROFILE_DELEGATE_LOCKS_ROOT` | `$HERMES_HOME/profile_delegate/locks` | Lock-file directory for concurrency slots. |
 
@@ -212,6 +216,7 @@ Security posture:
 - run directories are created as `0700`
 - files are written as `0600`
 - prompts, context, stdout, and stderr may contain private data
+- stdout/stderr are capped by default to prevent local memory/disk blowups
 - prune old runs periodically with `profile_delegate_prune`
 
 ## Security model

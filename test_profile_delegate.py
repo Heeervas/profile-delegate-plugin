@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -197,23 +196,76 @@ def test_delegate_uses_prompt_file_not_raw_prompt_in_argv(tmp_path, monkeypatch)
     monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
     seen = {}
 
-    class Completed:
-        stdout = '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}'
-        stderr = ""
-        returncode = 0
-
-    def fake_run(cmd, **kwargs):
+    def fake_run_capped(cmd, **kwargs):
         seen["cmd"] = cmd
         seen["env"] = kwargs.get("env")
-        return Completed()
+        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
+        core.text_safe_write(kwargs["stderr_path"], "")
+        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 74, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
 
-    monkeypatch.setattr(core.subprocess, "run", fake_run)
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     result = core.delegate_profile("reviewer", "PRIVATE TASK TEXT")
     assert result["success"] is True
     assert seen["cmd"][:4] == ["/usr/bin/hermes", "-p", "reviewer", "-z"]
     assert seen["cmd"][4].startswith("@file:")
     assert seen["env"]["PROFILE_DELEGATE_DEPTH"] == "1"
     assert "PRIVATE TASK TEXT" not in " ".join(seen["cmd"])
+
+
+def test_run_capped_subprocess_limits_stdout_stderr(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_MAX_STDOUT_CHARS", "25")
+    monkeypatch.setenv("PROFILE_DELEGATE_MAX_STDERR_CHARS", "10")
+    code = "import sys; print('x'*100); print('e'*50, file=sys.stderr)"
+    result = core.run_capped_subprocess(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        env={},
+        timeout=10,
+        stdout_path=tmp_path / "stdout.txt",
+        stderr_path=tmp_path / "stderr.txt",
+    )
+    assert result["exit_code"] == 0
+    assert result["stdout_truncated"] is True
+    assert result["stderr_truncated"] is True
+    assert len((tmp_path / "stdout.txt").read_text()) == 25
+    assert len((tmp_path / "stderr.txt").read_text()) == 10
+
+
+def test_delegate_reports_truncated_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: sys.executable)
+
+    def fake_run_capped(cmd, **kwargs):
+        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
+        core.text_safe_write(kwargs["stderr_path"], "")
+        return {"exit_code": 0, "timed_out": False, "stdout_truncated": True, "stderr_truncated": False, "stdout_chars": 5, "stderr_chars": 0, "stdout_limit": 5, "stderr_limit": 5}
+
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
+    result = core.delegate_profile("reviewer", "task")
+    assert result["stdout_truncated"] is True
+    status = core.profile_delegate_status(result["task_id"])
+    assert status["stdout_truncated"] is True
+
+
+def test_run_capped_subprocess_timeout_keeps_bounded_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_MAX_STDOUT_CHARS", "12")
+    monkeypatch.setenv("PROFILE_DELEGATE_MAX_STDERR_CHARS", "12")
+    code = "import time; print('ready', flush=True); time.sleep(5)"
+    result = core.run_capped_subprocess(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        env={},
+        timeout=1,
+        stdout_path=tmp_path / "stdout.txt",
+        stderr_path=tmp_path / "stderr.txt",
+    )
+    assert result["timed_out"] is True
+    assert result["exit_code"] is None
+    assert len((tmp_path / "stdout.txt").read_text()) <= 12
 
 
 def test_status_list_and_prune(tmp_path, monkeypatch):
