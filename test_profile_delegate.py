@@ -31,12 +31,20 @@ def test_extract_json_last_object():
     assert obj["summary"] == "final"
 
 
-def test_normalize_result_parse_failure():
-    result = core.normalize_result(None, "/tmp/stdout.txt")
-    assert result["status"] == "failed"
+def test_normalize_result_parse_failure_coerces_plain_text():
+    result = core.normalize_result(None, "/tmp/stdout.txt", raw_output="The file is a profile_delegate smoke-test prompt.\n\nPath: /tmp/prompt.txt")
+    assert result["status"] == "ok"
     assert result["structured"] is False
-    assert result["error_code"] == "parse_failed"
+    assert result["error_code"] == "unstructured_output"
     assert result["raw_output_path"] == "/tmp/stdout.txt"
+    assert result["summary"] == "The file is a profile_delegate smoke-test prompt."
+    assert result["errors"] == []
+
+
+def test_normalize_result_empty_parse_failure_stays_failed():
+    result = core.normalize_result(None, "/tmp/stdout.txt", raw_output="   ")
+    assert result["status"] == "failed"
+    assert result["error_code"] == "parse_failed"
 
 
 def test_normalize_result_invalid_shape():

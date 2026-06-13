@@ -1,5 +1,5 @@
 name: profile-delegate
-version: "1.0.0"
+version: "1.0.1"
 description: "Profile Delegate 🤝: bounded model-callable cross-profile task delegation with stable safety guardrails."
 author: Adan
 requires_env: []

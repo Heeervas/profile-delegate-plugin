@@ -1,6 +1,6 @@
 # Profile Delegate 🤝
 
-Version: `1.0.0`
+Version: `1.0.1`
 
 > Stable local-power-user Hermes Agent plugin. It is **not a sandbox** and should be configured deliberately before broad use.
 
@@ -27,6 +27,7 @@ Example uses:
 - Optional working-directory allowlist via `PROFILE_DELEGATE_ALLOWED_WORKDIRS`.
 - Absolute/configurable Hermes binary path resolution.
 - Defensive JSON extraction and schema normalization.
+- Cheap local fallback for useful non-JSON child output; no automatic profile retry on parse failure.
 - Private local run artifacts: request, prompt, status, stdout, stderr, result.
 - Stable error codes for common failures.
 - Tool preview patch so users see the target profile and one-line task summary.

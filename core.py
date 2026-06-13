@@ -548,11 +548,35 @@ def coerce_list(value: Any) -> List[str]:
     return [ensure_text(value)]
 
 
-def normalize_result(parsed: Any, stdout_path: str) -> Dict[str, Any]:
+def summarize_unstructured_output(raw_output: str, limit: int = 500) -> str:
+    text = (raw_output or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^```(?:\w+)?\s*|\s*```$", "", text, flags=re.DOTALL).strip()
+    for line in text.splitlines():
+        candidate = line.strip(" \t`*-_")
+        if candidate:
+            return candidate[:limit]
+    return text[:limit]
+
+
+def normalize_result(parsed: Any, stdout_path: str, raw_output: str = "") -> Dict[str, Any]:
     if not isinstance(parsed, dict):
+        summary = summarize_unstructured_output(raw_output)
+        if summary:
+            return {
+                "status": "ok",
+                "summary": summary,
+                "artifacts": [],
+                "errors": [],
+                "next_steps": [],
+                "structured": False,
+                "error_code": "unstructured_output",
+                "raw_output_path": stdout_path,
+            }
         return {
             "status": "failed",
-            "summary": "Delegated profile returned non-JSON output.",
+            "summary": "Delegated profile returned empty or non-JSON output.",
             "artifacts": [],
             "errors": ["parse_failed"],
             "next_steps": [],
@@ -694,7 +718,7 @@ def delegate_profile(
         error_code = "timeout"
     else:
         parsed = extract_json_object(stdout)
-        result = normalize_result(parsed, str(run_dir / "stdout.txt"))
+        result = normalize_result(parsed, str(run_dir / "stdout.txt"), raw_output=stdout)
         error_code = result.get("error_code") if isinstance(result.get("error_code"), str) else None
         if exit_code != 0:
             result["status"] = "failed"
