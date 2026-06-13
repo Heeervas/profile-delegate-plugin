@@ -505,7 +505,6 @@ def delegate_profile(
     output_contract: str = "",
     workdir: str = "",
 ) -> Dict[str, Any]:
-    hermes_bin = resolve_hermes_bin()
     depth, max_depth = enforce_depth_policy()
     validated = validate_profile(profile)
     task_text = bounded_text("task", task, MAX_TASK_CHARS).strip()
@@ -515,6 +514,7 @@ def delegate_profile(
     contract_text = bounded_text("output_contract", output_contract, MAX_OUTPUT_CONTRACT_CHARS)
     timeout = coerce_timeout(timeout_seconds)
     cwd = resolve_workdir(workdir)
+    hermes_bin = resolve_hermes_bin()
 
     task_id = make_task_id()
     run_dir = get_runs_root() / task_id
