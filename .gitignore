@@ -4,3 +4,7 @@ __pycache__/
 .DS_Store
 .env
 *.log
+AGENTS.md
+STATE.md
+TODO.md
+.agents/

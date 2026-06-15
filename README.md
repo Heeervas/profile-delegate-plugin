@@ -58,7 +58,7 @@ Default profile:
 
 ```bash
 mkdir -p ~/.hermes/plugins
-git clone https://github.com/eve-ai-dev/profile-delegate-plugin.git ~/.hermes/plugins/profile-delegate
+git clone https://github.com/Heeervas/profile-delegate-plugin.git ~/.hermes/plugins/profile-delegate
 hermes plugins enable profile-delegate
 ```
 
@@ -66,7 +66,7 @@ Named profile:
 
 ```bash
 mkdir -p ~/.hermes/profiles/<profile>/plugins
-git clone https://github.com/eve-ai-dev/profile-delegate-plugin.git ~/.hermes/profiles/<profile>/plugins/profile-delegate
+git clone https://github.com/Heeervas/profile-delegate-plugin.git ~/.hermes/profiles/<profile>/plugins/profile-delegate
 hermes -p <profile> plugins enable profile-delegate
 ```
 
