@@ -19,7 +19,7 @@ Example uses:
 
 - Model-callable `profile_delegate` tool.
 - Runs the target profile with its normal Hermes context, memory, rules, tools, and model defaults.
-- Uses Hermes one-shot mode with a prompt file reference: `hermes -p <profile> -z @file:<prompt.txt>`.
+- Uses Hermes quiet single-query mode with a prompt file reference: `hermes -p <profile> chat -q @file:<prompt.txt> -Q --pass-session-id`.
 - Explicit target-profile allowlist by default.
 - Recursion/depth guard via `PROFILE_DELEGATE_MAX_DEPTH`.
 - Global concurrency guard via lock files and `PROFILE_DELEGATE_MAX_CONCURRENT`.
@@ -147,7 +147,7 @@ Notes:
 
 - `profile` must exist locally and pass the allowlist policy.
 - `task` should be self-contained.
-- `session_title` is required, truncated to 50 chars, and used to rename new sessions when the child returns `session_id`. Short Spanish/broken-English shorthand is fine.
+- `session_title` is required, truncated to 50 chars, and used to rename new sessions after the parent parses Hermes' `session_id:` footer. Short Spanish/broken-English shorthand is fine.
 - `session_mode` defaults to `new`; use `resume` with `session_id` to continue a target-profile session. Find ids with `hermes -p <profile> sessions list`.
 - `context` is caller-selected. Keep it compact; pass paths and summaries instead of dumping whole transcripts.
 - `workdir` defaults to the current process working directory.
@@ -290,7 +290,7 @@ Optional local smoke:
 
 ```bash
 PROFILE_DELEGATE_ALLOWED_PROFILES=reviewer \
-python cli_smoke.py --profile reviewer --session-title smoke --task 'Return {"status":"ok","summary":"smoke","artifacts":[],"errors":[],"next_steps":[],"session_id":"<your session id>"}'
+python cli_smoke.py --profile reviewer --session-title smoke --task 'Return {"status":"ok","summary":"smoke","artifacts":[],"errors":[],"next_steps":[]}'
 ```
 
 Secret scan before publishing:

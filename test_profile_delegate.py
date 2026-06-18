@@ -31,6 +31,24 @@ def test_extract_json_last_object():
     assert obj["summary"] == "final"
 
 
+def test_session_id_footer_helpers():
+    text = 'noise\n{"status":"ok","summary":"x"}\n\nsession_id: 20260618_065934_cd40a6'
+    assert core.extract_session_id_footer(text) == "20260618_065934_cd40a6"
+    stripped = core.strip_session_id_footer(text)
+    assert stripped == 'noise\n{"status":"ok","summary":"x"}'
+    assert core.extract_json_object(stripped)["summary"] == "x"
+
+
+def test_session_id_footer_helpers_only_strip_final_footer():
+    text = 'session_id: keep_me\n{"status":"ok","summary":"x"}\n\nsession_id: final_id\n\n'
+    stripped, session_id = core.split_session_id_footer(text)
+    assert session_id == "final_id"
+    assert stripped.startswith("session_id: keep_me")
+    assert "session_id: final_id" not in stripped
+    no_footer = 'session_id: keep_me\n{"status":"ok"}\nnot footer'
+    assert core.strip_session_id_footer(no_footer) == no_footer
+
+
 def test_normalize_result_parse_failure_coerces_plain_text():
     result = core.normalize_result(None, "/tmp/stdout.txt", raw_output="The file is a profile_delegate smoke-test prompt.\n\nPath: /tmp/prompt.txt")
     assert result["status"] == "ok"
@@ -224,16 +242,19 @@ def test_delegate_uses_prompt_file_not_raw_prompt_in_argv(tmp_path, monkeypatch)
     def fake_run_capped(cmd, **kwargs):
         seen["cmd"] = cmd
         seen["env"] = kwargs.get("env")
-        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
+        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: sid999')
         core.text_safe_write(kwargs["stderr_path"], "")
         return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 74, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     result = core.delegate_profile("reviewer", "PRIVATE TASK TEXT", session_title="private task")
     assert result["success"] is True
-    assert seen["cmd"][:4] == ["/usr/bin/hermes", "-p", "reviewer", "--pass-session-id"]
-    assert seen["cmd"][4] == "-z"
+    assert seen["cmd"][:5] == ["/usr/bin/hermes", "-p", "reviewer", "chat", "-q"]
     assert seen["cmd"][5].startswith("@file:")
+    assert "-Q" in seen["cmd"]
+    assert "--pass-session-id" in seen["cmd"]
+    assert "--source" in seen["cmd"]
+    assert "profile-delegate" in seen["cmd"]
     assert "--resume" not in seen["cmd"]
     assert seen["env"]["PROFILE_DELEGATE_DEPTH"] == "1"
     assert "PRIVATE TASK TEXT" not in " ".join(seen["cmd"])
@@ -267,7 +288,7 @@ def test_delegate_reports_truncated_output(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "resolve_hermes_bin", lambda: sys.executable)
 
     def fake_run_capped(cmd, **kwargs):
-        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
+        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: sid999')
         core.text_safe_write(kwargs["stderr_path"], "")
         return {"exit_code": 0, "timed_out": False, "stdout_truncated": True, "stderr_truncated": False, "stdout_chars": 5, "stderr_chars": 0, "stdout_limit": 5, "stderr_limit": 5}
 
@@ -368,7 +389,7 @@ def test_delegate_resume_uses_resume_flag_and_skips_rename(tmp_path, monkeypatch
 
     def fake_run_capped(cmd, **kwargs):
         seen["cmd"] = cmd
-        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[],"session_id":"sid123"}')
+        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: sid123')
         core.text_safe_write(kwargs["stderr_path"], "")
         return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 92, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
 
@@ -393,7 +414,7 @@ def test_delegate_new_renames_when_session_id_present(tmp_path, monkeypatch):
     renamed = {}
 
     def fake_run_capped(cmd, **kwargs):
-        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[],"session_id":"sid999"}')
+        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: sid999')
         core.text_safe_write(kwargs["stderr_path"], "")
         return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 92, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
 

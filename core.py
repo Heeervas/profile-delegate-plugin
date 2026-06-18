@@ -534,7 +534,6 @@ Rules:
 - Do not include markdown outside JSON.
 - If blocked, set status="blocked" and explain exactly what is needed.
 - Preserve your profile's normal policy and tool judgment.
-- Your session id is available in your system prompt because --pass-session-id is used. Include it in the JSON as "session_id" when possible.
 
 Task:
 {task.strip()}
@@ -656,12 +655,25 @@ def base_paths(run_dir: Path) -> Dict[str, str]:
     }
 
 
-def extract_session_id(result: Dict[str, Any]) -> str:
-    for key in ("session_id", "child_session_id"):
-        value = result.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
+def split_session_id_footer(text: str) -> Tuple[str, str]:
+    lines = (text or "").splitlines()
+    idx = len(lines) - 1
+    while idx >= 0 and not lines[idx].strip():
+        idx -= 1
+    if idx < 0:
+        return "", ""
+    match = re.match(r"^session_id:\s*(\S+)\s*$", lines[idx].strip())
+    if not match:
+        return (text or "").strip(), ""
+    return "\n".join(lines[:idx]).strip(), match.group(1)
+
+
+def extract_session_id_footer(text: str) -> str:
+    return split_session_id_footer(text)[1]
+
+
+def strip_session_id_footer(text: str) -> str:
+    return split_session_id_footer(text)[0]
 
 
 def rename_session(hermes_bin: str, profile: str, session_id: str, title: str, cwd: Path, env: Dict[str, str], timeout: int = 30) -> Dict[str, Any]:
@@ -748,11 +760,12 @@ def delegate_profile(
 
     # Pass the delegated prompt by file reference instead of argv. The argv is
     # visible to local process listings on many systems; prompt text may contain
-    # private task context. Hermes expands @file:<path> inside the child process.
-    cmd = [hermes_bin, "-p", validated.canonical]
+    # private task context. chat -q -Q preserves one-shot behavior while printing
+    # a reliable session_id footer when --pass-session-id is used.
+    cmd = [hermes_bin, "-p", validated.canonical, "chat", "-q", f"@file:{run_dir / 'prompt.txt'}", "-Q"]
     if mode == "resume":
         cmd += ["--resume", resume_id]
-    cmd += ["--pass-session-id", "-z", f"@file:{run_dir / 'prompt.txt'}"]
+    cmd += ["--pass-session-id", "--source", "profile-delegate"]
     env = child_environment(depth)
 
     with acquire_concurrency_slot() as slot:
@@ -771,6 +784,8 @@ def delegate_profile(
 
     stdout = tail_text(run_dir / "stdout.txt", run_meta["stdout_limit"])
     stderr = tail_text(run_dir / "stderr.txt", run_meta["stderr_limit"])
+    footer_session_id = extract_session_id_footer(stdout)
+    parse_stdout = strip_session_id_footer(stdout)
 
     if timed_out:
         result = {
@@ -785,8 +800,8 @@ def delegate_profile(
         final_status = "timed_out"
         error_code = "timeout"
     else:
-        parsed = extract_json_object(stdout)
-        result = normalize_result(parsed, str(run_dir / "stdout.txt"), raw_output=stdout)
+        parsed = extract_json_object(parse_stdout)
+        result = normalize_result(parsed, str(run_dir / "stdout.txt"), raw_output=parse_stdout)
         error_code = result.get("error_code") if isinstance(result.get("error_code"), str) else None
         if exit_code != 0:
             result["status"] = "failed"
@@ -803,14 +818,15 @@ def delegate_profile(
             error_code = "nonzero_exit"
         final_status = "completed" if exit_code == 0 else "failed"
 
-    child_session_id = resume_id if mode == "resume" else extract_session_id(result)
+    child_session_id = resume_id if mode == "resume" else footer_session_id
     rename_meta = {"session_renamed": False}
     if mode == "new" and final_status == "completed":
         try:
             rename_meta = rename_session(hermes_bin, validated.canonical, child_session_id, title_text, cwd, env)
         except Exception as exc:
             rename_meta = {"session_renamed": False, "rename_error": f"{type(exc).__name__}: {exc}"}
-    result.setdefault("session_id", child_session_id)
+    if child_session_id:
+        result["session_id"] = child_session_id
 
     json_safe_write(run_dir / "result.json", result)
     status.update(
