@@ -1,4 +1,4 @@
-"""Profile Delegate smoke helper. Usage: python cli_smoke.py --profile reviewer --task 'Return JSON'."""
+"""Profile Delegate smoke helper. Usage: python cli_smoke.py --profile reviewer --session-title smoke --task 'Return JSON'."""
 from __future__ import annotations
 
 import argparse
@@ -18,6 +18,9 @@ def main() -> int:
     parser.add_argument("--profile", required=True)
     parser.add_argument("--task", required=True)
     parser.add_argument("--context", default="")
+    parser.add_argument("--session-title", required=True)
+    parser.add_argument("--session-mode", choices=["new", "resume"], default="new")
+    parser.add_argument("--session-id", default="")
     parser.add_argument("--workdir", default="")
     parser.add_argument("--timeout-seconds", type=int, default=240)
     args = parser.parse_args()
@@ -27,6 +30,9 @@ def main() -> int:
         context=args.context,
         timeout_seconds=args.timeout_seconds,
         workdir=args.workdir,
+        session_title=args.session_title,
+        session_mode=args.session_mode,
+        session_id=args.session_id,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("success") else 1

@@ -75,11 +75,15 @@ def test_plugin_registers_tools():
     first = next(call for call in calls if call["name"] == "profile_delegate")
     assert first["toolset"] == "delegation"
     assert first["emoji"] == "🤝"
-    assert first["schema"]["parameters"]["required"] == ["profile", "task"]
+    assert first["schema"]["parameters"]["required"] == ["profile", "task", "session_title"]
+    props = first["schema"]["parameters"]["properties"]
+    assert "session_title" in props
+    assert props["session_mode"]["enum"] == ["new", "resume"]
+    assert "session_id" in props
 
 
 def test_handler_validation_error_json():
-    data = json.loads(plugin._handler({"profile": "", "task": "x"}))
+    data = json.loads(plugin._handler({"profile": "", "task": "x", "session_title": "smoke"}))
     assert data["success"] is False
     assert data["status"] == "failed"
     assert data["error_code"] == "validation_error"
@@ -97,7 +101,7 @@ def test_handler_requires_profile_policy_by_default(tmp_path, monkeypatch):
         return core.ValidatedProfile(profile, profile, str(tmp_path / profile))
 
     monkeypatch.setattr(core, "validate_profile", fake_validate)
-    data = json.loads(plugin._handler({"profile": "reviewer", "task": "x"}))
+    data = json.loads(plugin._handler({"profile": "reviewer", "task": "x", "session_title": "smoke"}))
     assert data["success"] is False
     assert data["error_code"] == "profile_policy_required"
 
@@ -181,9 +185,9 @@ def test_concurrency_limit(tmp_path, monkeypatch):
             raise AssertionError("expected concurrency_limit")
 
 
-def test_profile_delegate_preview_includes_profile_and_task():
-    preview = plugin._profile_delegate_preview({"profile": "reviewer", "task": "Review the plan for risks and return JSON."})
-    assert preview == "to reviewer: Review the plan for risks and return JSON."
+def test_profile_delegate_preview_uses_title():
+    preview = plugin._profile_delegate_preview({"profile": "reviewer", "session_title": "review plan riesgos", "task": "Review the plan for risks and return JSON."})
+    assert preview == "to reviewer: review plan riesgos"
 
 
 def test_profile_delegate_preview_truncates_task():
@@ -212,10 +216,12 @@ def test_delegate_uses_prompt_file_not_raw_prompt_in_argv(tmp_path, monkeypatch)
         return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 74, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
-    result = core.delegate_profile("reviewer", "PRIVATE TASK TEXT")
+    result = core.delegate_profile("reviewer", "PRIVATE TASK TEXT", session_title="private task")
     assert result["success"] is True
-    assert seen["cmd"][:4] == ["/usr/bin/hermes", "-p", "reviewer", "-z"]
-    assert seen["cmd"][4].startswith("@file:")
+    assert seen["cmd"][:4] == ["/usr/bin/hermes", "-p", "reviewer", "--pass-session-id"]
+    assert seen["cmd"][4] == "-z"
+    assert seen["cmd"][5].startswith("@file:")
+    assert "--resume" not in seen["cmd"]
     assert seen["env"]["PROFILE_DELEGATE_DEPTH"] == "1"
     assert "PRIVATE TASK TEXT" not in " ".join(seen["cmd"])
 
@@ -253,7 +259,7 @@ def test_delegate_reports_truncated_output(tmp_path, monkeypatch):
         return {"exit_code": 0, "timed_out": False, "stdout_truncated": True, "stderr_truncated": False, "stdout_chars": 5, "stderr_chars": 0, "stdout_limit": 5, "stderr_limit": 5}
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
-    result = core.delegate_profile("reviewer", "task")
+    result = core.delegate_profile("reviewer", "task", session_title="smoke")
     assert result["stdout_truncated"] is True
     status = core.profile_delegate_status(result["task_id"])
     assert status["stdout_truncated"] is True
@@ -310,3 +316,104 @@ def test_resolve_run_dir_rejects_bad_task_id(tmp_path, monkeypatch):
         assert exc.code == "validation_error"
     else:
         raise AssertionError("expected validation error")
+
+
+def test_session_title_required_and_truncated():
+    try:
+        core.normalize_session_title("")
+    except core.ProfileDelegateError as exc:
+        assert exc.code == "validation_error"
+    else:
+        raise AssertionError("expected validation_error")
+    assert core.normalize_session_title("x" * 80) == "x" * 50
+
+
+def test_resume_mode_requires_session_id():
+    try:
+        core.validate_session_id("", required=True)
+    except core.ProfileDelegateError as exc:
+        assert exc.code == "validation_error"
+    else:
+        raise AssertionError("expected validation_error")
+    try:
+        core.coerce_session_mode("continue")
+    except core.ProfileDelegateError as exc:
+        assert exc.code == "validation_error"
+    else:
+        raise AssertionError("expected validation_error")
+
+
+def test_delegate_resume_uses_resume_flag_and_skips_rename(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
+    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    seen = {}
+
+    def fake_run_capped(cmd, **kwargs):
+        seen["cmd"] = cmd
+        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[],"session_id":"sid123"}')
+        core.text_safe_write(kwargs["stderr_path"], "")
+        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 92, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
+    monkeypatch.setattr(core, "rename_session", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not rename resume")))
+    result = core.delegate_profile("reviewer", "task", session_title="seguir tests", session_mode="resume", session_id="sid123")
+    assert result["success"] is True
+    assert "--resume" in seen["cmd"]
+    assert seen["cmd"][seen["cmd"].index("--resume") + 1] == "sid123"
+    assert "--pass-session-id" in seen["cmd"]
+    assert result["session_renamed"] is False
+
+
+def test_delegate_new_renames_when_session_id_present(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
+    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    renamed = {}
+
+    def fake_run_capped(cmd, **kwargs):
+        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[],"session_id":"sid999"}')
+        core.text_safe_write(kwargs["stderr_path"], "")
+        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 92, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+
+    def fake_rename(hermes_bin, profile, session_id, title, cwd, env, timeout=30):
+        renamed.update({"profile": profile, "session_id": session_id, "title": title})
+        return {"session_renamed": True, "rename_exit_code": 0, "rename_error": None}
+
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
+    monkeypatch.setattr(core, "rename_session", fake_rename)
+    result = core.delegate_profile("reviewer", "task", session_title="x" * 80)
+    assert result["success"] is True
+    assert result["child_session_id"] == "sid999"
+    assert result["session_title"] == "x" * 50
+    assert result["session_renamed"] is True
+    assert renamed == {"profile": "reviewer", "session_id": "sid999", "title": "x" * 50}
+
+
+def test_delegate_new_missing_session_id_keeps_success_without_rename(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
+    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+
+    def fake_run_capped(cmd, **kwargs):
+        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
+        core.text_safe_write(kwargs["stderr_path"], "")
+        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 74, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
+    result = core.delegate_profile("reviewer", "task", session_title="smoke")
+    assert result["success"] is True
+    assert result["session_renamed"] is False
+    assert result["rename_error"] == "child_session_id_missing"

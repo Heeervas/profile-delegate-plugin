@@ -25,11 +25,14 @@ MAX_TIMEOUT_SECONDS = 900
 MAX_TASK_CHARS = 30_000
 MAX_CONTEXT_CHARS = 60_000
 MAX_OUTPUT_CONTRACT_CHARS = 8_000
+MAX_SESSION_TITLE_CHARS = 50
+MAX_SESSION_ID_CHARS = 200
 DEFAULT_MAX_STDOUT_CHARS = 200_000
 DEFAULT_MAX_STDERR_CHARS = 100_000
 DEFAULT_MAX_DEPTH = 1
 DEFAULT_MAX_CONCURRENT = 1
 VALID_RESULT_STATUSES = {"ok", "blocked", "failed"}
+VALID_SESSION_MODES = {"new", "resume"}
 TRUTHY = {"1", "true", "yes", "on"}
 
 
@@ -366,6 +369,29 @@ def enforce_workdir_policy(cwd: Path, explicit_workdir: bool) -> None:
     )
 
 
+def normalize_session_title(value: Any) -> str:
+    title = " ".join(str(value or "").split())
+    if not title:
+        raise ProfileDelegateError("session_title is required", "validation_error")
+    return title[:MAX_SESSION_TITLE_CHARS]
+
+
+def coerce_session_mode(value: Any) -> str:
+    mode = str(value or "new").strip().lower()
+    if mode not in VALID_SESSION_MODES:
+        raise ProfileDelegateError("session_mode must be 'new' or 'resume'", "validation_error")
+    return mode
+
+
+def validate_session_id(value: Any, required: bool = False) -> str:
+    text = bounded_text("session_id", value, MAX_SESSION_ID_CHARS).strip()
+    if required and not text:
+        raise ProfileDelegateError("session_id is required when session_mode='resume'", "validation_error")
+    if text and not re.fullmatch(r"[A-Za-z0-9_.:@/+\-= ]{1,200}", text):
+        raise ProfileDelegateError("session_id contains unsupported characters", "validation_error")
+    return text
+
+
 def resolve_workdir(workdir: str = "") -> Path:
     raw = (workdir or "").strip()
     explicit = bool(raw)
@@ -499,6 +525,7 @@ Rules:
 - Do not include markdown outside JSON.
 - If blocked, set status="blocked" and explain exactly what is needed.
 - Preserve your profile's normal policy and tool judgment.
+- Your session id is available in your system prompt because --pass-session-id is used. Include it in the JSON as "session_id" when possible.
 
 Task:
 {task.strip()}
@@ -620,6 +647,26 @@ def base_paths(run_dir: Path) -> Dict[str, str]:
     }
 
 
+def extract_session_id(result: Dict[str, Any]) -> str:
+    for key in ("session_id", "child_session_id"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def rename_session(hermes_bin: str, profile: str, session_id: str, title: str, cwd: Path, env: Dict[str, str], timeout: int = 30) -> Dict[str, Any]:
+    if not session_id:
+        return {"session_renamed": False, "rename_error": "child_session_id_missing"}
+    cmd = [hermes_bin, "-p", profile, "sessions", "rename", session_id, title]
+    completed = subprocess.run(cmd, cwd=str(cwd), env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    return {
+        "session_renamed": completed.returncode == 0,
+        "rename_exit_code": completed.returncode,
+        "rename_error": None if completed.returncode == 0 else (completed.stderr or completed.stdout).strip()[:500],
+    }
+
+
 def child_environment(parent_depth: int) -> Dict[str, str]:
     env = os.environ.copy()
     env["PROFILE_DELEGATE_DEPTH"] = str(parent_depth + 1)
@@ -633,6 +680,9 @@ def delegate_profile(
     timeout_seconds: Any = DEFAULT_TIMEOUT_SECONDS,
     output_contract: str = "",
     workdir: str = "",
+    session_title: str = "",
+    session_mode: str = "new",
+    session_id: str = "",
 ) -> Dict[str, Any]:
     depth, max_depth = enforce_depth_policy()
     validated = validate_profile(profile)
@@ -641,6 +691,9 @@ def delegate_profile(
         raise ProfileDelegateError("task must be non-empty", "validation_error")
     context_text = bounded_text("context", context, MAX_CONTEXT_CHARS)
     contract_text = bounded_text("output_contract", output_contract, MAX_OUTPUT_CONTRACT_CHARS)
+    title_text = normalize_session_title(session_title)
+    mode = coerce_session_mode(session_mode)
+    resume_id = validate_session_id(session_id, required=(mode == "resume"))
     timeout = coerce_timeout(timeout_seconds)
     cwd = resolve_workdir(workdir)
     hermes_bin = resolve_hermes_bin()
@@ -662,6 +715,9 @@ def delegate_profile(
         "task_chars": len(task_text),
         "context_chars": len(context_text),
         "output_contract_chars": len(contract_text),
+        "session_title": title_text,
+        "session_mode": mode,
+        "requested_session_id": resume_id,
         "runs_root": str(get_runs_root()),
         "hermes_bin": hermes_bin,
         "delegate_depth": depth,
@@ -684,7 +740,10 @@ def delegate_profile(
     # Pass the delegated prompt by file reference instead of argv. The argv is
     # visible to local process listings on many systems; prompt text may contain
     # private task context. Hermes expands @file:<path> inside the child process.
-    cmd = [hermes_bin, "-p", validated.canonical, "-z", f"@file:{run_dir / 'prompt.txt'}"]
+    cmd = [hermes_bin, "-p", validated.canonical]
+    if mode == "resume":
+        cmd += ["--resume", resume_id]
+    cmd += ["--pass-session-id", "-z", f"@file:{run_dir / 'prompt.txt'}"]
     env = child_environment(depth)
 
     with acquire_concurrency_slot() as slot:
@@ -735,6 +794,15 @@ def delegate_profile(
             error_code = "nonzero_exit"
         final_status = "completed" if exit_code == 0 else "failed"
 
+    child_session_id = resume_id if mode == "resume" else extract_session_id(result)
+    rename_meta = {"session_renamed": False}
+    if mode == "new" and final_status == "completed":
+        try:
+            rename_meta = rename_session(hermes_bin, validated.canonical, child_session_id, title_text, cwd, env)
+        except Exception as exc:
+            rename_meta = {"session_renamed": False, "rename_error": f"{type(exc).__name__}: {exc}"}
+    result.setdefault("session_id", child_session_id)
+
     json_safe_write(run_dir / "result.json", result)
     status.update(
         {
@@ -749,6 +817,8 @@ def delegate_profile(
             "stderr_chars": run_meta.get("stderr_chars"),
             "stdout_limit": run_meta.get("stdout_limit"),
             "stderr_limit": run_meta.get("stderr_limit"),
+            "child_session_id": child_session_id,
+            **rename_meta,
         }
     )
     json_safe_write(run_dir / "status.json", status)
@@ -760,6 +830,11 @@ def delegate_profile(
         "profile": validated.canonical,
         "status": final_status,
         "error_code": error_code,
+        "session_title": title_text,
+        "session_mode": mode,
+        "requested_session_id": resume_id,
+        "child_session_id": child_session_id,
+        **rename_meta,
         "result": result,
         "paths": base_paths(run_dir),
         "exit_code": exit_code,

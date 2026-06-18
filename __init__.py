@@ -32,7 +32,7 @@ except ImportError:  # direct import / pytest from plugin directory
 TOOL_DESCRIPTION = (
     "Delegate a bounded task to another Hermes profile using that profile's normal context, memory, rules, and tool defaults. "
     "Use this instead of Kanban for small specialist jobs like review, inspection, drafting, or verification. "
-    "Synchronous MVP: no resumable sessions and no parent approval brokering. "
+    "Supports fresh one-shot runs or explicit target-profile session resume; no parent approval brokering. "
     "Caller chooses what context to pass; prefer compact summaries and artifact paths over giant transcript dumps. "
     "The target profile's policy/tool permissions apply. Requires PROFILE_DELEGATE_ALLOWED_PROFILES unless explicitly configured to allow all. "
     "Returns compact JSON plus local run artifact paths."
@@ -53,6 +53,21 @@ def _schema() -> Dict[str, Any]:
                 "task": {
                     "type": "string",
                     "description": "Self-contained bounded task for the target profile. Be explicit about success criteria.",
+                },
+                "session_title": {
+                    "type": "string",
+                    "description": "Required short title for this delegated session/run, max 50 chars. If longer, it is truncated. Broken English or Spanish shorthand is fine, e.g. 'seguir tests builder' or 'review plan riesgos'.",
+                },
+                "session_mode": {
+                    "type": "string",
+                    "enum": ["new", "resume"],
+                    "description": "Start a fresh target-profile session or resume an explicit target-profile session_id. Default: new.",
+                    "default": "new",
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Target-profile Hermes session id to resume when session_mode='resume'. Use `hermes -p <profile> sessions list` to find it.",
+                    "default": "",
                 },
                 "context": {
                     "type": "string",
@@ -77,7 +92,7 @@ def _schema() -> Dict[str, Any]:
                     "default": "",
                 },
             },
-            "required": ["profile", "task"],
+            "required": ["profile", "task", "session_title"],
             "additionalProperties": False,
         },
     }
@@ -144,6 +159,9 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
             timeout_seconds=payload.get("timeout_seconds", 240),
             output_contract=payload.get("output_contract", ""),
             workdir=payload.get("workdir", ""),
+            session_title=payload.get("session_title", ""),
+            session_mode=payload.get("session_mode", "new"),
+            session_id=payload.get("session_id", ""),
         )
     except ProfileDelegateError as exc:
         result = _error_result(exc)
@@ -194,7 +212,7 @@ def _oneline(text: str) -> str:
 
 def _profile_delegate_preview(args: Dict[str, Any], max_len: int | None = None) -> str:
     profile = _oneline(args.get("profile") or "?")
-    task = _oneline(args.get("task") or "")
+    task = _oneline(args.get("session_title") or args.get("task") or "")
     if max_len is None or max_len <= 0:
         task_budget = 96
     else:

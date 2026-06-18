@@ -37,7 +37,8 @@ Example uses:
 
 - Not a security sandbox. Profiles isolate context/state, not operating-system permissions.
 - Not a durable profile message bus.
-- Not resumable conversations.
+- Supports explicit target-profile session resume via `session_mode: "resume"` and `session_id`.
+- Does not auto-discover or manage session continuity keys yet.
 - Not async/background delegation yet.
 - Not approval brokering between parent and target profile.
 - Not safe for untrusted users without explicit policy configuration.
@@ -132,6 +133,9 @@ Input:
 {
   "profile": "reviewer",
   "task": "Review this plan and return the top risks.",
+  "session_title": "review plan riesgos",
+  "session_mode": "new",
+  "session_id": "",
   "context": "Optional compact context, paths, artifacts, or summary.",
   "timeout_seconds": 240,
   "output_contract": "Optional extra output instructions.",
@@ -143,6 +147,8 @@ Notes:
 
 - `profile` must exist locally and pass the allowlist policy.
 - `task` should be self-contained.
+- `session_title` is required, truncated to 50 chars, and used to rename new sessions when the child returns `session_id`. Short Spanish/broken-English shorthand is fine.
+- `session_mode` defaults to `new`; use `resume` with `session_id` to continue a target-profile session. Find ids with `hermes -p <profile> sessions list`.
 - `context` is caller-selected. Keep it compact; pass paths and summaries instead of dumping whole transcripts.
 - `workdir` defaults to the current process working directory.
 - Explicit `workdir` values require `PROFILE_DELEGATE_ALLOWED_WORKDIRS`.
@@ -284,7 +290,7 @@ Optional local smoke:
 
 ```bash
 PROFILE_DELEGATE_ALLOWED_PROFILES=reviewer \
-python cli_smoke.py --profile reviewer --task 'Return {"status":"ok","summary":"smoke","artifacts":[],"errors":[],"next_steps":[]}'
+python cli_smoke.py --profile reviewer --session-title smoke --task 'Return {"status":"ok","summary":"smoke","artifacts":[],"errors":[],"next_steps":[],"session_id":"<your session id>"}'
 ```
 
 Secret scan before publishing:
