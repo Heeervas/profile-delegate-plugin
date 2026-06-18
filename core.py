@@ -118,11 +118,20 @@ def get_locks_root() -> Path:
     return get_hermes_home_path() / "profile_delegate" / "locks"
 
 
+def chmod_best_effort(path: Path, mode: int) -> None:
+    try:
+        os.chmod(path, mode)
+    except PermissionError:
+        # Existing shared runtime dirs may be group-writable but owned by the
+        # host user. Writing can still be valid even when chmod is forbidden.
+        pass
+
+
 def json_safe_write(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.chmod(tmp, 0o600)
+    chmod_best_effort(tmp, 0o600)
     tmp.replace(path)
 
 
@@ -149,7 +158,7 @@ def ensure_text(value: Any) -> str:
 def text_safe_write(path: Path, text: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.write_text(ensure_text(text), encoding="utf-8")
-    os.chmod(path, 0o600)
+    chmod_best_effort(path, 0o600)
 
 
 def tail_text(path: Path, max_chars: int = 4000) -> str:
@@ -246,11 +255,11 @@ def acquire_concurrency_slot() -> ConcurrencySlot:
 
     root = get_locks_root()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(root, 0o700)
+    chmod_best_effort(root, 0o700)
     for slot in range(max_concurrent):
         path = root / f"slot_{slot}.lock"
         handle = path.open("a+", encoding="utf-8")
-        os.chmod(path, 0o600)
+        chmod_best_effort(path, 0o600)
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             handle.seek(0)
@@ -492,8 +501,8 @@ def run_capped_subprocess(cmd: List[str], cwd: Path, env: Dict[str, str], timeou
         else:
             exit_code = proc.wait(timeout=max(1, int(deadline - time.monotonic()) + 1))
 
-    os.chmod(stdout_path, 0o600)
-    os.chmod(stderr_path, 0o600)
+    chmod_best_effort(stdout_path, 0o600)
+    chmod_best_effort(stderr_path, 0o600)
     return {
         "exit_code": exit_code,
         "timed_out": timed_out,
@@ -701,7 +710,7 @@ def delegate_profile(
     task_id = make_task_id()
     run_dir = get_runs_root() / task_id
     run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
-    os.chmod(run_dir, 0o700)
+    chmod_best_effort(run_dir, 0o700)
 
     prompt = build_prompt(task_text, context_text, contract_text)
     request = {

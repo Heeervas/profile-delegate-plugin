@@ -417,3 +417,10 @@ def test_delegate_new_missing_session_id_keeps_success_without_rename(tmp_path, 
     assert result["success"] is True
     assert result["session_renamed"] is False
     assert result["rename_error"] == "child_session_id_missing"
+
+
+def test_chmod_best_effort_ignores_permission_error(tmp_path, monkeypatch):
+    path = tmp_path / "x.txt"
+    path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(core.os, "chmod", lambda *a, **k: (_ for _ in ()).throw(PermissionError("nope")))
+    core.chmod_best_effort(path, 0o600)
