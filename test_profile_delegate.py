@@ -89,6 +89,19 @@ def test_handler_validation_error_json():
     assert data["error_code"] == "validation_error"
 
 
+def test_handler_tool_args_win_over_internal_kwargs(monkeypatch):
+    seen = {}
+
+    def fake_delegate(**kwargs):
+        seen.update(kwargs)
+        return {"success": True}
+
+    monkeypatch.setattr(plugin, "delegate_profile", fake_delegate)
+    data = json.loads(plugin._handler({"profile": "reviewer", "task": "x", "session_title": "smoke", "session_mode": "new", "session_id": ""}, session_id="caller-session"))
+    assert data["success"] is True
+    assert seen["session_id"] == ""
+
+
 def test_handler_requires_profile_policy_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("PROFILE_DELEGATE_ALLOWED_PROFILES", raising=False)
     monkeypatch.delenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", raising=False)

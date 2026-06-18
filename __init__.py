@@ -150,7 +150,10 @@ def _error_result(exc: Exception) -> Dict[str, Any]:
 
 def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     payload = args if isinstance(args, dict) else {}
-    payload = {**payload, **kwargs}
+    # Hermes may pass internal kwargs such as session_id/task_id to handlers.
+    # Model/tool arguments must win so profile_delegate.session_id is not
+    # accidentally replaced by the caller's own Hermes session id.
+    payload = {**kwargs, **payload}
     try:
         result = delegate_profile(
             profile=payload.get("profile", ""),
