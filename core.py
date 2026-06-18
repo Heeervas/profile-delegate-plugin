@@ -784,7 +784,9 @@ def delegate_profile(
 
     stdout = tail_text(run_dir / "stdout.txt", run_meta["stdout_limit"])
     stderr = tail_text(run_dir / "stderr.txt", run_meta["stderr_limit"])
-    footer_session_id = extract_session_id_footer(stdout)
+    stdout_session_id = extract_session_id_footer(stdout)
+    stderr_session_id = extract_session_id_footer(stderr)
+    footer_session_id = stdout_session_id or stderr_session_id
     parse_stdout = strip_session_id_footer(stdout)
 
     if timed_out:

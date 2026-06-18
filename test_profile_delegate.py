@@ -49,6 +49,27 @@ def test_session_id_footer_helpers_only_strip_final_footer():
     assert core.strip_session_id_footer(no_footer) == no_footer
 
 
+def test_delegate_reads_session_footer_from_stderr(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
+    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+
+    def fake_run_capped(cmd, **kwargs):
+        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
+        core.text_safe_write(kwargs["stderr_path"], 'session_id: sid_stderr')
+        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 74, "stderr_chars": 22, "stdout_limit": 200000, "stderr_limit": 100000}
+
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
+    monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True, "rename_exit_code": 0, "rename_error": None})
+    result = core.delegate_profile("reviewer", "task", session_title="stderr sid")
+    assert result["child_session_id"] == "sid_stderr"
+    assert result["session_renamed"] is True
+
+
 def test_normalize_result_parse_failure_coerces_plain_text():
     result = core.normalize_result(None, "/tmp/stdout.txt", raw_output="The file is a profile_delegate smoke-test prompt.\n\nPath: /tmp/prompt.txt")
     assert result["status"] == "ok"
