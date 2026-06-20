@@ -1,6 +1,6 @@
 # Profile Delegate 🤝
 
-Version: `1.0.1`
+Version: `1.1.0`
 
 > Stable local-power-user Hermes Agent plugin. It is **not a sandbox** and should be configured deliberately before broad use.
 
@@ -29,6 +29,7 @@ Example uses:
 - Defensive JSON extraction and schema normalization.
 - Cheap local fallback for useful non-JSON child output; no automatic profile retry on parse failure.
 - Private local run artifacts: request, prompt, status, stdout, stderr, result.
+- Async background mode with best-effort notify-on-complete through Hermes' native async-delegation completion queue.
 - Stable error codes for common failures.
 - Tool preview patch so users see the target profile and one-line task summary.
 - Inspection tools: status, list, prune.
@@ -39,7 +40,7 @@ Example uses:
 - Not a durable profile message bus.
 - Supports explicit target-profile session resume via `session_mode: "resume"` and `session_id`.
 - Does not auto-discover or manage session continuity keys yet.
-- Not async/background delegation yet.
+- Not a guaranteed delivery system; async notifications are best-effort and `profile_delegate_status` remains the durable source of truth.
 - Not approval brokering between parent and target profile.
 - Not safe for untrusted users without explicit policy configuration.
 
@@ -113,6 +114,8 @@ export PROFILE_DELEGATE_ALLOW_ALL_PROFILES=true
 | `PROFILE_DELEGATE_MAX_DEPTH` | `1` | Maximum nested delegation depth. `1` allows caller → target, but blocks target → another target. |
 | `PROFILE_DELEGATE_DEPTH` | `0` | Internal depth counter passed to child Hermes processes. Do not set manually except for tests. |
 | `PROFILE_DELEGATE_MAX_CONCURRENT` | `1` | Number of concurrent profile delegation subprocesses allowed per Hermes home. |
+| `PROFILE_DELEGATE_MAX_ASYNC` | `2` | Number of background `profile_delegate` runs allowed in the current gateway/CLI process. |
+| `PROFILE_DELEGATE_NOTIFY_MAX_SUMMARY_CHARS` | `4000` | Maximum summary size sent through notify-on-complete events. |
 | `PROFILE_DELEGATE_MAX_STDOUT_CHARS` | `200000` | Maximum stdout characters stored and parsed from the delegated Hermes process. Extra output is truncated. |
 | `PROFILE_DELEGATE_MAX_STDERR_CHARS` | `100000` | Maximum stderr characters stored from the delegated Hermes process. Extra output is truncated. |
 | `PROFILE_DELEGATE_HERMES_BIN` | resolved from `PATH` | Absolute Hermes binary override. If unset, the plugin resolves `hermes` with `shutil.which()` and uses the absolute path. |
@@ -139,7 +142,9 @@ Input:
   "context": "Optional compact context, paths, artifacts, or summary.",
   "timeout_seconds": 240,
   "output_contract": "Optional extra output instructions.",
-  "workdir": ""
+  "workdir": "",
+  "background": false,
+  "notify_on_complete": true
 }
 ```
 
@@ -153,6 +158,8 @@ Notes:
 - `workdir` defaults to the current process working directory.
 - Explicit `workdir` values require `PROFILE_DELEGATE_ALLOWED_WORKDIRS`.
 - `timeout_seconds` is synchronous and bounded from 10 to 900 seconds.
+- `background=true` returns immediately with `mode: "async"`, `task_id`, and run artifact paths; the delegated run continues in a daemon worker thread inside the current Hermes process.
+- `notify_on_complete=true` queues a native Hermes `async_delegation` completion event back to the originating gateway session when the background run finishes. This requires a fresh gateway/CLI process after plugin upgrade so the new schema/code is loaded.
 
 Default result requested from the target profile:
 

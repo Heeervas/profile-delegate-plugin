@@ -9,6 +9,7 @@ import shutil
 import string
 import selectors
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,7 @@ DEFAULT_MAX_STDOUT_CHARS = 200_000
 DEFAULT_MAX_STDERR_CHARS = 100_000
 DEFAULT_MAX_DEPTH = 1
 DEFAULT_MAX_CONCURRENT = 1
+DEFAULT_MAX_ASYNC = 2
 VALID_RESULT_STATUSES = {"ok", "blocked", "failed"}
 VALID_SESSION_MODES = {"new", "resume"}
 TRUTHY = {"1", "true", "yes", "on"}
@@ -694,75 +696,89 @@ def child_environment(parent_depth: int) -> Dict[str, str]:
     return env
 
 
-def delegate_profile(
-    profile: str,
-    task: str,
-    context: str = "",
-    timeout_seconds: Any = DEFAULT_TIMEOUT_SECONDS,
-    output_contract: str = "",
-    workdir: str = "",
-    session_title: str = "",
-    session_mode: str = "new",
-    session_id: str = "",
-) -> Dict[str, Any]:
-    depth, max_depth = enforce_depth_policy()
-    validated = validate_profile(profile)
-    task_text = bounded_text("task", task, MAX_TASK_CHARS).strip()
-    if not task_text:
-        raise ProfileDelegateError("task must be non-empty", "validation_error")
-    context_text = bounded_text("context", context, MAX_CONTEXT_CHARS)
-    contract_text = bounded_text("output_contract", output_contract, MAX_OUTPUT_CONTRACT_CHARS)
-    title_text = normalize_session_title(session_title)
-    mode = coerce_session_mode(session_mode)
-    resume_id = validate_session_id(session_id, required=(mode == "resume"))
-    timeout = coerce_timeout(timeout_seconds)
-    cwd = resolve_workdir(workdir)
-    hermes_bin = resolve_hermes_bin()
-
-    task_id = make_task_id()
-    run_dir = get_runs_root() / task_id
-    run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
-    chmod_best_effort(run_dir, 0o700)
-
-    prompt = build_prompt(task_text, context_text, contract_text)
-    request = {
-        "task_id": task_id,
-        "profile": validated.canonical,
-        "requested_profile": validated.requested,
-        "profile_home": validated.home,
-        "created_at": now_iso(),
-        "timeout_seconds": timeout,
-        "workdir": str(cwd),
-        "task_chars": len(task_text),
-        "context_chars": len(context_text),
-        "output_contract_chars": len(contract_text),
-        "session_title": title_text,
-        "session_mode": mode,
-        "requested_session_id": resume_id,
-        "runs_root": str(get_runs_root()),
-        "hermes_bin": hermes_bin,
-        "delegate_depth": depth,
-        "delegate_max_depth": max_depth,
+def _make_profile_delegate_summary(result: Dict[str, Any], paths: Dict[str, str]) -> str:
+    payload = {
+        "status": result.get("status"),
+        "summary": result.get("summary", ""),
+        "artifacts": result.get("artifacts", []),
+        "errors": result.get("errors", []),
+        "next_steps": result.get("next_steps", []),
+        "session_id": result.get("session_id", ""),
+        "paths": paths,
     }
-    status = {
-        **request,
-        "status": "running",
-        "started_at": now_iso(),
-        "ended_at": None,
-        "exit_code": None,
-        "error_code": None,
-        "concurrency_slot": None,
-    }
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    limit = env_int("PROFILE_DELEGATE_NOTIFY_MAX_SUMMARY_CHARS", 4000, 500, 50000)
+    return text[:limit] + ("\n…[truncated]" if len(text) > limit else "")
 
-    json_safe_write(run_dir / "request.json", {**request, "task": task_text, "context": context_text, "output_contract": contract_text})
-    text_safe_write(run_dir / "prompt.txt", prompt)
-    json_safe_write(run_dir / "status.json", status)
 
-    # Pass the delegated prompt by file reference instead of argv. The argv is
-    # visible to local process listings on many systems; prompt text may contain
-    # private task context. chat -q -Q preserves one-shot behavior while printing
-    # a reliable session_id footer when --pass-session-id is used.
-    cmd = [hermes_bin, "-p", validated.canonical, "chat", "-q", f"@file:{run_dir / 'prompt.txt'}", "-Q"]
+def _push_profile_delegate_completion(run_dir: Path, final: Dict[str, Any]) -> None:
+    """Best-effort notify-on-complete via Hermes' native async-delegation queue."""
+    try:
+        status = read_json_file(run_dir / "status.json")
+        request = read_json_file(run_dir / "request.json")
+        if not bool(request.get("notify_on_complete", True)):
+            status["notification_status"] = "disabled"
+            json_safe_write(run_dir / "status.json", status)
+            return
+        session_key = str(request.get("origin_session_key") or "").strip()
+        if not session_key:
+            status["notification_status"] = "skipped_no_origin_session_key"
+            json_safe_write(run_dir / "status.json", status)
+            return
+        result = final.get("result") if isinstance(final.get("result"), dict) else {}
+        paths = final.get("paths") if isinstance(final.get("paths"), dict) else base_paths(run_dir)
+        from tools.process_registry import process_registry
+        completed_at = time.time()
+        dispatched_at = float(request.get("dispatched_at_epoch") or completed_at)
+        evt_status = "completed" if final.get("success") else "error"
+        evt = {
+            "type": "async_delegation",
+            "delegation_id": request.get("task_id", run_dir.name),
+            "session_key": session_key,
+            "goal": f"profile_delegate to {request.get('profile')}: {request.get('session_title')}",
+            "context": (
+                f"Profile Delegate task_id={request.get('task_id', run_dir.name)}; "
+                f"run_dir={run_dir}; session_mode={request.get('session_mode', 'new')}"
+            ),
+            "toolsets": ["profile_delegate"],
+            "role": "profile",
+            "model": request.get("profile"),
+            "status": evt_status,
+            "summary": _make_profile_delegate_summary(result, paths),
+            "error": final.get("error_code") or result.get("error_code"),
+            "api_calls": 0,
+            "duration_seconds": round(completed_at - dispatched_at, 2),
+            "dispatched_at": dispatched_at,
+            "completed_at": completed_at,
+            "exit_reason": final.get("status"),
+        }
+        process_registry.completion_queue.put(evt)
+        status["notified_at"] = now_iso()
+        status["notification_status"] = "queued"
+        json_safe_write(run_dir / "status.json", status)
+    except Exception as exc:
+        try:
+            status = read_json_file(run_dir / "status.json")
+            status["notification_status"] = "failed"
+            status["notification_error"] = f"{type(exc).__name__}: {exc}"[:500]
+            json_safe_write(run_dir / "status.json", status)
+        except Exception:
+            pass
+
+
+def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
+    request = read_json_file(run_dir / "request.json")
+    status = read_json_file(run_dir / "status.json")
+    profile = ensure_text(request.get("profile"))
+    timeout = int(request.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
+    cwd = Path(ensure_text(request.get("workdir"))).resolve()
+    hermes_bin = ensure_text(request.get("hermes_bin"))
+    mode = ensure_text(request.get("session_mode") or "new")
+    resume_id = ensure_text(request.get("requested_session_id") or "")
+    title_text = ensure_text(request.get("session_title") or "")
+    depth = int(request.get("delegate_depth") or 0)
+
+    cmd = [hermes_bin, "-p", profile, "chat", "-q", f"@file:{run_dir / 'prompt.txt'}", "-Q"]
     if mode == "resume":
         cmd += ["--resume", resume_id]
     cmd += ["--pass-session-id", "--source", "profile-delegate"]
@@ -784,9 +800,7 @@ def delegate_profile(
 
     stdout = tail_text(run_dir / "stdout.txt", run_meta["stdout_limit"])
     stderr = tail_text(run_dir / "stderr.txt", run_meta["stderr_limit"])
-    stdout_session_id = extract_session_id_footer(stdout)
-    stderr_session_id = extract_session_id_footer(stderr)
-    footer_session_id = stdout_session_id or stderr_session_id
+    footer_session_id = extract_session_id_footer(stdout) or extract_session_id_footer(stderr)
     parse_stdout = strip_session_id_footer(stdout)
 
     if timed_out:
@@ -824,7 +838,7 @@ def delegate_profile(
     rename_meta = {"session_renamed": False}
     if mode == "new" and final_status == "completed":
         try:
-            rename_meta = rename_session(hermes_bin, validated.canonical, child_session_id, title_text, cwd, env)
+            rename_meta = rename_session(hermes_bin, profile, child_session_id, title_text, cwd, env)
         except Exception as exc:
             rename_meta = {"session_renamed": False, "rename_error": f"{type(exc).__name__}: {exc}"}
     if child_session_id:
@@ -853,8 +867,8 @@ def delegate_profile(
     return {
         "success": final_status == "completed" and result.get("status") not in {"failed"},
         "mode": "sync",
-        "task_id": task_id,
-        "profile": validated.canonical,
+        "task_id": request.get("task_id", run_dir.name),
+        "profile": profile,
         "status": final_status,
         "error_code": error_code,
         "session_title": title_text,
@@ -871,11 +885,183 @@ def delegate_profile(
     }
 
 
+_async_lock = threading.Lock()
+_async_running = 0
+
+
+def _start_background_run(run_dir: Path) -> None:
+    global _async_running
+    max_async = env_int("PROFILE_DELEGATE_MAX_ASYNC", DEFAULT_MAX_ASYNC, 1, 20)
+    with _async_lock:
+        if _async_running >= max_async:
+            raise ProfileDelegateError(
+                f"profile_delegate background capacity reached ({max_async} running)",
+                "async_concurrency_limit",
+            )
+        _async_running += 1
+
+    def _worker() -> None:
+        global _async_running
+        final: Dict[str, Any]
+        try:
+            final = _execute_delegate_run(run_dir)
+            final["mode"] = "async"
+        except Exception as exc:
+            result = {
+                "status": "failed",
+                "summary": f"Profile Delegate background worker failed: {type(exc).__name__}: {exc}",
+                "artifacts": [],
+                "errors": [f"{type(exc).__name__}: {exc}"],
+                "next_steps": [],
+                "structured": True,
+                "error_code": "background_worker_error",
+            }
+            json_safe_write(run_dir / "result.json", result)
+            try:
+                status = read_json_file(run_dir / "status.json")
+            except Exception:
+                status = {"task_id": run_dir.name}
+            status.update({"status": "failed", "ended_at": now_iso(), "error_code": "background_worker_error"})
+            json_safe_write(run_dir / "status.json", status)
+            final = {"success": False, "mode": "async", "task_id": run_dir.name, "status": "failed", "error_code": "background_worker_error", "result": result, "paths": base_paths(run_dir)}
+        try:
+            _push_profile_delegate_completion(run_dir, final)
+        finally:
+            with _async_lock:
+                _async_running = max(0, _async_running - 1)
+
+    thread = threading.Thread(target=_worker, name=f"profile-delegate-{run_dir.name}", daemon=True)
+    thread.start()
+
+
+def delegate_profile(
+    profile: str,
+    task: str,
+    context: str = "",
+    timeout_seconds: Any = DEFAULT_TIMEOUT_SECONDS,
+    output_contract: str = "",
+    workdir: str = "",
+    session_title: str = "",
+    session_mode: str = "new",
+    session_id: str = "",
+    background: bool = False,
+    notify_on_complete: bool = True,
+    origin_session_key: str = "",
+) -> Dict[str, Any]:
+    depth, max_depth = enforce_depth_policy()
+    validated = validate_profile(profile)
+    task_text = bounded_text("task", task, MAX_TASK_CHARS).strip()
+    if not task_text:
+        raise ProfileDelegateError("task must be non-empty", "validation_error")
+    context_text = bounded_text("context", context, MAX_CONTEXT_CHARS)
+    contract_text = bounded_text("output_contract", output_contract, MAX_OUTPUT_CONTRACT_CHARS)
+    title_text = normalize_session_title(session_title)
+    mode = coerce_session_mode(session_mode)
+    resume_id = validate_session_id(session_id, required=(mode == "resume"))
+    timeout = coerce_timeout(timeout_seconds)
+    cwd = resolve_workdir(workdir)
+    hermes_bin = resolve_hermes_bin()
+
+    task_id = make_task_id()
+    run_dir = get_runs_root() / task_id
+    run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+    chmod_best_effort(run_dir, 0o700)
+
+    prompt = build_prompt(task_text, context_text, contract_text)
+    request = {
+        "task_id": task_id,
+        "profile": validated.canonical,
+        "requested_profile": validated.requested,
+        "profile_home": validated.home,
+        "created_at": now_iso(),
+        "dispatched_at_epoch": time.time(),
+        "timeout_seconds": timeout,
+        "workdir": str(cwd),
+        "task_chars": len(task_text),
+        "context_chars": len(context_text),
+        "output_contract_chars": len(contract_text),
+        "session_title": title_text,
+        "session_mode": mode,
+        "requested_session_id": resume_id,
+        "runs_root": str(get_runs_root()),
+        "hermes_bin": hermes_bin,
+        "delegate_depth": depth,
+        "delegate_max_depth": max_depth,
+        "background": bool(background),
+        "notify_on_complete": bool(notify_on_complete),
+        "origin_session_key": origin_session_key or "",
+    }
+    status = {
+        **request,
+        "status": "running",
+        "started_at": now_iso(),
+        "ended_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "concurrency_slot": None,
+        "notified_at": None,
+        "notification_status": None,
+    }
+
+    json_safe_write(run_dir / "request.json", {**request, "task": task_text, "context": context_text, "output_contract": contract_text})
+    text_safe_write(run_dir / "prompt.txt", prompt)
+    json_safe_write(run_dir / "status.json", status)
+    text_safe_write(run_dir / "stdout.txt", "")
+    text_safe_write(run_dir / "stderr.txt", "")
+
+    if background:
+        try:
+            _start_background_run(run_dir)
+        except ProfileDelegateError as exc:
+            status.update({"status": "failed", "ended_at": now_iso(), "error_code": exc.code})
+            json_safe_write(run_dir / "status.json", status)
+            json_safe_write(run_dir / "result.json", {
+                "status": "failed",
+                "summary": str(exc),
+                "artifacts": [],
+                "errors": [exc.code],
+                "next_steps": ["Wait for another background profile_delegate run to finish or raise PROFILE_DELEGATE_MAX_ASYNC."],
+                "structured": True,
+                "error_code": exc.code,
+            })
+            raise
+        except Exception as exc:
+            status.update({"status": "failed", "ended_at": now_iso(), "error_code": "background_start_failed"})
+            json_safe_write(run_dir / "status.json", status)
+            json_safe_write(run_dir / "result.json", {
+                "status": "failed",
+                "summary": f"Failed to start background profile_delegate run: {type(exc).__name__}: {exc}",
+                "artifacts": [],
+                "errors": ["background_start_failed"],
+                "next_steps": [],
+                "structured": True,
+                "error_code": "background_start_failed",
+            })
+            raise ProfileDelegateError(f"failed to start background run: {type(exc).__name__}: {exc}", "background_start_failed") from exc
+        return {
+            "success": True,
+            "mode": "async",
+            "task_id": task_id,
+            "profile": validated.canonical,
+            "status": "running",
+            "error_code": None,
+            "session_title": title_text,
+            "session_mode": mode,
+            "requested_session_id": resume_id,
+            "notify_on_complete": bool(notify_on_complete),
+            "origin_session_key_present": bool(origin_session_key),
+            "paths": base_paths(run_dir),
+        }
+
+    final = _execute_delegate_run(run_dir)
+    final["notify_on_complete"] = False
+    return final
+
 def resolve_run_dir(task_id: str) -> Path:
     if not isinstance(task_id, str) or not task_id.strip():
         raise ProfileDelegateError("task_id must be a non-empty string", "validation_error")
     clean = task_id.strip()
-    if not re.fullmatch(r"pd_\d{8}_\d{6}_[a-z0-9]{6}", clean):
+    if not re.fullmatch(r"pd_\d{8}_\d{6}_[a-z0-9]{6,12}", clean):
         raise ProfileDelegateError("invalid task_id format", "validation_error")
     run_dir = (get_runs_root() / clean).resolve()
     root = get_runs_root().resolve()

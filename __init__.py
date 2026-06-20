@@ -91,6 +91,16 @@ def _schema() -> Dict[str, Any]:
                     "description": "Optional working directory for the delegated Hermes subprocess. Defaults to the current process working directory.",
                     "default": "",
                 },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run the target profile asynchronously and return a task_id immediately. Use this for long-running profile work that should outlive the current turn.",
+                    "default": False,
+                },
+                "notify_on_complete": {
+                    "type": "boolean",
+                    "description": "When background=true, notify the originating chat when the delegated profile finishes. Default true.",
+                    "default": True,
+                },
             },
             "required": ["profile", "task", "session_title"],
             "additionalProperties": False,
@@ -148,6 +158,16 @@ def _error_result(exc: Exception) -> Dict[str, Any]:
     return {"success": False, "error": str(exc), "error_code": code, "status": "failed"}
 
 
+def _current_session_key() -> str:
+    try:
+        from tools.approval import get_current_session_key
+
+        key = get_current_session_key(default="")
+        return key if key != "default" else ""
+    except Exception:
+        return os.environ.get("HERMES_SESSION_KEY", "")
+
+
 def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     payload = args if isinstance(args, dict) else {}
     # Hermes may pass internal kwargs such as session_id/task_id to handlers.
@@ -165,6 +185,9 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
             session_title=payload.get("session_title", ""),
             session_mode=payload.get("session_mode", "new"),
             session_id=payload.get("session_id", ""),
+            background=bool(payload.get("background", False)),
+            notify_on_complete=bool(payload.get("notify_on_complete", True)),
+            origin_session_key=_current_session_key(),
         )
     except ProfileDelegateError as exc:
         result = _error_result(exc)
