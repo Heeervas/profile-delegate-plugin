@@ -1,6 +1,6 @@
 name: profile-delegate
-version: "1.1.0"
-description: "Profile Delegate 🤝: bounded model-callable cross-profile task delegation with async notify-on-complete support and stable safety guardrails."
+version: "1.1.1"
+description: "Profile Delegate 🤝: bounded model-callable cross-profile task delegation with async notify-on-complete support, runtime queue patching, and stable safety guardrails."
 author: Adan
 requires_env: []
 provides_tools:
