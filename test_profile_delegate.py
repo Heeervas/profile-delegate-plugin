@@ -462,29 +462,6 @@ def test_push_profile_delegate_completion_queues_async_event(tmp_path, monkeypat
     assert status["notified_at"]
 
 
-def test_register_installs_queue_patch_when_runtime_exports_process_registry(monkeypatch):
-    calls = []
-
-    class Queue:
-        def put(self, item, *args, **kwargs):
-            calls.append(item)
-
-    class Registry:
-        completion_queue = Queue()
-
-    import types
-    monkeypatch.setitem(sys.modules, "tools.process_registry", types.SimpleNamespace(process_registry=Registry()))
-
-    class Ctx:
-        def register_tool(self, **kwargs):
-            pass
-
-    plugin.register(Ctx())
-    Registry.completion_queue.put({"type": "async_delegation", "delegation_id": "x"})
-    assert calls and calls[0]["type"] == "async_delegation"
-    assert getattr(sys.modules["tools.process_registry"].process_registry, "_profile_delegate_queue_patch", False) is True
-
-
 def test_status_list_and_prune(tmp_path, monkeypatch):
     runs = tmp_path / "runs"
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(runs))

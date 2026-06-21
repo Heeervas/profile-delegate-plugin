@@ -277,44 +277,8 @@ def _install_tool_preview_patch() -> None:
         pass
 
 
-def _install_async_delegation_queue_patch() -> bool:
-    """Try to make async-delegation completions queue-safe without core edits.
-
-    The gateway already has a dedicated async-delegation watcher, so the only
-    safe plugin-side mitigation is to make the event look like a normal queued
-    completion for the busy-session drain when Hermes exposes no dedicated hook.
-    If the runtime does not expose a writable process registry hook, fail closed
-    and keep the plugin's explicit notify-on-complete behavior instead of lying.
-    """
-    if os.getenv("PROFILE_DELEGATE_ENABLE_ASYNC_QUEUE_PATCH", "true").strip().lower() in {"0", "false", "no", "off"}:
-        return False
-    try:
-        from tools.process_registry import process_registry
-    except Exception:
-        return False
-
-    queue = getattr(process_registry, "completion_queue", None)
-    if queue is None or getattr(process_registry, "_profile_delegate_queue_patch", False):
-        return bool(getattr(process_registry, "_profile_delegate_queue_patch", False))
-
-    original_put = getattr(queue, "put", None)
-    if not callable(original_put):
-        return False
-
-    def safe_put(evt, *args, **kwargs):
-        return original_put(evt, *args, **kwargs)
-
-    try:
-        queue.put = safe_put  # type: ignore[assignment]
-        process_registry._profile_delegate_queue_patch = True  # type: ignore[attr-defined]
-        return True
-    except Exception:
-        return False
-
-
 def register(ctx: Any) -> None:
     _install_tool_preview_patch()
-    _install_async_delegation_queue_patch()
     for name, schema, handler, desc in [
         ("profile_delegate", _schema(), _handler, "Profile Delegate 🤝: bounded task delegation to another Hermes profile."),
         ("profile_delegate_status", _status_schema(), _status_handler, "Inspect a Profile Delegate run by task_id."),
