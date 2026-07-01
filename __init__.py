@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional
 
 try:
     from .core import (
+        DEFAULT_TIMEOUT_SECONDS,
+        MAX_TIMEOUT_SECONDS,
         ProfileDelegateError,
         delegate_profile,
         profile_delegate_list,
@@ -21,6 +23,8 @@ except ImportError:  # direct import / pytest from plugin directory
     if plugin_dir not in sys.path:
         sys.path.insert(0, plugin_dir)
     from core import (  # type: ignore[no-redef]
+        DEFAULT_TIMEOUT_SECONDS,
+        MAX_TIMEOUT_SECONDS,
         ProfileDelegateError,
         delegate_profile,
         profile_delegate_list,
@@ -76,10 +80,10 @@ def _schema() -> Dict[str, Any]:
                 },
                 "timeout_seconds": {
                     "type": "integer",
-                    "description": "Synchronous wait limit, 10-900 seconds. On timeout the child process is terminated and a structured timeout result is returned.",
-                    "default": 240,
+                    "description": f"Synchronous wait limit, 10-{MAX_TIMEOUT_SECONDS} seconds. On timeout the child process is terminated and a structured timeout result is returned.",
+                    "default": DEFAULT_TIMEOUT_SECONDS,
                     "minimum": 10,
-                    "maximum": 900,
+                    "maximum": MAX_TIMEOUT_SECONDS,
                 },
                 "output_contract": {
                     "type": "string",
@@ -179,7 +183,7 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
             profile=payload.get("profile", ""),
             task=payload.get("task", ""),
             context=payload.get("context", ""),
-            timeout_seconds=payload.get("timeout_seconds", 240),
+            timeout_seconds=payload.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
             output_contract=payload.get("output_contract", ""),
             workdir=payload.get("workdir", ""),
             session_title=payload.get("session_title", ""),

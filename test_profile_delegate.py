@@ -37,6 +37,78 @@ def test_extract_json_last_object():
     assert obj["summary"] == "final"
 
 
+def test_extract_json_warning_prelude_prefers_outer_envelope_over_nested_map():
+    text = '''⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+{
+  "status": "ok",
+  "summary": "full result",
+  "ssr_status": "READY",
+  "mode": "DESIGN_ONLY",
+  "normalized_input": {"objective": "compare"},
+  "evaluation_design": {
+    "expected_execution_output": {
+      "rating_distribution": {
+        "1": "count_or_share_placeholder",
+        "2": "count_or_share_placeholder",
+        "3": "count_or_share_placeholder",
+        "4": "count_or_share_placeholder",
+        "5": "count_or_share_placeholder"
+      }
+    }
+  },
+  "artifacts": [],
+  "errors": [],
+  "next_steps": []
+}
+'''
+    obj = core.extract_json_object(text)
+    assert isinstance(obj, dict)
+    assert obj["summary"] == "full result"
+    assert obj["ssr_status"] == "READY"
+    assert "1" not in obj
+
+
+def test_extract_json_multiple_objects_prefers_stronger_final_envelope():
+    text = 'progress {"status":"ok","summary":"partial"}\nfinal {"status":"ok","summary":"final","artifacts":[],"errors":[],"next_steps":[]}'
+    obj = core.extract_json_object(text)
+    assert isinstance(obj, dict)
+    assert obj["summary"] == "final"
+
+
+def test_extract_json_ignores_non_envelope_nested_object():
+    text = 'noise {"1":"placeholder","2":"placeholder"}'
+    assert core.extract_json_object(text) is None
+
+
+def test_delegate_parses_warning_prefixed_stdout_outer_envelope(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
+    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+
+    stdout = '''⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+{"status":"ok","summary":"outer","ssr_status":"READY","mode":"DESIGN_ONLY","normalized_input":{},"evaluation_design":{"rating_distribution":{"1":"count_or_share_placeholder","2":"count_or_share_placeholder"}},"artifacts":[],"errors":[],"next_steps":[]}
+
+session_id: sid_outer'''
+
+    def fake_run_capped(cmd, **kwargs):
+        core.text_safe_write(kwargs["stdout_path"], stdout)
+        core.text_safe_write(kwargs["stderr_path"], "")
+        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": len(stdout), "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
+    monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True, "rename_exit_code": 0, "rename_error": None})
+    result = core.delegate_profile("ssr_synthetic_consumer", "task", session_title="warning stdout")
+    assert result["success"] is True
+    assert result["child_session_id"] == "sid_outer"
+    assert result["result"]["summary"] == "outer"
+    assert result["result"]["ssr_status"] == "READY"
+    assert "1" not in result["result"]
+
+
 def test_session_id_footer_helpers():
     text = 'noise\n{"status":"ok","summary":"x"}\n\nsession_id: 20260618_065934_cd40a6'
     assert core.extract_session_id_footer(text) == "20260618_065934_cd40a6"
@@ -203,6 +275,26 @@ def test_depth_policy(monkeypatch):
         assert exc.code == "recursion_limit"
     else:
         raise AssertionError("expected recursion_limit")
+
+
+def test_timeout_defaults_and_caps():
+    assert core.DEFAULT_TIMEOUT_SECONDS == 1200
+    assert core.MAX_TIMEOUT_SECONDS == 1800
+    assert core.coerce_timeout(None) == 1200
+    assert core.coerce_timeout(1800) == 1800
+    try:
+        core.coerce_timeout(1801)
+    except core.ProfileDelegateError as exc:
+        assert exc.code == "validation_error"
+        assert "<= 1800" in str(exc)
+    else:
+        raise AssertionError("expected validation_error")
+
+
+def test_schema_uses_runtime_timeout_defaults():
+    props = plugin._schema()["parameters"]["properties"]["timeout_seconds"]
+    assert props["default"] == core.DEFAULT_TIMEOUT_SECONDS
+    assert props["maximum"] == core.MAX_TIMEOUT_SECONDS
 
 
 def test_resolve_hermes_bin_uses_absolute_path(monkeypatch):

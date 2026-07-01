@@ -21,8 +21,21 @@ try:  # Unix-only; Hermes currently targets Linux/macOS/WSL for this plugin.
 except Exception:  # pragma: no cover - Windows fallback is conservative.
     fcntl = None  # type: ignore[assignment]
 
-DEFAULT_TIMEOUT_SECONDS = 240
-MAX_TIMEOUT_SECONDS = 900
+def _int_env_at_import(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except Exception:
+        return default
+    if value < minimum or value > maximum:
+        return default
+    return value
+
+
+DEFAULT_TIMEOUT_SECONDS = _int_env_at_import("PROFILE_DELEGATE_DEFAULT_TIMEOUT_SECONDS", 1200, 10, 86_400)
+MAX_TIMEOUT_SECONDS = _int_env_at_import("PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS", max(DEFAULT_TIMEOUT_SECONDS, 1800), DEFAULT_TIMEOUT_SECONDS, 86_400)
 MAX_TASK_CHARS = 30_000
 MAX_CONTEXT_CHARS = 60_000
 MAX_OUTPUT_CONTRACT_CHARS = 8_000
@@ -548,6 +561,89 @@ Additional output contract:
 """
 
 
+def _delegate_envelope_score(obj: Any) -> int:
+    """Rank JSON objects by how likely they are to be the child profile's final result.
+
+    Child Hermes stdout can contain warnings or nested JSON. Returning the last
+    raw-decodable object is unsafe because a nested dict such as a rating
+    distribution may be the final decodable object. Keep this generic: score
+    profile_delegate-style envelopes highest, then known structured profile
+    envelopes, and treat small nested placeholder/config maps as non-results.
+    """
+    if not isinstance(obj, dict):
+        return 0
+
+    keys = set(obj.keys())
+    status = str(obj.get("status") or "").strip().lower()
+    valid_status = status in VALID_RESULT_STATUSES
+    has_summary = "summary" in keys
+    has_delegate_arrays = bool({"artifacts", "errors", "next_steps"} & keys)
+
+    score = 0
+    if valid_status:
+        score += 20
+    elif "status" in keys:
+        score += 5
+    if has_summary:
+        score += 10
+    if has_delegate_arrays:
+        score += 10
+    if {"artifacts", "errors", "next_steps"}.issubset(keys):
+        score += 15
+
+    # Generic structured-profile envelope signals. These are not SSR-only;
+    # profiles may return richer contracts while still using profile_delegate.
+    if "ssr_status" in keys:
+        score += 15
+    if "normalized_input" in keys:
+        score += 8
+    if "evaluation_design" in keys:
+        score += 8
+    if "personas" in keys:
+        score += 5
+
+    # "mode" is too generic to score by itself, but it strengthens an already
+    # plausible result envelope.
+    if "mode" in keys and score >= 20:
+        score += 3
+
+    # A bare map like {"1": "placeholder", ...} is usually nested schema data,
+    # not the final delegated result.
+    if not valid_status and not has_summary and not has_delegate_arrays:
+        return 0
+    return score
+
+
+def _iter_json_candidates(text: str) -> Iterable[Tuple[Any, int]]:
+    decoder = json.JSONDecoder()
+    for idx, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            obj, end = decoder.raw_decode(text[idx:])
+        except Exception:
+            continue
+        yield obj, idx + end
+
+
+def _select_json_candidate(candidates: Iterable[Tuple[Any, int]]) -> Optional[Any]:
+    best_obj: Optional[Any] = None
+    best_score = -1
+    best_end = -1
+    for obj, end in candidates:
+        score = _delegate_envelope_score(obj)
+        if score <= 0:
+            continue
+        # Prefer stronger envelopes. For same confidence, prefer the later one:
+        # this preserves final-result-after-progress-JSON behavior without
+        # allowing low-confidence nested objects to beat a complete envelope.
+        if score > best_score or (score == best_score and end >= best_end):
+            best_obj = obj
+            best_score = score
+            best_end = end
+    return best_obj
+
+
 def extract_json_object(text: str) -> Optional[Any]:
     stripped = (text or "").strip()
     if not stripped:
@@ -558,23 +654,21 @@ def extract_json_object(text: str) -> Optional[Any]:
         pass
 
     fence_matches = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.DOTALL | re.IGNORECASE)
-    for candidate in reversed(fence_matches):
+    fenced = []
+    for candidate in fence_matches:
         try:
-            return json.loads(candidate)
+            fenced.append((json.loads(candidate), len(candidate)))
         except Exception:
             continue
+    selected = _select_json_candidate(fenced)
+    if selected is not None:
+        return selected
 
-    decoder = json.JSONDecoder()
-    candidates = []
-    for idx, ch in enumerate(stripped):
-        if ch != "{":
-            continue
-        try:
-            obj, _end = decoder.raw_decode(stripped[idx:])
-            candidates.append(obj)
-        except Exception:
-            continue
-    return candidates[-1] if candidates else None
+    selected = _select_json_candidate(_iter_json_candidates(stripped))
+    if selected is not None:
+        return selected
+
+    return None
 
 
 def coerce_list(value: Any) -> List[str]:
