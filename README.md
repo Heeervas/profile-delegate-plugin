@@ -19,7 +19,7 @@ Example uses:
 
 - Model-callable `profile_delegate` tool.
 - Runs the target profile with its normal Hermes context, memory, rules, tools, and model defaults.
-- Uses Hermes quiet single-query mode with a prompt file reference: `hermes -p <profile> chat -q @file:<prompt.txt> -Q --pass-session-id`.
+- Uses Hermes quiet single-query mode with a prompt file reference: `hermes -p <profile> chat -q @file:<prompt.txt> -Q --pass-session-id`; `--yolo` is added only when `child_approval_mode: approve_yolo` is explicitly configured or passed.
 - Explicit target-profile allowlist by default.
 - Recursion/depth guard via `PROFILE_DELEGATE_MAX_DEPTH`.
 - Global concurrency guard via lock files and `PROFILE_DELEGATE_MAX_CONCURRENT`.
@@ -98,6 +98,21 @@ export PROFILE_DELEGATE_HERMES_BIN=/opt/hermes/.venv/bin/hermes
 export PROFILE_DELEGATE_ALLOWED_WORKDIRS=/opt/data/repos,/workspace
 export PROFILE_DELEGATE_RUNS_ROOT=/path/to/private/profile-delegate-runs
 ```
+
+Delegated child processes are forced non-interactive by stripping inherited gateway/session approval env. Child approval behavior is controlled by YAML config or a per-call tool argument, not by env by default:
+
+```yaml
+plugins:
+  entries:
+    profile-delegate:
+      child_approval_mode: deny  # deny | approve_yolo | strip_only
+```
+
+- `deny` (default): strip parent approval env and mark the child as non-interactive-deny so dangerous commands / `execute_code` fail closed instead of prompting the parent chat.
+- `approve_yolo`: explicit trusted mode; adds `--yolo`, sets `HERMES_YOLO_MODE=1`, and auto-accepts hooks for the child. Hermes' hardline unconditional blocklist still applies.
+- `strip_only`: only strip inherited interactive env and rely on Hermes' non-interactive defaults. Mostly for compatibility/debugging.
+
+The `profile_delegate` tool also accepts `child_approval_mode` to override YAML for one call.
 
 Local-power-user override, not recommended for shared installs:
 

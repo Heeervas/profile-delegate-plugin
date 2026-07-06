@@ -221,6 +221,23 @@ def test_handler_tool_args_win_over_internal_kwargs(monkeypatch):
     assert seen["session_id"] == ""
 
 
+def test_status_handler_tool_task_id_wins_over_internal_kwargs(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(runs))
+    task_id = "pd_20260704_100753_wwhlvu"
+    internal_id = "caller-session-id"
+    run_dir = runs / task_id
+    run_dir.mkdir(parents=True)
+    core.json_safe_write(run_dir / "status.json", {"task_id": task_id, "profile": "builder", "status": "completed"})
+    core.json_safe_write(run_dir / "result.json", {"status": "ok", "summary": "done"})
+    core.text_safe_write(run_dir / "stdout.txt", "stdout")
+    core.text_safe_write(run_dir / "stderr.txt", "")
+
+    data = json.loads(plugin._status_handler({"task_id": task_id}, task_id=internal_id))
+    assert data["success"] is True
+    assert data["task_id"] == task_id
+
+
 def test_handler_passes_background_notify_and_origin_session(monkeypatch):
     seen = {}
 
@@ -230,11 +247,12 @@ def test_handler_passes_background_notify_and_origin_session(monkeypatch):
 
     monkeypatch.setattr(plugin, "delegate_profile", fake_delegate)
     monkeypatch.setattr(plugin, "_current_session_key", lambda: "discord:guild:channel:thread")
-    data = json.loads(plugin._handler({"profile": "reviewer", "task": "x", "session_title": "async", "background": True, "notify_on_complete": True}))
+    data = json.loads(plugin._handler({"profile": "reviewer", "task": "x", "session_title": "async", "background": True, "notify_on_complete": True, "child_approval_mode": "approve_yolo"}))
     assert data["success"] is True
     assert seen["background"] is True
     assert seen["notify_on_complete"] is True
     assert seen["origin_session_key"] == "discord:guild:channel:thread"
+    assert seen["child_approval_mode"] == "approve_yolo"
 
 
 def test_handler_requires_profile_policy_by_default(tmp_path, monkeypatch):
@@ -277,24 +295,84 @@ def test_depth_policy(monkeypatch):
         raise AssertionError("expected recursion_limit")
 
 
-def test_timeout_defaults_and_caps():
+def test_child_environment_default_denies_without_parent_prompt(monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_DEPTH", "0")
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "discord")
+    monkeypatch.setenv("HERMES_SESSION_KEY", "discord:guild:channel:thread")
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    monkeypatch.setenv("HERMES_EXEC_ASK", "1")
+    monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+    monkeypatch.setenv("HERMES_YOLO_MODE", "1")
+    monkeypatch.setenv("HERMES_ACCEPT_HOOKS", "1")
+
+    env = core.child_environment(0)
+    assert env["PROFILE_DELEGATE_DEPTH"] == "1"
+    assert env["HERMES_CRON_SESSION"] == "1"
+    assert "HERMES_YOLO_MODE" not in env
+    assert "HERMES_ACCEPT_HOOKS" not in env
+    assert "HERMES_SESSION_PLATFORM" not in env
+    assert "HERMES_SESSION_KEY" not in env
+    assert "HERMES_GATEWAY_SESSION" not in env
+    assert "HERMES_EXEC_ASK" not in env
+    assert "HERMES_INTERACTIVE" not in env
+
+
+def test_child_environment_approve_yolo_is_explicit(monkeypatch):
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "discord")
+    env = core.child_environment(0, "approve_yolo")
+    assert env["PROFILE_DELEGATE_DEPTH"] == "1"
+    assert env["HERMES_YOLO_MODE"] == "1"
+    assert env["HERMES_ACCEPT_HOOKS"] == "1"
+    assert "HERMES_SESSION_PLATFORM" not in env
+    assert "HERMES_CRON_SESSION" not in env
+
+
+def test_child_environment_strip_only_strips_without_policy_flags(monkeypatch):
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    env = core.child_environment(0, "strip_only")
+    assert env["PROFILE_DELEGATE_DEPTH"] == "1"
+    assert "HERMES_GATEWAY_SESSION" not in env
+    assert "HERMES_CRON_SESSION" not in env
+    assert "HERMES_YOLO_MODE" not in env
+
+
+def test_plugin_config_child_approval_mode_reads_yaml(monkeypatch):
+    import types
+
+    fake_config = types.SimpleNamespace(load_config=lambda: {"plugins": {"entries": {"profile-delegate": {"child_approval_mode": "approve_yolo"}}}})
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake_config)
+    assert core.plugin_config_child_approval_mode() == "approve_yolo"
+
+
+def test_timeout_defaults_and_caps(monkeypatch):
     assert core.DEFAULT_TIMEOUT_SECONDS == 1200
-    assert core.MAX_TIMEOUT_SECONDS == 1800
+    assert core.MAX_TIMEOUT_SECONDS >= core.DEFAULT_TIMEOUT_SECONDS
     assert core.coerce_timeout(None) == 1200
-    assert core.coerce_timeout(1800) == 1800
+    assert core.coerce_timeout(core.MAX_TIMEOUT_SECONDS) == core.MAX_TIMEOUT_SECONDS
     try:
-        core.coerce_timeout(1801)
+        core.coerce_timeout(core.MAX_TIMEOUT_SECONDS + 1)
     except core.ProfileDelegateError as exc:
         assert exc.code == "validation_error"
-        assert "<= 1800" in str(exc)
+        assert f"<= {core.MAX_TIMEOUT_SECONDS}" in str(exc)
     else:
         raise AssertionError("expected validation_error")
 
+    monkeypatch.setattr(core, "MAX_TIMEOUT_SECONDS", 86_400)
+    assert core.coerce_timeout(86_400) == 86_400
+    monkeypatch.setattr(core, "MAX_TIMEOUT_SECONDS", 0)
+    assert core.coerce_timeout(604_800) == 604_800
 
-def test_schema_uses_runtime_timeout_defaults():
+
+def test_schema_uses_runtime_timeout_defaults(monkeypatch):
     props = plugin._schema()["parameters"]["properties"]["timeout_seconds"]
     assert props["default"] == core.DEFAULT_TIMEOUT_SECONDS
     assert props["maximum"] == core.MAX_TIMEOUT_SECONDS
+
+    monkeypatch.setattr(plugin, "MAX_TIMEOUT_SECONDS", 0)
+    uncapped = plugin._schema()["parameters"]["properties"]["timeout_seconds"]
+    assert "maximum" not in uncapped
+    assert "no plugin cap" in uncapped["description"]
 
 
 def test_resolve_hermes_bin_uses_absolute_path(monkeypatch):
@@ -458,6 +536,7 @@ def test_delegate_background_returns_running_and_finishes(tmp_path, monkeypatch)
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
     monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setenv("PROFILE_DELEGATE_BACKGROUND_MODE", "thread")
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
     monkeypatch.setattr(core.os, "access", lambda path, mode: True)
     monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
@@ -487,6 +566,35 @@ def test_delegate_background_returns_running_and_finishes(tmp_path, monkeypatch)
     assert saved["background"] is True
     assert saved["origin_session_key"] == "discord:guild:chan"
     assert json.loads((run_dir / "result.json").read_text())["session_id"] == "sid_async"
+
+
+def test_detached_background_worker_finalizes_completed_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.delenv("PROFILE_DELEGATE_BACKGROUND_MODE", raising=False)
+    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setenv("PROFILE_DELEGATE_HERMES_BIN", "/bin/echo")
+
+    result = core.delegate_profile("reviewer", "task", session_title="detached", background=True, notify_on_complete=True)
+    assert result["mode"] == "async"
+    run_dir = Path(result["paths"]["run_dir"])
+
+    import time
+    status = {}
+    for _ in range(100):
+        status = json.loads((run_dir / "status.json").read_text())
+        if status.get("status") == "completed":
+            break
+        time.sleep(0.05)
+    assert status["status"] == "completed"
+    assert status["background_worker_mode"] == "detached"
+    assert status["ended_at"]
+    saved = json.loads((run_dir / "result.json").read_text())
+    assert saved["status"] == "ok"
+    assert saved["structured"] is False
+    assert (run_dir / "result.json").exists()
 
 
 
@@ -638,10 +746,39 @@ def test_delegate_resume_uses_resume_flag_and_skips_rename(tmp_path, monkeypatch
     monkeypatch.setattr(core, "rename_session", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not rename resume")))
     result = core.delegate_profile("reviewer", "task", session_title="seguir tests", session_mode="resume", session_id="sid123")
     assert result["success"] is True
+    assert "--yolo" not in seen["cmd"]
+    assert result["child_approval_mode"] == "deny"
     assert "--resume" in seen["cmd"]
     assert seen["cmd"][seen["cmd"].index("--resume") + 1] == "sid123"
     assert "--pass-session-id" in seen["cmd"]
     assert result["session_renamed"] is False
+
+
+def test_delegate_approve_yolo_tool_arg_adds_yolo_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
+    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    seen = {}
+
+    def fake_run_capped(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["env"] = kwargs["env"]
+        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: sid_yolo')
+        core.text_safe_write(kwargs["stderr_path"], "")
+        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 92, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
+    monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True, "rename_exit_code": 0, "rename_error": None})
+    result = core.delegate_profile("reviewer", "task", session_title="yolo", child_approval_mode="approve_yolo")
+    assert result["success"] is True
+    assert result["child_approval_mode"] == "approve_yolo"
+    assert "--yolo" in seen["cmd"]
+    assert seen["env"]["HERMES_YOLO_MODE"] == "1"
+    assert seen["env"]["HERMES_ACCEPT_HOOKS"] == "1"
 
 
 def test_delegate_new_renames_when_session_id_present(tmp_path, monkeypatch):

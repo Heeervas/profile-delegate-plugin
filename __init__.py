@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 try:
     from .core import (
+        DEFAULT_CHILD_APPROVAL_MODE,
         DEFAULT_TIMEOUT_SECONDS,
         MAX_TIMEOUT_SECONDS,
         ProfileDelegateError,
@@ -23,6 +24,7 @@ except ImportError:  # direct import / pytest from plugin directory
     if plugin_dir not in sys.path:
         sys.path.insert(0, plugin_dir)
     from core import (  # type: ignore[no-redef]
+        DEFAULT_CHILD_APPROVAL_MODE,
         DEFAULT_TIMEOUT_SECONDS,
         MAX_TIMEOUT_SECONDS,
         ProfileDelegateError,
@@ -80,10 +82,15 @@ def _schema() -> Dict[str, Any]:
                 },
                 "timeout_seconds": {
                     "type": "integer",
-                    "description": f"Synchronous wait limit, 10-{MAX_TIMEOUT_SECONDS} seconds. On timeout the child process is terminated and a structured timeout result is returned.",
+                    "description": (
+                        f"Synchronous wait limit. Minimum 10 seconds. Current plugin cap: "
+                        f"{'none' if MAX_TIMEOUT_SECONDS <= 0 else str(MAX_TIMEOUT_SECONDS) + ' seconds'}; "
+                        "set PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS to raise it, or 0 for no plugin cap. "
+                        "On timeout the child process is terminated and a structured timeout result is returned."
+                    ),
                     "default": DEFAULT_TIMEOUT_SECONDS,
                     "minimum": 10,
-                    "maximum": MAX_TIMEOUT_SECONDS,
+                    **({} if MAX_TIMEOUT_SECONDS <= 0 else {"maximum": MAX_TIMEOUT_SECONDS}),
                 },
                 "output_contract": {
                     "type": "string",
@@ -104,6 +111,18 @@ def _schema() -> Dict[str, Any]:
                     "type": "boolean",
                     "description": "When background=true, notify the originating chat when the delegated profile finishes. Default true.",
                     "default": True,
+                },
+                "child_approval_mode": {
+                    "type": "string",
+                    "enum": ["deny", "approve_yolo", "strip_only"],
+                    "description": (
+                        "Optional per-call child approval policy. Default comes from config.yaml "
+                        "plugins.entries.profile-delegate.child_approval_mode, or 'deny' if unset. "
+                        "deny strips parent gateway/session approval env and makes child dangerous commands fail closed; "
+                        "approve_yolo explicitly runs the child with --yolo/HERMES_YOLO_MODE=1; "
+                        "strip_only only strips inherited interactive env and relies on Hermes non-interactive defaults."
+                    ),
+                    "default": DEFAULT_CHILD_APPROVAL_MODE,
                 },
             },
             "required": ["profile", "task", "session_title"],
@@ -192,6 +211,7 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
             background=bool(payload.get("background", False)),
             notify_on_complete=bool(payload.get("notify_on_complete", True)),
             origin_session_key=_current_session_key(),
+            child_approval_mode=payload.get("child_approval_mode", None),
         )
     except ProfileDelegateError as exc:
         result = _error_result(exc)
@@ -202,7 +222,8 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
 
 def _status_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     payload = args if isinstance(args, dict) else {}
-    payload = {**payload, **kwargs}
+    # Hermes may pass internal kwargs such as task_id; explicit tool args must win.
+    payload = {**kwargs, **payload}
     try:
         result = profile_delegate_status(payload.get("task_id", ""), payload.get("tail_chars", 4000))
     except ProfileDelegateError as exc:
@@ -214,7 +235,7 @@ def _status_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str
 
 def _list_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     payload = args if isinstance(args, dict) else {}
-    payload = {**payload, **kwargs}
+    payload = {**kwargs, **payload}
     try:
         result = profile_delegate_list(payload.get("limit", 20))
     except ProfileDelegateError as exc:
@@ -226,7 +247,7 @@ def _list_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
 
 def _prune_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     payload = args if isinstance(args, dict) else {}
-    payload = {**payload, **kwargs}
+    payload = {**kwargs, **payload}
     try:
         result = profile_delegate_prune(payload.get("max_age_days", 14), bool(payload.get("dry_run", True)))
     except ProfileDelegateError as exc:

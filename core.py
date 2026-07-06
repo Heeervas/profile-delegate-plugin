@@ -9,6 +9,7 @@ import shutil
 import string
 import selectors
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ try:  # Unix-only; Hermes currently targets Linux/macOS/WSL for this plugin.
 except Exception:  # pragma: no cover - Windows fallback is conservative.
     fcntl = None  # type: ignore[assignment]
 
-def _int_env_at_import(name: str, default: int, minimum: int, maximum: int) -> int:
+def _int_env_at_import(name: str, default: int, minimum: int, maximum: Optional[int] = None) -> int:
     raw = os.getenv(name, "").strip()
     if not raw:
         return default
@@ -29,13 +30,24 @@ def _int_env_at_import(name: str, default: int, minimum: int, maximum: int) -> i
         value = int(raw)
     except Exception:
         return default
-    if value < minimum or value > maximum:
+    if value < minimum:
+        return default
+    if maximum is not None and value > maximum:
         return default
     return value
 
 
-DEFAULT_TIMEOUT_SECONDS = _int_env_at_import("PROFILE_DELEGATE_DEFAULT_TIMEOUT_SECONDS", 1200, 10, 86_400)
-MAX_TIMEOUT_SECONDS = _int_env_at_import("PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS", max(DEFAULT_TIMEOUT_SECONDS, 1800), DEFAULT_TIMEOUT_SECONDS, 86_400)
+DEFAULT_TIMEOUT_SECONDS = _int_env_at_import("PROFILE_DELEGATE_DEFAULT_TIMEOUT_SECONDS", 1200, 10)
+
+
+def _max_timeout_env_at_import() -> int:
+    raw = os.getenv("PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS", "").strip()
+    if raw == "0":
+        return 0
+    return _int_env_at_import("PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS", max(DEFAULT_TIMEOUT_SECONDS, 1800), DEFAULT_TIMEOUT_SECONDS)
+
+
+MAX_TIMEOUT_SECONDS = _max_timeout_env_at_import()
 MAX_TASK_CHARS = 30_000
 MAX_CONTEXT_CHARS = 60_000
 MAX_OUTPUT_CONTRACT_CHARS = 8_000
@@ -48,6 +60,8 @@ DEFAULT_MAX_CONCURRENT = 1
 DEFAULT_MAX_ASYNC = 2
 VALID_RESULT_STATUSES = {"ok", "blocked", "failed"}
 VALID_SESSION_MODES = {"new", "resume"}
+VALID_CHILD_APPROVAL_MODES = {"deny", "approve_yolo", "strip_only"}
+DEFAULT_CHILD_APPROVAL_MODE = "deny"
 TRUTHY = {"1", "true", "yes", "on"}
 
 
@@ -345,8 +359,8 @@ def coerce_timeout(value: Any) -> int:
         raise ProfileDelegateError("timeout_seconds must be an integer", "validation_error") from exc
     if timeout < 10:
         raise ProfileDelegateError("timeout_seconds must be >= 10", "validation_error")
-    if timeout > MAX_TIMEOUT_SECONDS:
-        raise ProfileDelegateError(f"timeout_seconds must be <= {MAX_TIMEOUT_SECONDS}", "validation_error")
+    if MAX_TIMEOUT_SECONDS > 0 and timeout > MAX_TIMEOUT_SECONDS:
+        raise ProfileDelegateError(f"timeout_seconds must be <= {MAX_TIMEOUT_SECONDS} (set PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS=0 for no plugin cap)", "validation_error")
     return timeout
 
 
@@ -401,10 +415,45 @@ def normalize_session_title(value: Any) -> str:
 
 
 def coerce_session_mode(value: Any) -> str:
-    mode = str(value or "new").strip().lower()
+    mode = (ensure_text(value) or "new").strip().lower()
     if mode not in VALID_SESSION_MODES:
         raise ProfileDelegateError("session_mode must be 'new' or 'resume'", "validation_error")
     return mode
+
+
+def coerce_child_approval_mode(value: Any) -> str:
+    mode = (ensure_text(value) or DEFAULT_CHILD_APPROVAL_MODE).strip().lower().replace("-", "_")
+    aliases = {
+        "approve": "approve_yolo",
+        "yolo": "approve_yolo",
+        "off": "approve_yolo",
+        "auto": "approve_yolo",
+        "block": "deny",
+        "blocked": "deny",
+        "strip": "strip_only",
+        "none": "strip_only",
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in VALID_CHILD_APPROVAL_MODES:
+        raise ProfileDelegateError(
+            "child_approval_mode must be one of: deny, approve_yolo, strip_only",
+            "validation_error",
+        )
+    return mode
+
+
+def plugin_config_child_approval_mode() -> str:
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        entries = (cfg.get("plugins") or {}).get("entries") or {}
+        entry = entries.get("profile-delegate") or {}
+        return coerce_child_approval_mode(entry.get("child_approval_mode", DEFAULT_CHILD_APPROVAL_MODE))
+    except ProfileDelegateError:
+        raise
+    except Exception:
+        return DEFAULT_CHILD_APPROVAL_MODE
 
 
 def validate_session_id(value: Any, required: bool = False) -> str:
@@ -747,6 +796,8 @@ def base_paths(run_dir: Path) -> Dict[str, str]:
         "prompt": str(run_dir / "prompt.txt"),
         "stdout": str(run_dir / "stdout.txt"),
         "stderr": str(run_dir / "stderr.txt"),
+        "worker_stdout": str(run_dir / "worker_stdout.txt"),
+        "worker_stderr": str(run_dir / "worker_stderr.txt"),
         "result": str(run_dir / "result.json"),
     }
 
@@ -784,9 +835,35 @@ def rename_session(hermes_bin: str, profile: str, session_id: str, title: str, c
     }
 
 
-def child_environment(parent_depth: int) -> Dict[str, str]:
+def child_environment(parent_depth: int, child_approval_mode: str = DEFAULT_CHILD_APPROVAL_MODE) -> Dict[str, str]:
+    mode = coerce_child_approval_mode(child_approval_mode)
     env = os.environ.copy()
     env["PROFILE_DELEGATE_DEPTH"] = str(parent_depth + 1)
+
+    # The delegated Hermes subprocess is intentionally non-interactive: there
+    # is no approval callback wired for the child process, and inheriting the
+    # caller gateway/session env makes tools like execute_code emit approval
+    # prompts back to the user instead of just completing the bounded run.
+    for key in list(env):
+        if key.startswith("HERMES_SESSION_") or key in {
+            "HERMES_GATEWAY_SESSION",
+            "HERMES_EXEC_ASK",
+            "HERMES_INTERACTIVE",
+            "HERMES_CRON_SESSION",
+            "HERMES_YOLO_MODE",
+            "HERMES_ACCEPT_HOOKS",
+        }:
+            env.pop(key, None)
+
+    if mode == "approve_yolo":
+        # Explicit trusted mode: match Hermes -z/script semantics.
+        env["HERMES_YOLO_MODE"] = "1"
+        env["HERMES_ACCEPT_HOOKS"] = "1"
+    elif mode == "deny":
+        # Plugin-only fail-closed path using Hermes' existing non-interactive
+        # cron denial branch. This avoids parent-chat prompts and makes tools
+        # recover from a structured refusal instead of hanging.
+        env["HERMES_CRON_SESSION"] = "1"
     return env
 
 
@@ -871,12 +948,15 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     resume_id = ensure_text(request.get("requested_session_id") or "")
     title_text = ensure_text(request.get("session_title") or "")
     depth = int(request.get("delegate_depth") or 0)
+    child_approval_mode = coerce_child_approval_mode(request.get("child_approval_mode", DEFAULT_CHILD_APPROVAL_MODE))
 
     cmd = [hermes_bin, "-p", profile, "chat", "-q", f"@file:{run_dir / 'prompt.txt'}", "-Q"]
+    if child_approval_mode == "approve_yolo":
+        cmd.append("--yolo")
     if mode == "resume":
         cmd += ["--resume", resume_id]
     cmd += ["--pass-session-id", "--source", "profile-delegate"]
-    env = child_environment(depth)
+    env = child_environment(depth, child_approval_mode)
 
     with acquire_concurrency_slot() as slot:
         status["concurrency_slot"] = slot.slot
@@ -939,6 +1019,13 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
         result["session_id"] = child_session_id
 
     json_safe_write(run_dir / "result.json", result)
+    try:
+        latest_status = read_json_file(run_dir / "status.json")
+        if status.get("concurrency_slot") is not None:
+            latest_status["concurrency_slot"] = status.get("concurrency_slot")
+        status = latest_status
+    except Exception:
+        pass
     status.update(
         {
             "status": final_status,
@@ -968,6 +1055,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
         "session_title": title_text,
         "session_mode": mode,
         "requested_session_id": resume_id,
+        "child_approval_mode": child_approval_mode,
         "child_session_id": child_session_id,
         **rename_meta,
         "result": result,
@@ -983,7 +1071,35 @@ _async_lock = threading.Lock()
 _async_running = 0
 
 
-def _start_background_run(run_dir: Path) -> None:
+def _mark_background_worker_failure(run_dir: Path, exc: Exception) -> Dict[str, Any]:
+    code = getattr(exc, "code", "background_worker_error")
+    result = {
+        "status": "failed",
+        "summary": f"Profile Delegate background worker failed: {type(exc).__name__}: {exc}",
+        "artifacts": [],
+        "errors": [f"{type(exc).__name__}: {exc}"],
+        "next_steps": [],
+        "structured": True,
+        "error_code": code,
+    }
+    json_safe_write(run_dir / "result.json", result)
+    try:
+        status = read_json_file(run_dir / "status.json")
+    except Exception:
+        status = {"task_id": run_dir.name}
+    status.update({"status": "failed", "ended_at": now_iso(), "error_code": code})
+    json_safe_write(run_dir / "status.json", status)
+    return {"success": False, "mode": "async", "task_id": run_dir.name, "status": "failed", "error_code": code, "result": result, "paths": base_paths(run_dir)}
+
+
+def _background_mode() -> str:
+    mode = os.getenv("PROFILE_DELEGATE_BACKGROUND_MODE", "detached").strip().lower()
+    if mode in {"thread", "inprocess", "in-process"}:
+        return "thread"
+    return "detached"
+
+
+def _start_background_thread(run_dir: Path) -> None:
     global _async_running
     max_async = env_int("PROFILE_DELEGATE_MAX_ASYNC", DEFAULT_MAX_ASYNC, 1, 20)
     with _async_lock:
@@ -1001,23 +1117,7 @@ def _start_background_run(run_dir: Path) -> None:
             final = _execute_delegate_run(run_dir)
             final["mode"] = "async"
         except Exception as exc:
-            result = {
-                "status": "failed",
-                "summary": f"Profile Delegate background worker failed: {type(exc).__name__}: {exc}",
-                "artifacts": [],
-                "errors": [f"{type(exc).__name__}: {exc}"],
-                "next_steps": [],
-                "structured": True,
-                "error_code": "background_worker_error",
-            }
-            json_safe_write(run_dir / "result.json", result)
-            try:
-                status = read_json_file(run_dir / "status.json")
-            except Exception:
-                status = {"task_id": run_dir.name}
-            status.update({"status": "failed", "ended_at": now_iso(), "error_code": "background_worker_error"})
-            json_safe_write(run_dir / "status.json", status)
-            final = {"success": False, "mode": "async", "task_id": run_dir.name, "status": "failed", "error_code": "background_worker_error", "result": result, "paths": base_paths(run_dir)}
+            final = _mark_background_worker_failure(run_dir, exc)
         try:
             _push_profile_delegate_completion(run_dir, final)
         finally:
@@ -1026,6 +1126,91 @@ def _start_background_run(run_dir: Path) -> None:
 
     thread = threading.Thread(target=_worker, name=f"profile-delegate-{run_dir.name}", daemon=True)
     thread.start()
+
+
+def _start_detached_background_worker(run_dir: Path) -> None:
+    """Start a durable worker process that owns the child Hermes subprocess.
+
+    Gateway/model-call processes may finish or restart while a delegated profile
+    keeps running. A daemon thread in that short-lived process can leave the
+    child Hermes session alive but stop updating status.json/result.json. The
+    detached worker makes the run artifact itself the source of truth.
+    """
+    stdout_path = run_dir / "worker_stdout.txt"
+    stderr_path = run_dir / "worker_stderr.txt"
+    text_safe_write(stdout_path, "")
+    text_safe_write(stderr_path, "")
+    cmd = [sys.executable, str(Path(__file__).resolve()), "--background-worker", str(run_dir)]
+    env = os.environ.copy()
+    with stdout_path.open("a", encoding="utf-8") as out, stderr_path.open("a", encoding="utf-8") as err:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(Path.cwd()),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=err,
+            close_fds=True,
+            start_new_session=True,
+        )
+    status = read_json_file(run_dir / "status.json")
+    status.update(
+        {
+            "background_worker_mode": "detached",
+            "worker_pid": proc.pid,
+            "worker_started_at": now_iso(),
+            "worker_stdout": str(stdout_path),
+            "worker_stderr": str(stderr_path),
+        }
+    )
+    json_safe_write(run_dir / "status.json", status)
+
+    def _watch_for_notification() -> None:
+        try:
+            proc.wait()
+            status_after = read_json_file(run_dir / "status.json")
+            result_after = read_json_file(run_dir / "result.json") if (run_dir / "result.json").exists() else {}
+            final_status = str(status_after.get("status") or "unknown")
+            final = {
+                "success": final_status == "completed" and result_after.get("status") != "failed",
+                "mode": "async",
+                "task_id": run_dir.name,
+                "status": final_status,
+                "error_code": status_after.get("error_code") or result_after.get("error_code"),
+                "result": result_after,
+                "paths": base_paths(run_dir),
+            }
+            _push_profile_delegate_completion(run_dir, final)
+        except Exception:
+            # Artifact persistence is owned by the detached worker; notification is best effort.
+            pass
+
+    threading.Thread(target=_watch_for_notification, name=f"profile-delegate-notify-{run_dir.name}", daemon=True).start()
+
+
+def _start_background_run(run_dir: Path) -> None:
+    if _background_mode() == "thread":
+        _start_background_thread(run_dir)
+    else:
+        _start_detached_background_worker(run_dir)
+
+
+def _background_worker_main(run_dir_arg: str) -> int:
+    run_dir = Path(run_dir_arg).expanduser().resolve()
+    try:
+        final = _execute_delegate_run(run_dir)
+        final["mode"] = "async"
+        try:
+            status = read_json_file(run_dir / "status.json")
+            if bool(status.get("notify_on_complete", True)) and not status.get("notification_status"):
+                status["notification_status"] = "detached_worker_completed_no_live_queue"
+                json_safe_write(run_dir / "status.json", status)
+        except Exception:
+            pass
+        return 0
+    except Exception as exc:
+        _mark_background_worker_failure(run_dir, exc)
+        return 1
 
 
 def delegate_profile(
@@ -1041,6 +1226,7 @@ def delegate_profile(
     background: bool = False,
     notify_on_complete: bool = True,
     origin_session_key: str = "",
+    child_approval_mode: Any = None,
 ) -> Dict[str, Any]:
     depth, max_depth = enforce_depth_policy()
     validated = validate_profile(profile)
@@ -1052,6 +1238,9 @@ def delegate_profile(
     title_text = normalize_session_title(session_title)
     mode = coerce_session_mode(session_mode)
     resume_id = validate_session_id(session_id, required=(mode == "resume"))
+    resolved_child_approval_mode = coerce_child_approval_mode(
+        child_approval_mode if child_approval_mode not in {None, ""} else plugin_config_child_approval_mode()
+    )
     timeout = coerce_timeout(timeout_seconds)
     cwd = resolve_workdir(workdir)
     hermes_bin = resolve_hermes_bin()
@@ -1081,6 +1270,7 @@ def delegate_profile(
         "hermes_bin": hermes_bin,
         "delegate_depth": depth,
         "delegate_max_depth": max_depth,
+        "child_approval_mode": resolved_child_approval_mode,
         "background": bool(background),
         "notify_on_complete": bool(notify_on_complete),
         "origin_session_key": origin_session_key or "",
@@ -1142,6 +1332,7 @@ def delegate_profile(
             "session_title": title_text,
             "session_mode": mode,
             "requested_session_id": resume_id,
+            "child_approval_mode": resolved_child_approval_mode,
             "notify_on_complete": bool(notify_on_complete),
             "origin_session_key_present": bool(origin_session_key),
             "paths": base_paths(run_dir),
@@ -1263,3 +1454,10 @@ def profile_delegate_prune(max_age_days: Any = 14, dry_run: bool = True) -> Dict
         "removed_count": 0 if dry_run else len(candidates),
         "runs": candidates,
     }
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--background-worker":
+        raise SystemExit(_background_worker_main(sys.argv[2]))
+    print("Usage: python core.py --background-worker <run_dir>", file=sys.stderr)
+    raise SystemExit(2)
