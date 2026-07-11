@@ -112,6 +112,31 @@ def _schema() -> Dict[str, Any]:
                     "description": "When background=true, notify the originating chat when the delegated profile finishes. Default true.",
                     "default": True,
                 },
+                "model": {
+                    "type": "string",
+                    "description": "Optional requested model for this call. Overrides the target profile default temporarily; blank means inherit.",
+                },
+                "provider": {
+                    "type": "string",
+                    "description": "Optional requested provider for this call. Hermes validates compatibility; blank means inherit.",
+                },
+                "reasoning_effort": {
+                    "type": "string",
+                    "enum": ["none", "minimal", "low", "medium", "high", "xhigh"],
+                    "description": "Optional temporary reasoning effort, applied through a private per-run profile overlay.",
+                },
+                "max_turns": {
+                    "type": "integer", "minimum": 1, "maximum": 10000,
+                    "description": "Optional requested maximum child agent turns for this call.",
+                },
+                "toolsets": {
+                    "type": "array", "items": {"type": "string"}, "maxItems": 100,
+                    "description": "Optional requested toolsets. Every item must be explicitly allowed by PROFILE_DELEGATE_ALLOWED_TOOLSETS.",
+                },
+                "skills": {
+                    "type": "array", "items": {"type": "string"}, "maxItems": 100,
+                    "description": "Optional skills to preload. Every item must be explicitly allowed by PROFILE_DELEGATE_ALLOWED_SKILLS.",
+                },
                 "child_approval_mode": {
                     "type": "string",
                     "enum": ["deny", "approve_yolo", "strip_only"],
@@ -212,6 +237,12 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
             notify_on_complete=bool(payload.get("notify_on_complete", True)),
             origin_session_key=_current_session_key(),
             child_approval_mode=payload.get("child_approval_mode", None),
+            model=payload.get("model"),
+            provider=payload.get("provider"),
+            reasoning_effort=payload.get("reasoning_effort"),
+            max_turns=payload.get("max_turns"),
+            toolsets=payload.get("toolsets"),
+            skills=payload.get("skills"),
         )
     except ProfileDelegateError as exc:
         result = _error_result(exc)

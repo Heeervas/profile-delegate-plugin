@@ -61,8 +61,11 @@ DEFAULT_MAX_ASYNC = 2
 VALID_RESULT_STATUSES = {"ok", "blocked", "failed"}
 VALID_SESSION_MODES = {"new", "resume"}
 VALID_CHILD_APPROVAL_MODES = {"deny", "approve_yolo", "strip_only"}
+VALID_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 DEFAULT_CHILD_APPROVAL_MODE = "deny"
 TRUTHY = {"1", "true", "yes", "on"}
+MAX_EXECUTION_NAME_CHARS = 200
+MAX_EXECUTION_LIST_ITEMS = 100
 
 
 class ProfileDelegateError(Exception):
@@ -221,6 +224,70 @@ def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
 def parse_csv_env(name: str) -> List[str]:
     raw = os.getenv(name, "")
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _optional_execution_string(name: str, value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ProfileDelegateError(f"{name} must be a string", "validation_error")
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > MAX_EXECUTION_NAME_CHARS or any(ord(char) < 32 for char in text):
+        raise ProfileDelegateError(f"{name} is invalid or too long", "validation_error")
+    return text
+
+
+def _execution_list(name: str, value: Any, policy_env: str) -> List[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ProfileDelegateError(f"{name} must be an array of strings", "validation_error")
+    if len(value) > MAX_EXECUTION_LIST_ITEMS:
+        raise ProfileDelegateError(f"{name} has too many items", "validation_error")
+    normalized: List[str] = []
+    for item in value:
+        text = _optional_execution_string(name, item)
+        if not text or "," in text:
+            raise ProfileDelegateError(f"{name} entries must be non-empty strings without commas", "validation_error")
+        if text not in normalized:
+            normalized.append(text)
+    if normalized:
+        allowed = set(parse_csv_env(policy_env))
+        if not allowed:
+            raise ProfileDelegateError(f"{name} overrides require {policy_env}", "validation_error")
+        rejected = [item for item in normalized if item not in allowed]
+        if rejected:
+            raise ProfileDelegateError(f"{name} not allowed by {policy_env}: {', '.join(rejected)}", "validation_error")
+    return normalized
+
+
+def normalize_requested_execution(
+    model: Any = None, provider: Any = None, reasoning_effort: Any = None,
+    max_turns: Any = None, toolsets: Any = None, skills: Any = None,
+) -> Dict[str, Any]:
+    normalized_reasoning = _optional_execution_string("reasoning_effort", reasoning_effort)
+    if normalized_reasoning and normalized_reasoning not in VALID_REASONING_EFFORTS:
+        raise ProfileDelegateError("reasoning_effort must be one of: " + ", ".join(VALID_REASONING_EFFORTS), "validation_error")
+    normalized_turns: Optional[int] = None
+    if max_turns is not None:
+        if isinstance(max_turns, bool):
+            raise ProfileDelegateError("max_turns must be an integer", "validation_error")
+        try:
+            normalized_turns = int(max_turns)
+        except Exception as exc:
+            raise ProfileDelegateError("max_turns must be an integer", "validation_error") from exc
+        if normalized_turns < 1 or normalized_turns > 10000:
+            raise ProfileDelegateError("max_turns must be between 1 and 10000", "validation_error")
+    return {
+        "model": _optional_execution_string("model", model),
+        "provider": _optional_execution_string("provider", provider),
+        "reasoning_effort": normalized_reasoning,
+        "max_turns": normalized_turns,
+        "toolsets": _execution_list("toolsets", toolsets, "PROFILE_DELEGATE_ALLOWED_TOOLSETS"),
+        "skills": _execution_list("skills", skills, "PROFILE_DELEGATE_ALLOWED_SKILLS"),
+    }
 
 
 def normalize_profile_for_policy(profile: str) -> str:
@@ -476,6 +543,69 @@ def resolve_workdir(workdir: str = "") -> Path:
     return cwd
 
 
+def load_yaml_mapping(path: Path) -> Dict[str, Any]:
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        raise ProfileDelegateError(f"failed to load profile config {path}: {exc}", "reasoning_overlay_error") from exc
+    if not isinstance(data, dict):
+        raise ProfileDelegateError(f"profile config must contain a mapping: {path}", "reasoning_overlay_error")
+    return data
+
+
+DEFAULT_MANAGED_SCOPE = Path("/etc/hermes")
+
+
+def discover_managed_scope(env: Dict[str, str]) -> Optional[Path]:
+    """Find any inherited or canonical administrator-managed scope."""
+    override = env.get("HERMES_MANAGED_DIR", "").strip()
+    if override:
+        return Path(override)
+    return DEFAULT_MANAGED_SCOPE if DEFAULT_MANAGED_SCOPE.exists() else None
+
+
+def prepare_reasoning_config(run_dir: Path, reasoning_effort: str) -> Path:
+    """Create config-only managed input when no administrator scope exists."""
+    managed_dir = run_dir / "reasoning_config"
+    if managed_dir.is_symlink():
+        raise ProfileDelegateError("reasoning overlay path must not be a symlink", "reasoning_overlay_error")
+    try:
+        managed_dir.mkdir(mode=0o700)
+        chmod_best_effort(managed_dir, 0o700)
+        config_path = managed_dir / "config.yaml"
+        import yaml
+
+        config_path.write_text(yaml.safe_dump({"agent": {"reasoning_effort": reasoning_effort}}, sort_keys=False), encoding="utf-8")
+        chmod_best_effort(config_path, 0o600)
+    except ProfileDelegateError:
+        raise
+    except Exception as exc:
+        raise ProfileDelegateError(f"failed to write reasoning overlay: {exc}", "reasoning_overlay_error") from exc
+    return managed_dir
+
+
+def build_child_command(request: Dict[str, Any], run_dir: Path) -> List[str]:
+    requested = request.get("requested_execution") or {}
+    cmd = [ensure_text(request.get("hermes_bin")), "-p", ensure_text(request.get("profile")),
+           "chat", "-q", f"@file:{run_dir / 'prompt.txt'}", "-Q"]
+    if ensure_text(request.get("child_approval_mode")) == "approve_yolo":
+        cmd.append("--yolo")
+    if requested.get("model"):
+        cmd += ["--model", ensure_text(requested["model"])]
+    if requested.get("provider"):
+        cmd += ["--provider", ensure_text(requested["provider"])]
+    if requested.get("max_turns") is not None:
+        cmd += ["--max-turns", str(requested["max_turns"])]
+    if requested.get("toolsets"):
+        cmd += ["--toolsets", ",".join(requested["toolsets"])]
+    if requested.get("skills"):
+        cmd += ["--skills", ",".join(requested["skills"])]
+    if ensure_text(request.get("session_mode") or "new") == "resume":
+        cmd += ["--resume", ensure_text(request.get("requested_session_id"))]
+    cmd += ["--pass-session-id", "--source", "profile-delegate"]
+    return cmd
 
 
 def capped_text(text: str, limit: int) -> Tuple[str, bool]:
@@ -950,13 +1080,23 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     depth = int(request.get("delegate_depth") or 0)
     child_approval_mode = coerce_child_approval_mode(request.get("child_approval_mode", DEFAULT_CHILD_APPROVAL_MODE))
 
-    cmd = [hermes_bin, "-p", profile, "chat", "-q", f"@file:{run_dir / 'prompt.txt'}", "-Q"]
-    if child_approval_mode == "approve_yolo":
-        cmd.append("--yolo")
-    if mode == "resume":
-        cmd += ["--resume", resume_id]
-    cmd += ["--pass-session-id", "--source", "profile-delegate"]
+    cmd = build_child_command(request, run_dir)
     env = child_environment(depth, child_approval_mode)
+    requested_execution = request.get("requested_execution") or {}
+    reasoning_effort = requested_execution.get("reasoning_effort")
+    if reasoning_effort:
+        profile_home = Path(ensure_text(request.get("profile_home"))).resolve()
+        existing_managed_dir = discover_managed_scope(env)
+        if existing_managed_dir is not None:
+            raise ProfileDelegateError(
+                f"reasoning_effort cannot replace existing Hermes managed scope: {existing_managed_dir}",
+                "reasoning_managed_scope_conflict",
+            )
+        managed_dir = prepare_reasoning_config(run_dir, ensure_text(reasoning_effort))
+        # Keep persistence and all profile resources canonical. This temporary
+        # managed input is allowed only when no administrator scope exists.
+        env["HERMES_HOME"] = str(profile_home)
+        env["HERMES_MANAGED_DIR"] = str(managed_dir)
 
     with acquire_concurrency_slot() as slot:
         status["concurrency_slot"] = slot.slot
@@ -1017,6 +1157,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
             rename_meta = {"session_renamed": False, "rename_error": f"{type(exc).__name__}: {exc}"}
     if child_session_id:
         result["session_id"] = child_session_id
+    result["requested_execution"] = request.get("requested_execution") or {}
 
     json_safe_write(run_dir / "result.json", result)
     try:
@@ -1056,6 +1197,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
         "session_mode": mode,
         "requested_session_id": resume_id,
         "child_approval_mode": child_approval_mode,
+        "requested_execution": request.get("requested_execution") or {},
         "child_session_id": child_session_id,
         **rename_meta,
         "result": result,
@@ -1227,6 +1369,12 @@ def delegate_profile(
     notify_on_complete: bool = True,
     origin_session_key: str = "",
     child_approval_mode: Any = None,
+    model: Any = None,
+    provider: Any = None,
+    reasoning_effort: Any = None,
+    max_turns: Any = None,
+    toolsets: Any = None,
+    skills: Any = None,
 ) -> Dict[str, Any]:
     depth, max_depth = enforce_depth_policy()
     validated = validate_profile(profile)
@@ -1242,6 +1390,15 @@ def delegate_profile(
         child_approval_mode if child_approval_mode not in {None, ""} else plugin_config_child_approval_mode()
     )
     timeout = coerce_timeout(timeout_seconds)
+    requested_execution = normalize_requested_execution(
+        model=model, provider=provider, reasoning_effort=reasoning_effort,
+        max_turns=max_turns, toolsets=toolsets, skills=skills,
+    )
+    if requested_execution["reasoning_effort"] and validated.canonical == "default":
+        raise ProfileDelegateError(
+            "reasoning_effort override is not supported for the default profile",
+            "validation_error",
+        )
     cwd = resolve_workdir(workdir)
     hermes_bin = resolve_hermes_bin()
 
@@ -1271,6 +1428,7 @@ def delegate_profile(
         "delegate_depth": depth,
         "delegate_max_depth": max_depth,
         "child_approval_mode": resolved_child_approval_mode,
+        "requested_execution": requested_execution,
         "background": bool(background),
         "notify_on_complete": bool(notify_on_complete),
         "origin_session_key": origin_session_key or "",
@@ -1333,6 +1491,7 @@ def delegate_profile(
             "session_mode": mode,
             "requested_session_id": resume_id,
             "child_approval_mode": resolved_child_approval_mode,
+            "requested_execution": requested_execution,
             "notify_on_complete": bool(notify_on_complete),
             "origin_session_key_present": bool(origin_session_key),
             "paths": base_paths(run_dir),
@@ -1380,6 +1539,7 @@ def profile_delegate_status(task_id: str, tail_chars: Any = 4000) -> Dict[str, A
         "created_at": status.get("created_at"),
         "started_at": status.get("started_at"),
         "ended_at": status.get("ended_at"),
+        "requested_execution": status.get("requested_execution") or {},
         "result": result,
         "stdout_tail": tail_text(run_dir / "stdout.txt", max_tail),
         "stderr_tail": tail_text(run_dir / "stderr.txt", max_tail),

@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 PLUGIN_DIR = Path(__file__).resolve().parent
 if str(PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(PLUGIN_DIR))
@@ -836,3 +838,183 @@ def test_chmod_best_effort_ignores_permission_error(tmp_path, monkeypatch):
     path.write_text("x", encoding="utf-8")
     monkeypatch.setattr(core.os, "chmod", lambda *a, **k: (_ for _ in ()).throw(PermissionError("nope")))
     core.chmod_best_effort(path, 0o600)
+
+
+def test_execution_override_schema_contract():
+    props = plugin._schema()["parameters"]["properties"]
+    assert props["reasoning_effort"]["enum"] == ["none", "minimal", "low", "medium", "high", "xhigh"]
+    assert props["max_turns"]["minimum"] == 1
+    assert props["max_turns"]["maximum"] == 10000
+    for name in ("model", "provider", "reasoning_effort", "max_turns", "toolsets", "skills"):
+        assert name in props
+    assert props["toolsets"]["items"]["type"] == "string"
+    assert props["skills"]["items"]["type"] == "string"
+
+
+def test_execution_override_normalization_and_fail_closed_policy(monkeypatch):
+    monkeypatch.delenv("PROFILE_DELEGATE_ALLOWED_TOOLSETS", raising=False)
+    monkeypatch.delenv("PROFILE_DELEGATE_ALLOWED_SKILLS", raising=False)
+    assert core.normalize_requested_execution(model="  openai/gpt-5  ", provider=" openai ", max_turns=9) == {
+        "model": "openai/gpt-5", "provider": "openai", "reasoning_effort": None,
+        "max_turns": 9, "toolsets": [], "skills": [],
+    }
+    for kwargs in ({"reasoning_effort": "ultra"}, {"max_turns": 0}, {"max_turns": True},
+                   {"toolsets": ["file"]}, {"skills": ["hermes-agent"]},
+                   {"toolsets": [""]}, {"skills": "hermes-agent"}):
+        try:
+            core.normalize_requested_execution(**kwargs)
+        except core.ProfileDelegateError as exc:
+            assert exc.code == "validation_error"
+        else:
+            raise AssertionError(f"expected validation error for {kwargs}")
+
+
+def test_execution_override_allowlists_and_exact_argv(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOWED_TOOLSETS", "file,terminal")
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOWED_SKILLS", "hermes-agent,test-driven-development")
+    requested = core.normalize_requested_execution(model="openai/gpt-5", provider="openai", max_turns=12,
+        toolsets=["file", "terminal"], skills=["hermes-agent"])
+    request = {"profile": "reviewer", "session_mode": "new", "requested_session_id": "",
+               "child_approval_mode": "deny", "hermes_bin": "/usr/bin/hermes", "requested_execution": requested}
+    assert core.build_child_command(request, tmp_path) == [
+        "/usr/bin/hermes", "-p", "reviewer", "chat", "-q", f"@file:{tmp_path / 'prompt.txt'}", "-Q",
+        "--model", "openai/gpt-5", "--provider", "openai", "--max-turns", "12",
+        "--toolsets", "file,terminal", "--skills", "hermes-agent",
+        "--pass-session-id", "--source", "profile-delegate",
+    ]
+
+
+def test_reasoning_config_without_existing_scope_and_rejects_destination_symlink(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    managed_dir = core.prepare_reasoning_config(run_dir, "high")
+    assert core.load_yaml_mapping(managed_dir / "config.yaml") == {"agent": {"reasoning_effort": "high"}}
+    assert sorted(path.name for path in managed_dir.iterdir()) == ["config.yaml"]
+    assert not (managed_dir / "config.yaml").is_symlink()
+
+    unsafe = tmp_path / "unsafe"
+    unsafe.mkdir()
+    (unsafe / "reasoning_config").symlink_to(tmp_path / "external", target_is_directory=True)
+    with pytest.raises(core.ProfileDelegateError, match="symlink"):
+        core.prepare_reasoning_config(unsafe, "high")
+
+
+def test_discover_managed_scope_rejects_nonblank_inherited_value_without_filesystem_lookup(monkeypatch):
+    monkeypatch.setattr(core, "DEFAULT_MANAGED_SCOPE", Path("/definitely/missing/default-managed-scope"))
+
+    assert core.discover_managed_scope({"HERMES_MANAGED_DIR": " relative-admin "}) == Path("relative-admin")
+
+
+def test_discover_managed_scope_treats_existing_default_file_as_conflict(tmp_path, monkeypatch):
+    default_scope = tmp_path / "hermes"
+    default_scope.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setattr(core, "DEFAULT_MANAGED_SCOPE", default_scope)
+
+    assert core.discover_managed_scope({}) == default_scope
+
+
+def test_reasoning_override_rejects_existing_scope_before_run_mutation(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    profile_home = root / "profiles" / "reviewer"
+    profile_home.mkdir(parents=True)
+    admin_managed = tmp_path / "admin-managed"
+    admin_managed.mkdir()
+    (admin_managed / "config.yaml").write_text("security: {tirith_enabled: true}\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(admin_managed))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    request = {
+        "profile": "reviewer", "profile_home": str(profile_home), "timeout_seconds": 10,
+        "workdir": str(tmp_path), "hermes_bin": "/usr/bin/hermes", "session_mode": "new",
+        "requested_session_id": "", "session_title": "conflict", "delegate_depth": 0,
+        "child_approval_mode": "deny", "requested_execution": {
+            "model": None, "provider": None, "reasoning_effort": "high", "max_turns": None,
+            "toolsets": [], "skills": [],
+        },
+    }
+    core.json_safe_write(run_dir / "request.json", request)
+    original_status = {**request, "status": "running"}
+    core.json_safe_write(run_dir / "status.json", original_status)
+    core.text_safe_write(run_dir / "prompt.txt", "prompt")
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setattr(core, "run_capped_subprocess", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run")))
+
+    with pytest.raises(core.ProfileDelegateError, match="managed scope") as exc_info:
+        core._execute_delegate_run(run_dir)
+
+    assert exc_info.value.code == "reasoning_managed_scope_conflict"
+    assert not (run_dir / "reasoning_config").exists()
+    assert json.loads((run_dir / "status.json").read_text()) == original_status
+
+
+def test_reasoning_override_without_scope_keeps_canonical_home_and_session(tmp_path, monkeypatch):
+    profile_home = tmp_path / "profiles" / "reviewer"
+    profile_home.mkdir(parents=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    request = {
+        "profile": "reviewer", "profile_home": str(profile_home), "timeout_seconds": 10,
+        "workdir": str(tmp_path), "hermes_bin": "/usr/bin/hermes", "session_mode": "new",
+        "requested_session_id": "", "session_title": "reasoning", "delegate_depth": 0,
+        "child_approval_mode": "deny", "requested_execution": {
+            "model": None, "provider": None, "reasoning_effort": "high", "max_turns": None,
+            "toolsets": [], "skills": [],
+        },
+    }
+    core.json_safe_write(run_dir / "request.json", request)
+    core.json_safe_write(run_dir / "status.json", {**request, "status": "running"})
+    core.text_safe_write(run_dir / "prompt.txt", "prompt")
+    seen = {}
+    def fake_run(cmd, **kwargs):
+        seen["run_env"] = kwargs["env"]
+        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: canonical_sid')
+        core.text_safe_write(kwargs["stderr_path"], "")
+        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False,
+                "stdout_chars": 1, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+    def fake_rename(*args, **kwargs):
+        seen["rename_env"] = args[5]
+        return {"session_renamed": True}
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setattr(core, "discover_managed_scope", lambda env: None)
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run)
+    monkeypatch.setattr(core, "rename_session", fake_rename)
+    core._execute_delegate_run(run_dir)
+    expected_home = str(profile_home.resolve())
+    expected_managed = str(run_dir / "reasoning_config")
+    assert seen["run_env"]["HERMES_HOME"] == expected_home
+    assert seen["run_env"]["HERMES_MANAGED_DIR"] == expected_managed
+    assert seen["rename_env"]["HERMES_HOME"] == expected_home
+    assert seen["rename_env"]["HERMES_MANAGED_DIR"] == expected_managed
+    assert core.load_yaml_mapping(run_dir / "reasoning_config" / "config.yaml") == {"agent": {"reasoning_effort": "high"}}
+    assert json.loads((run_dir / "result.json").read_text())["session_id"] == "canonical_sid"
+
+
+def test_default_profile_reasoning_override_rejected_before_run_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core, "validate_profile", lambda p: core.ValidatedProfile("default", "default", str(tmp_path)))
+    with pytest.raises(core.ProfileDelegateError, match="default profile"):
+        core.delegate_profile("default", "task", session_title="default override", reasoning_effort="high")
+    assert not (tmp_path / "runs").exists()
+
+
+def test_execution_metadata_persisted_sync(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core, "validate_profile", lambda p: core.ValidatedProfile(p, p, str(tmp_path / p)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
+    def fake_run(cmd, **kwargs):
+        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
+        core.text_safe_write(kwargs["stderr_path"], "")
+        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False,
+                "stdout_chars": 1, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run)
+    result = core.delegate_profile("reviewer", "task", session_title="override", model=" demo ", max_turns=3)
+    run_dir = Path(result["paths"]["run_dir"])
+    expected = {"model": "demo", "provider": None, "reasoning_effort": None, "max_turns": 3, "toolsets": [], "skills": []}
+    assert result["requested_execution"] == expected
+    assert json.loads((run_dir / "request.json").read_text())["requested_execution"] == expected
+    assert json.loads((run_dir / "status.json").read_text())["requested_execution"] == expected
+    assert json.loads((run_dir / "result.json").read_text())["requested_execution"] == expected

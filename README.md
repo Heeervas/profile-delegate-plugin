@@ -1,6 +1,6 @@
 # Profile Delegate 🤝
 
-Version: `1.1.0`
+Version: `1.2.0`
 
 > Stable local-power-user Hermes Agent plugin. It is **not a sandbox** and should be configured deliberately before broad use.
 
@@ -18,8 +18,9 @@ Example uses:
 ## Features
 
 - Model-callable `profile_delegate` tool.
-- Runs the target profile with its normal Hermes context, memory, rules, tools, and model defaults.
-- Uses Hermes quiet single-query mode with a prompt file reference: `hermes -p <profile> chat -q @file:<prompt.txt> -Q --pass-session-id`; `--yolo` is added only when `child_approval_mode: approve_yolo` is explicitly configured or passed.
+- Runs the target profile with its normal Hermes context, memory, rules, tools, and model defaults unless a temporary per-call override is requested.
+- Supports requested per-call `model`, `provider`, `reasoning_effort`, `max_turns`, `toolsets`, and preloaded `skills`; omitted values inherit profile defaults.
+- Uses Hermes quiet single-query mode with a prompt file reference: `hermes -p <profile> chat -q @file:<prompt.txt> -Q --pass-session-id`; native overrides are separate argv elements and `--yolo` is added only when `child_approval_mode: approve_yolo` is explicitly configured or passed.
 - Explicit target-profile allowlist by default.
 - Recursion/depth guard via `PROFILE_DELEGATE_MAX_DEPTH`.
 - Global concurrency guard via lock files and `PROFILE_DELEGATE_MAX_CONCURRENT`.
@@ -89,6 +90,9 @@ Recommended minimum:
 export PROFILE_DELEGATE_ALLOWED_PROFILES=reviewer,builder,research
 export PROFILE_DELEGATE_MAX_DEPTH=1
 export PROFILE_DELEGATE_MAX_CONCURRENT=1
+# Required only when callers may override capability-bearing fields:
+export PROFILE_DELEGATE_ALLOWED_TOOLSETS=file,terminal,web
+export PROFILE_DELEGATE_ALLOWED_SKILLS=hermes-agent,test-driven-development
 ```
 
 Optional hardening:
@@ -137,6 +141,8 @@ export PROFILE_DELEGATE_ALLOW_ALL_PROFILES=true
 | `PROFILE_DELEGATE_MAX_STDERR_CHARS` | `100000` | Maximum stderr characters stored from the delegated Hermes process. Extra output is truncated. |
 | `PROFILE_DELEGATE_HERMES_BIN` | resolved from `PATH` | Absolute Hermes binary override. If unset, the plugin resolves `hermes` with `shutil.which()` and uses the absolute path. |
 | `PROFILE_DELEGATE_ALLOWED_WORKDIRS` | empty | Comma-separated allowed roots for explicit `workdir`. If unset, explicit `workdir` is rejected. |
+| `PROFILE_DELEGATE_ALLOWED_TOOLSETS` | empty | Explicit allowlist for per-call `toolsets`; unset/empty rejects any toolset override. |
+| `PROFILE_DELEGATE_ALLOWED_SKILLS` | empty | Explicit allowlist for per-call `skills`; unset/empty rejects any skill override. |
 | `PROFILE_DELEGATE_ENABLE_PREVIEW_PATCH` | `true` | Toggle the compatibility monkeypatch for one-line tool previews. Set `false` if a future Hermes preview API conflicts. |
 | `PROFILE_DELEGATE_RUNS_ROOT` | `$HERMES_HOME/profile_delegate/runs` | Private run artifact directory. |
 | `PROFILE_DELEGATE_LOCKS_ROOT` | `$HERMES_HOME/profile_delegate/locks` | Lock-file directory for concurrency slots. |
@@ -161,7 +167,13 @@ Input:
   "output_contract": "Optional extra output instructions.",
   "workdir": "",
   "background": false,
-  "notify_on_complete": true
+  "notify_on_complete": true,
+  "model": "openai/gpt-5",
+  "provider": "openai",
+  "reasoning_effort": "high",
+  "max_turns": 50,
+  "toolsets": ["file", "terminal"],
+  "skills": ["test-driven-development"]
 }
 ```
 
@@ -175,7 +187,11 @@ Notes:
 - `workdir` defaults to the current process working directory.
 - Explicit `workdir` values require `PROFILE_DELEGATE_ALLOWED_WORKDIRS`.
 - `timeout_seconds` is synchronous and bounded from 10 to `PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS` seconds; default local config is 1200 seconds and max is 1800 seconds.
-- `background=true` returns immediately with `mode: "async"`, `task_id`, and run artifact paths; the delegated run continues in a daemon worker thread inside the current Hermes process.
+- Execution precedence is per-call override > target profile default; blank `model`/`provider` and omitted fields inherit. These are requested controls: Hermes/provider still validates model/provider compatibility.
+- `toolsets` and `skills` are capability-bearing and fail closed unless every requested item is present in the corresponding plugin allowlist.
+- `reasoning_effort` uses a config-only temporary managed scope at `<run_dir>/reasoning_config` only when no administrator-managed scope exists. If inherited `HERMES_MANAGED_DIR` is nonblank, or `/etc/hermes` exists, the call fails before subprocess execution with `reasoning_managed_scope_conflict`; the plugin never copies, composes, or replaces administrator-managed files. The child keeps canonical target `HERMES_HOME`, so new/resumed sessions and rename operations remain durable. Default-profile reasoning overrides remain rejected because `-p default` has special root resolution.
+- `request.json`, `status.json`, sync/async responses, and final `result.json` expose normalized values under `requested_execution`; they do not claim remote acceptance.
+- `background=true` returns immediately with `mode: "async"`, `task_id`, and run artifact paths; the delegated run continues in the configured thread or detached worker using persisted request data.
 - `notify_on_complete=true` queues a native Hermes `async_delegation` completion event back to the originating gateway session when the background run finishes. This requires a fresh gateway/CLI process after plugin upgrade so the new schema/code is loaded.
 
 Default result requested from the target profile:
@@ -240,6 +256,7 @@ $HERMES_HOME/profile_delegate/runs/<task_id>/
   stdout.txt
   stderr.txt
   result.json
+  reasoning_config/  # config-only managed overlay when reasoning_effort is requested
 ```
 
 Security posture:

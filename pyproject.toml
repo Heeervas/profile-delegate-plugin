@@ -5,3 +5,10 @@ line-length = 140
 [tool.ruff.lint]
 select = ["E", "F"]
 ignore = ["E402", "E501"]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pyyaml==6.0.3",
+    "ruff==0.15.10",
+]
