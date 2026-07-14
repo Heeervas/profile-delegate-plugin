@@ -1,6 +1,6 @@
 # Profile Delegate 🤝
 
-Version: `1.2.0`
+Version: `1.2.1`
 
 > Stable local-power-user Hermes Agent plugin. It is **not a sandbox** and should be configured deliberately before broad use.
 
@@ -187,9 +187,10 @@ Notes:
 - `workdir` defaults to the current process working directory.
 - Explicit `workdir` values require `PROFILE_DELEGATE_ALLOWED_WORKDIRS`.
 - `timeout_seconds` is synchronous and bounded from 10 to `PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS` seconds; default local config is 1200 seconds and max is 1800 seconds.
-- Execution precedence is per-call override > target profile default; blank `model`/`provider` and omitted fields inherit. These are requested controls: Hermes/provider still validates model/provider compatibility.
+- Execution precedence is per-call override > target profile default; blank/omitted `model`, `provider`, and `reasoning_effort` inherit. These are requested controls: Hermes/provider still validates model/provider compatibility.
 - `toolsets` and `skills` are capability-bearing and fail closed unless every requested item is present in the corresponding plugin allowlist.
 - `reasoning_effort` uses a config-only temporary managed scope at `<run_dir>/reasoning_config` only when no administrator-managed scope exists. If inherited `HERMES_MANAGED_DIR` is nonblank, or `/etc/hermes` exists, the call fails before subprocess execution with `reasoning_managed_scope_conflict`; the plugin never copies, composes, or replaces administrator-managed files. The child keeps canonical target `HERMES_HOME`, so new/resumed sessions and rename operations remain durable. Default-profile reasoning overrides remain rejected because `-p default` has special root resolution.
+- Accepted reasoning requests are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Runtime/provider support still decides whether a request executes successfully. `max` is retained for forward-compatible GPT-5.6 use; `ultra` is a separate multi-agent mode, not a reasoning effort.
 - `request.json`, `status.json`, sync/async responses, and final `result.json` expose normalized values under `requested_execution`; they do not claim remote acceptance.
 - `background=true` returns immediately with `mode: "async"`, `task_id`, and run artifact paths; the delegated run continues in the configured thread or detached worker using persisted request data.
 - `notify_on_complete=true` queues a native Hermes `async_delegation` completion event back to the originating gateway session when the background run finishes. This requires a fresh gateway/CLI process after plugin upgrade so the new schema/code is loaded.
@@ -359,7 +360,7 @@ CI runs pytest and py_compile on Python 3.10, 3.11, and 3.12.
 
 ## Roadmap
 
-- Async mode with polling and cancellation.
+- Cancellation controls for active async runs.
 - Optional no-prompt-storage mode or redacted prompt artifacts.
 - Automatic retention/TTL cleanup.
 - First-class Hermes plugin preview API support when available.

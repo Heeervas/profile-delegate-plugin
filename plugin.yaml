@@ -1,5 +1,5 @@
 name: profile-delegate
-version: "1.2.0"
+version: "1.2.1"
 description: "Profile Delegate 🤝: bounded cross-profile delegation with temporary per-call execution overrides, async support, and safety guardrails."
 author: Adan
 requires_env: []

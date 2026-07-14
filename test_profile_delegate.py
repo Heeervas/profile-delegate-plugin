@@ -842,7 +842,7 @@ def test_chmod_best_effort_ignores_permission_error(tmp_path, monkeypatch):
 
 def test_execution_override_schema_contract():
     props = plugin._schema()["parameters"]["properties"]
-    assert props["reasoning_effort"]["enum"] == ["none", "minimal", "low", "medium", "high", "xhigh"]
+    assert props["reasoning_effort"]["enum"] == ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
     assert props["max_turns"]["minimum"] == 1
     assert props["max_turns"]["maximum"] == 10000
     for name in ("model", "provider", "reasoning_effort", "max_turns", "toolsets", "skills"):
@@ -858,6 +858,7 @@ def test_execution_override_normalization_and_fail_closed_policy(monkeypatch):
         "model": "openai/gpt-5", "provider": "openai", "reasoning_effort": None,
         "max_turns": 9, "toolsets": [], "skills": [],
     }
+    assert core.normalize_requested_execution(reasoning_effort="max")["reasoning_effort"] == "max"
     for kwargs in ({"reasoning_effort": "ultra"}, {"max_turns": 0}, {"max_turns": True},
                    {"toolsets": ["file"]}, {"skills": ["hermes-agent"]},
                    {"toolsets": [""]}, {"skills": "hermes-agent"}):

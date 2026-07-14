@@ -122,8 +122,8 @@ def _schema() -> Dict[str, Any]:
                 },
                 "reasoning_effort": {
                     "type": "string",
-                    "enum": ["none", "minimal", "low", "medium", "high", "xhigh"],
-                    "description": "Optional temporary reasoning effort, applied through a private per-run profile overlay.",
+                    "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                    "description": "Optional temporary reasoning effort, applied through a private per-run profile overlay. Supported values are runtime/provider-dependent; max is accepted for forward-compatible GPT-5.6 use.",
                 },
                 "max_turns": {
                     "type": "integer", "minimum": 1, "maximum": 10000,
