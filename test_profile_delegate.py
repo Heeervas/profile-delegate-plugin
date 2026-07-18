@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -201,6 +204,8 @@ def test_plugin_registers_tools():
     assert "session_id" in props
     assert "background" in props
     assert "notify_on_complete" in props
+    assert props["capability_preset"]["enum"] == ["review", "build"]
+    assert props["child_approval_mode"]["enum"] == ["deny", "approve_yolo"]
 
 
 def test_handler_validation_error_json():
@@ -248,13 +253,17 @@ def test_handler_passes_background_notify_and_origin_session(monkeypatch):
         return {"success": True, "mode": "async"}
 
     monkeypatch.setattr(plugin, "delegate_profile", fake_delegate)
-    monkeypatch.setattr(plugin, "_current_session_key", lambda: "discord:guild:channel:thread")
-    data = json.loads(plugin._handler({"profile": "reviewer", "task": "x", "session_title": "async", "background": True, "notify_on_complete": True, "child_approval_mode": "approve_yolo"}))
+    monkeypatch.setattr(plugin, "_current_origin", lambda: {
+        "platform": "discord", "source": "", "profile": "", "session_id": "",
+        "ui_session_id": "", "session_key": "discord:guild:channel:thread",
+    })
+    data = json.loads(plugin._handler({"profile": "reviewer", "task": "x", "session_title": "async", "background": True, "notify_on_complete": True, "child_approval_mode": "approve_yolo", "capability_preset": "review"}))
     assert data["success"] is True
     assert seen["background"] is True
     assert seen["notify_on_complete"] is True
     assert seen["origin_session_key"] == "discord:guild:channel:thread"
     assert seen["child_approval_mode"] == "approve_yolo"
+    assert seen["capability_preset"] == "review"
 
 
 def test_handler_requires_profile_policy_by_default(tmp_path, monkeypatch):
@@ -310,7 +319,7 @@ def test_child_environment_default_denies_without_parent_prompt(monkeypatch):
 
     env = core.child_environment(0)
     assert env["PROFILE_DELEGATE_DEPTH"] == "1"
-    assert env["HERMES_CRON_SESSION"] == "1"
+    assert "HERMES_CRON_SESSION" not in env
     assert "HERMES_YOLO_MODE" not in env
     assert "HERMES_ACCEPT_HOOKS" not in env
     assert "HERMES_SESSION_PLATFORM" not in env
@@ -331,12 +340,155 @@ def test_child_environment_approve_yolo_is_explicit(monkeypatch):
 
 
 def test_child_environment_strip_only_strips_without_policy_flags(monkeypatch):
-    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
-    env = core.child_environment(0, "strip_only")
-    assert env["PROFILE_DELEGATE_DEPTH"] == "1"
-    assert "HERMES_GATEWAY_SESSION" not in env
-    assert "HERMES_CRON_SESSION" not in env
-    assert "HERMES_YOLO_MODE" not in env
+    with pytest.raises(core.ProfileDelegateError, match="no longer accepted") as exc:
+        core.child_environment(0, "strip_only")
+    assert exc.value.code == "validation_error"
+
+
+def test_plugin_config_legacy_strip_only_migrates_fail_closed(monkeypatch):
+    import types
+
+    fake_config = types.SimpleNamespace(load_config=lambda: {"plugins": {"entries": {"profile-delegate": {"child_approval_mode": "strip_only"}}}})
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake_config)
+    assert core.plugin_config_child_approval_mode() == "deny"
+
+
+def test_review_capability_preset_filters_mutating_schema_and_terminal(monkeypatch):
+    monkeypatch.delenv("PROFILE_DELEGATE_ALLOWED_TOOLSETS", raising=False)
+    requested = core.normalize_requested_execution()
+    effective, capabilities = core.resolve_capability_preset("review", requested)
+    assert effective["toolsets"] == ["web", "file"]
+    assert {"write_file", "patch", "execute_code", "terminal", "process"}.issubset(
+        capabilities["blocked_tools"]
+    )
+    assert capabilities["terminal_access"] is False
+
+
+def test_review_capability_preset_rejects_ambiguous_toolset_override():
+    requested = core.normalize_requested_execution()
+    requested["toolsets"] = ["terminal"]
+    with pytest.raises(core.ProfileDelegateError, match="cannot be combined"):
+        core.resolve_capability_preset("review", requested)
+
+
+def test_build_capability_preset_preserves_requested_execution(monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOWED_TOOLSETS", "web,terminal")
+    requested = core.normalize_requested_execution(toolsets=["web", "terminal"])
+    effective, capabilities = core.resolve_capability_preset("build", requested)
+    assert effective == requested
+    assert capabilities["preset"] == "build"
+    assert capabilities["blocked_tools"] == []
+
+
+def test_child_command_uses_plugin_bootstrap_before_hermes(tmp_path):
+    request = {
+        "hermes_bin": "/opt/hermes/.venv/bin/hermes",
+        "profile": "reviewer",
+        "child_approval_mode": "deny",
+        "requested_execution": {},
+        "effective_capabilities": {"blocked_tools": []},
+        "session_mode": "new",
+    }
+    cmd = core.build_child_command(request, tmp_path)
+    assert cmd[0] == "/opt/hermes/.venv/bin/python"
+    assert Path(cmd[1]).name == "child_bootstrap.py"
+    assert cmd[cmd.index("--approval-mode") + 1] == "deny"
+    assert cmd[cmd.index("--events-path") + 1] == str(tmp_path / "approval_events.jsonl")
+    separator = cmd.index("--")
+    assert cmd[separator + 1] == "/opt/hermes/.venv/bin/hermes"
+
+
+def test_bootstrap_real_subprocess_deny_is_immediate_and_observable(tmp_path):
+    events = tmp_path / "approval_events.jsonl"
+    script = f"""
+import json, pathlib, time
+import child_bootstrap
+child_bootstrap.install_policy('deny', pathlib.Path({str(events)!r}), [])
+from tools import terminal_tool
+started=time.monotonic()
+danger=terminal_tool._check_all_guards('git reset --hard HEAD', 'local')
+safe=terminal_tool._check_all_guards('printf safe', 'local')
+from tools import approval
+code=approval.check_execute_code_guard('print(1)', 'local')
+print(json.dumps({{'danger': danger, 'safe': safe, 'code': code, 'elapsed': time.monotonic()-started}}))
+"""
+    completed = subprocess.run(
+        ["/opt/hermes/.venv/bin/python", "-c", script], cwd=str(PLUGIN_DIR), text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert result["danger"]["approved"] is False
+    assert result["safe"]["approved"] is True
+    assert result["code"]["approved"] is False
+    assert result["elapsed"] < 3
+    raw_events = events.read_text()
+    assert "git reset --hard HEAD" not in raw_events
+    event_rows = [json.loads(line) for line in raw_events.splitlines()]
+    assert any(row.get("outcome") == "denied" for row in event_rows)
+    assert any(row.get("detector") == "execute_code" for row in event_rows)
+
+
+def test_bootstrap_real_subprocess_yolo_keeps_hardline_floor(tmp_path):
+    events = tmp_path / "approval_events.jsonl"
+    script = f"""
+import json, pathlib, os
+os.environ['HERMES_YOLO_MODE']='1'
+import child_bootstrap
+child_bootstrap.install_policy('approve_yolo', pathlib.Path({str(events)!r}), [])
+from tools import terminal_tool
+print(json.dumps({{'recoverable': terminal_tool._check_all_guards('git reset --hard HEAD', 'local'), 'hardline': terminal_tool._check_all_guards('rm -rf /', 'local')}}))
+"""
+    completed = subprocess.run(
+        ["/opt/hermes/.venv/bin/python", "-c", script], cwd=str(PLUGIN_DIR), text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert result["recoverable"]["approved"] is True
+    assert result["hardline"]["approved"] is False
+
+
+def test_bootstrap_review_filter_removes_mutators_from_real_schema(tmp_path):
+    events = tmp_path / "approval_events.jsonl"
+    blocked = ["write_file", "patch", "execute_code", "terminal", "process"]
+    script = f"""
+import json, pathlib
+import child_bootstrap
+child_bootstrap.install_policy('deny', pathlib.Path({str(events)!r}), {blocked!r})
+import run_agent
+defs=run_agent.get_tool_definitions(enabled_toolsets=['web','file'], quiet_mode=True)
+names=[item['function']['name'] for item in defs]
+print(json.dumps(names))
+"""
+    completed = subprocess.run(
+        ["/opt/hermes/.venv/bin/python", "-c", script], cwd=str(PLUGIN_DIR), text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr
+    names = set(json.loads(completed.stdout.strip().splitlines()[-1]))
+    assert {"read_file", "search_files"}.issubset(names)
+    assert not names.intersection(blocked)
+
+
+def test_approval_timeout_marker_becomes_structured_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
+
+    def fake_run(_cmd, **kwargs):
+        core.text_safe_write(kwargs["stdout_path"], "Timeout — denying command\n")
+        core.text_safe_write(kwargs["stderr_path"], "")
+        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 27, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run)
+    result = core.delegate_profile("reviewer", "task", session_title="timeout marker")
+    assert result["success"] is False
+    assert result["error_code"] == "approval_timeout"
+    assert result["result"]["errors"] == ["approval_timeout_marker"]
 
 
 def test_plugin_config_child_approval_mode_reads_yaml(monkeypatch):
@@ -348,9 +500,10 @@ def test_plugin_config_child_approval_mode_reads_yaml(monkeypatch):
 
 
 def test_timeout_defaults_and_caps(monkeypatch):
-    assert core.DEFAULT_TIMEOUT_SECONDS == 1200
+    expected_default = int(os.getenv("PROFILE_DELEGATE_DEFAULT_TIMEOUT_SECONDS", "1200"))
+    assert core.DEFAULT_TIMEOUT_SECONDS == expected_default
     assert core.MAX_TIMEOUT_SECONDS >= core.DEFAULT_TIMEOUT_SECONDS
-    assert core.coerce_timeout(None) == 1200
+    assert core.coerce_timeout(None) == expected_default
     assert core.coerce_timeout(core.MAX_TIMEOUT_SECONDS) == core.MAX_TIMEOUT_SECONDS
     try:
         core.coerce_timeout(core.MAX_TIMEOUT_SECONDS + 1)
@@ -466,13 +619,15 @@ def test_delegate_uses_prompt_file_not_raw_prompt_in_argv(tmp_path, monkeypatch)
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     result = core.delegate_profile("reviewer", "PRIVATE TASK TEXT", session_title="private task")
     assert result["success"] is True
-    assert seen["cmd"][:5] == ["/usr/bin/hermes", "-p", "reviewer", "chat", "-q"]
-    assert seen["cmd"][5].startswith("@file:")
-    assert "-Q" in seen["cmd"]
-    assert "--pass-session-id" in seen["cmd"]
-    assert "--source" in seen["cmd"]
-    assert "profile-delegate" in seen["cmd"]
-    assert "--resume" not in seen["cmd"]
+    separator = seen["cmd"].index("--")
+    child = seen["cmd"][separator + 1:]
+    assert child[:5] == ["/usr/bin/hermes", "-p", "reviewer", "chat", "-q"]
+    assert child[5].startswith("@file:")
+    assert "-Q" in child
+    assert "--pass-session-id" in child
+    assert "--source" in child
+    assert "profile-delegate" in child
+    assert "--resume" not in child
     assert seen["env"]["PROFILE_DELEGATE_DEPTH"] == "1"
     assert "PRIVATE TASK TEXT" not in " ".join(seen["cmd"])
 
@@ -519,7 +674,12 @@ def test_delegate_reports_truncated_output(tmp_path, monkeypatch):
 def test_run_capped_subprocess_timeout_keeps_bounded_output(tmp_path, monkeypatch):
     monkeypatch.setenv("PROFILE_DELEGATE_MAX_STDOUT_CHARS", "12")
     monkeypatch.setenv("PROFILE_DELEGATE_MAX_STDERR_CHARS", "12")
-    code = "import time; print('ready', flush=True); time.sleep(5)"
+    marker = tmp_path / "grandchild.pid"
+    code = (
+        "import pathlib,subprocess,sys,time; "
+        f"p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); pathlib.Path({str(marker)!r}).write_text(str(p.pid)); "
+        "print('ready', flush=True); time.sleep(30)"
+    )
     result = core.run_capped_subprocess(
         [sys.executable, "-c", code],
         cwd=tmp_path,
@@ -531,6 +691,11 @@ def test_run_capped_subprocess_timeout_keeps_bounded_output(tmp_path, monkeypatc
     assert result["timed_out"] is True
     assert result["exit_code"] is None
     assert len((tmp_path / "stdout.txt").read_text()) <= 12
+    grandchild_pid = int(marker.read_text())
+    deadline = time.time() + 2
+    while Path(f"/proc/{grandchild_pid}").exists() and time.time() < deadline:
+        time.sleep(0.05)
+    assert not Path(f"/proc/{grandchild_pid}").exists()
 
 
 
@@ -557,7 +722,6 @@ def test_delegate_background_returns_running_and_finishes(tmp_path, monkeypatch)
     assert result["status"] == "running"
     run_dir = Path(result["paths"]["run_dir"])
 
-    import time
     for _ in range(50):
         status = json.loads((run_dir / "status.json").read_text())
         if status.get("status") == "completed":
@@ -583,7 +747,6 @@ def test_detached_background_worker_finalizes_completed_run(tmp_path, monkeypatc
     assert result["mode"] == "async"
     run_dir = Path(result["paths"]["run_dir"])
 
-    import time
     status = {}
     for _ in range(100):
         status = json.loads((run_dir / "status.json").read_text())
@@ -679,7 +842,7 @@ def test_status_list_and_prune(tmp_path, monkeypatch):
     assert status["task_id"] == task_id
     assert status["stdout_tail"] == "hello stdout"
 
-    listed = core.profile_delegate_list()
+    listed = core.profile_delegate_list(scope="all")
     assert listed["count"] == 1
 
     dry = core.profile_delegate_prune(max_age_days=1, dry_run=True)
@@ -726,6 +889,66 @@ def test_resume_mode_requires_session_id():
         assert exc.code == "validation_error"
     else:
         raise AssertionError("expected validation_error")
+
+
+def test_transient_classifier_is_strict_and_deterministic():
+    assert core.classify_transient_failure(exit_code=1, timed_out=False, stdout="RemoteProtocolError: incomplete chunked read", stderr="", parsed_result=None) == "incomplete_chunked_read"
+    assert core.classify_transient_failure(exit_code=1, timed_out=False, stdout="API call failed after 3 retries: Connection error.", stderr="", parsed_result=None) == "connection_error"
+    assert core.classify_transient_failure(exit_code=1, timed_out=False, stdout="API call failed after 3 retries: Connection error.", stderr="HTTP 401", parsed_result=None) is None
+    assert core.classify_transient_failure(exit_code=-9, timed_out=False, stdout="API call failed after 3 retries: Connection error.", stderr="", parsed_result=None) is None
+
+
+def test_transient_failure_resumes_same_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
+    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core.time, "sleep", lambda _s: None)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            stdout, code = "API call failed after 3 retries: Connection error.\nsession_id: stable_sid", 1
+        else:
+            stdout, code = '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\nsession_id: stable_sid', 0
+        core.text_safe_write(kwargs["stdout_path"], stdout)
+        core.text_safe_write(kwargs["stderr_path"], "")
+        return {"exit_code": code, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": len(stdout), "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000, "stdout_diagnostic_tail": stdout, "stderr_diagnostic_tail": ""}
+
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run)
+    monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True})
+    result = core.delegate_profile("reviewer", "task", session_title="recover")
+    assert result["success"] is True
+    assert len(calls) == 2
+    assert calls[1][calls[1].index("--resume") + 1] == "stable_sid"
+    assert [item["transient_reason"] for item in result["recovery_history"]] == ["connection_error", None]
+
+
+def test_transient_failure_without_session_id_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
+    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        stdout = "API call failed after 3 retries: Connection error."
+        core.text_safe_write(kwargs["stdout_path"], stdout)
+        core.text_safe_write(kwargs["stderr_path"], "")
+        return {"exit_code": 1, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": len(stdout), "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000, "stdout_diagnostic_tail": stdout, "stderr_diagnostic_tail": ""}
+
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run)
+    result = core.delegate_profile("reviewer", "task", session_title="safe failure")
+    assert len(calls) == 1
+    assert result["error_code"] == "transient_resume_session_missing"
 
 
 def test_delegate_resume_uses_resume_flag_and_skips_rename(tmp_path, monkeypatch):
@@ -877,7 +1100,11 @@ def test_execution_override_allowlists_and_exact_argv(tmp_path, monkeypatch):
         toolsets=["file", "terminal"], skills=["hermes-agent"])
     request = {"profile": "reviewer", "session_mode": "new", "requested_session_id": "",
                "child_approval_mode": "deny", "hermes_bin": "/usr/bin/hermes", "requested_execution": requested}
-    assert core.build_child_command(request, tmp_path) == [
+    cmd = core.build_child_command(request, tmp_path)
+    assert Path(cmd[1]).name == "child_bootstrap.py"
+    assert cmd[cmd.index("--approval-mode") + 1] == "deny"
+    separator = cmd.index("--")
+    assert cmd[separator + 1:] == [
         "/usr/bin/hermes", "-p", "reviewer", "chat", "-q", f"@file:{tmp_path / 'prompt.txt'}", "-Q",
         "--model", "openai/gpt-5", "--provider", "openai", "--max-turns", "12",
         "--toolsets", "file,terminal", "--skills", "hermes-agent",
@@ -1019,3 +1246,298 @@ def test_execution_metadata_persisted_sync(tmp_path, monkeypatch):
     assert json.loads((run_dir / "request.json").read_text())["requested_execution"] == expected
     assert json.loads((run_dir / "status.json").read_text())["requested_execution"] == expected
     assert json.loads((run_dir / "result.json").read_text())["requested_execution"] == expected
+
+
+ORIGIN_A = {
+    "platform": "discord",
+    "source": "discord",
+    "profile": "default",
+    "session_id": "session-a",
+    "ui_session_id": "ui-a",
+    "session_key": "discord:guild:channel:thread",
+}
+
+
+def _write_inspection_run(runs, task_id, **overrides):
+    run_dir = runs / task_id
+    run_dir.mkdir(parents=True)
+    status = {
+        "artifact_schema_version": 2,
+        "task_id": task_id,
+        "profile": "builder",
+        "session_title": "inspection run",
+        "status": "completed",
+        "created_at": "2026-07-17T10:00:00+00:00",
+        "ended_at": "2026-07-17T10:01:00+00:00",
+        "error_code": None,
+        "origin": dict(ORIGIN_A),
+        "origin_session_key": ORIGIN_A["session_key"],
+        "background_worker_mode": "detached",
+        "worker_pid": 123,
+        "notification_status": "queued",
+    }
+    status.update(overrides)
+    core.json_safe_write(run_dir / "status.json", status)
+    core.text_safe_write(run_dir / "stdout.txt", "")
+    core.text_safe_write(run_dir / "stderr.txt", "")
+    return run_dir
+
+
+def test_current_origin_reads_only_normalized_concurrency_safe_session_fields(monkeypatch):
+    import types
+
+    values = {
+        "HERMES_SESSION_PLATFORM": " discord ",
+        "HERMES_SESSION_SOURCE": "discord",
+        "HERMES_SESSION_PROFILE": "default",
+        "HERMES_SESSION_ID": "session-a",
+        "HERMES_UI_SESSION_ID": "ui-a",
+        "HERMES_SESSION_KEY": "discord:guild:channel:thread",
+        "HERMES_SESSION_USER_ID": "must-not-persist",
+    }
+    fake = types.SimpleNamespace(get_session_env=lambda name, default="": values.get(name, default))
+    monkeypatch.setitem(sys.modules, "gateway.session_context", fake)
+
+    assert plugin._current_origin() == ORIGIN_A
+
+
+def test_handler_passes_origin_without_overwriting_target_session_id(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(plugin, "_current_origin", lambda: dict(ORIGIN_A))
+    monkeypatch.setattr(plugin, "delegate_profile", lambda **kwargs: seen.update(kwargs) or {"success": True})
+
+    data = json.loads(plugin._handler(
+        {"profile": "reviewer", "task": "x", "session_title": "origin", "session_id": "target-session"},
+        session_id="caller-session",
+    ))
+
+    assert data["success"] is True
+    assert seen["session_id"] == "target-session"
+    assert seen["origin"] == ORIGIN_A
+    assert seen["origin_session_key"] == ORIGIN_A["session_key"]
+
+
+def test_delegate_persists_schema_v2_origin_and_legacy_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core, "validate_profile", lambda p: core.ValidatedProfile(p, p, str(tmp_path / p)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
+    monkeypatch.setattr(core, "_start_background_run", lambda run_dir: None)
+
+    result = core.delegate_profile(
+        "reviewer", "task", session_title="origin persistence", background=True,
+        origin={**ORIGIN_A, "session_id": "  session-a  ", "unexpected": "private"},
+    )
+    run_dir = Path(result["paths"]["run_dir"])
+    request = json.loads((run_dir / "request.json").read_text())
+    status = json.loads((run_dir / "status.json").read_text())
+
+    for artifact in (request, status):
+        assert artifact["artifact_schema_version"] == 2
+        assert artifact["origin"] == ORIGIN_A
+        assert artifact["origin_session_key"] == ORIGIN_A["session_key"]
+        assert "unexpected" not in artifact["origin"]
+
+
+def test_normalize_persisted_origin_supports_v2_legacy_and_missing():
+    assert core.normalize_persisted_origin({"origin": ORIGIN_A}) == ORIGIN_A
+    legacy = core.normalize_persisted_origin({"origin_session_key": "discord:legacy"})
+    assert legacy == {
+        "platform": "", "source": "", "profile": "", "session_id": "",
+        "ui_session_id": "", "session_key": "discord:legacy",
+    }
+    assert core.normalize_persisted_origin({}) == {
+        "platform": "", "source": "", "profile": "", "session_id": "",
+        "ui_session_id": "", "session_key": "",
+    }
+
+
+@pytest.mark.parametrize(
+    ("run_origin", "caller_origin", "scope", "expected"),
+    [
+        ({**ORIGIN_A, "ui_session_id": "ui-a"}, ORIGIN_A, "current_session", (True, "ui_session_id")),
+        ({**ORIGIN_A, "ui_session_id": "ui-other"}, ORIGIN_A, "current_session", (False, "ui_session_id")),
+        ({**ORIGIN_A, "ui_session_id": "", "session_id": "session-a"}, ORIGIN_A, "current_session", (True, "session_id")),
+        ({"session_key": ORIGIN_A["session_key"]}, ORIGIN_A, "current_session", (True, "session_key")),
+        ({**ORIGIN_A, "session_id": "session-other"}, {**ORIGIN_A, "ui_session_id": ""}, "current_session", (False, "session_id")),
+        ({**ORIGIN_A, "session_id": "session-other"}, ORIGIN_A, "current_lane", (True, "session_key")),
+        ({}, ORIGIN_A, "current_session", (False, None)),
+        ({}, {}, "all", (True, None)),
+    ],
+)
+def test_origin_match_precedence_and_legacy_fallback(run_origin, caller_origin, scope, expected):
+    assert core.origin_match(run_origin, caller_origin, scope) == expected
+
+
+def test_activity_projection_is_read_only_and_handles_liveness(monkeypatch):
+    assert core.derive_activity({"status": "completed", "worker_pid": 1}) == {
+        "activity": "finished", "worker_alive": None,
+    }
+    monkeypatch.setattr(core.os, "kill", lambda pid, signal: None)
+    assert core.derive_activity({"status": "running", "background_worker_mode": "detached", "worker_pid": 123}) == {
+        "activity": "active", "worker_alive": True,
+    }
+    monkeypatch.setattr(core.os, "kill", lambda pid, signal: (_ for _ in ()).throw(ProcessLookupError()))
+    assert core.derive_activity({"status": "running", "background_worker_mode": "detached", "worker_pid": 123}) == {
+        "activity": "stale", "worker_alive": False,
+    }
+    monkeypatch.setattr(core.os, "kill", lambda pid, signal: (_ for _ in ()).throw(PermissionError()))
+    assert core.probe_worker_alive(123) is True
+    assert core.derive_activity({"status": "running", "background_worker_mode": "thread"}) == {
+        "activity": "unknown", "worker_alive": None,
+    }
+    assert core.derive_activity({"status": "running", "background_worker_mode": "detached", "worker_pid": "bad"}) == {
+        "activity": "unknown", "worker_alive": None,
+    }
+
+
+def test_list_defaults_to_current_session_and_composes_scope_filters(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(runs))
+    _write_inspection_run(runs, "pd_20260717_100003_cccccc", session_title="same session")
+    _write_inspection_run(
+        runs, "pd_20260717_100002_bbbbbb", session_title="same lane older session",
+        origin={**ORIGIN_A, "ui_session_id": "", "session_id": "session-old"},
+    )
+    _write_inspection_run(
+        runs, "pd_20260717_100001_aaaaaa", profile="reviewer", session_title="other lane",
+        status="running", origin={**ORIGIN_A, "ui_session_id": "ui-z", "session_id": "session-z", "session_key": "discord:other"},
+    )
+
+    current = core.profile_delegate_list(caller_origin=ORIGIN_A)
+    assert current["scope_requested"] == "current_session"
+    assert current["scope_effective"] == "current_session"
+    assert current["origin_match_by"] == "ui_session_id"
+    assert [item["session_title"] for item in current["runs"]] == ["same session"]
+    assert current["runs"][0]["activity"] == "finished"
+    assert current["runs"][0]["origin"] == ORIGIN_A
+
+    lane = core.profile_delegate_list(scope="current_lane", caller_origin=ORIGIN_A)
+    assert [item["session_title"] for item in lane["runs"]] == ["same session", "same lane older session"]
+
+    all_running_reviewer = core.profile_delegate_list(
+        scope="all", statuses=["running"], profile="reviewer", caller_origin=ORIGIN_A,
+    )
+    assert [item["session_title"] for item in all_running_reviewer["runs"]] == ["other lane"]
+
+
+def test_list_applies_limit_after_filter_and_reports_unresolved_scope(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(runs))
+    _write_inspection_run(runs, "pd_20260717_100003_cccccc", origin={**ORIGIN_A, "session_id": "other"})
+    _write_inspection_run(runs, "pd_20260717_100002_bbbbbb")
+    _write_inspection_run(runs, "pd_20260717_100001_aaaaaa")
+
+    listed = core.profile_delegate_list(limit=1, caller_origin={**ORIGIN_A, "ui_session_id": ""})
+    assert listed["count"] == 1
+    assert listed["runs"][0]["task_id"] == "pd_20260717_100002_bbbbbb"
+
+    unresolved = core.profile_delegate_list(caller_origin={})
+    assert unresolved["count"] == 0
+    assert unresolved["scope_effective"] == "unresolved"
+    assert "scope='all'" in unresolved["warning"]
+
+    unresolved_lane = core.profile_delegate_list(scope="current_lane", caller_origin={})
+    assert unresolved_lane["count"] == 0
+    assert unresolved_lane["scope_effective"] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"scope": "everything"},
+        {"scope": "all", "statuses": "running"},
+        {"scope": "all", "statuses": ["queued"]},
+    ],
+)
+def test_list_rejects_invalid_scope_and_status_filters(kwargs):
+    with pytest.raises(core.ProfileDelegateError) as exc_info:
+        core.profile_delegate_list(**kwargs)
+    assert exc_info.value.code == "validation_error"
+
+
+def test_list_preserves_corrupt_runs_for_explicit_global_inspection(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(runs))
+    corrupt = runs / "pd_20260717_100001_aaaaaa"
+    corrupt.mkdir(parents=True)
+    (corrupt / "status.json").write_text("not json", encoding="utf-8")
+
+    listed = core.profile_delegate_list(scope="all", statuses=["corrupt"])
+    assert listed["count"] == 1
+    assert listed["runs"][0]["status"] == "corrupt"
+
+
+def test_status_enriches_origin_ownership_worker_and_notification_without_mutation(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(runs))
+    run_dir = _write_inspection_run(
+        runs, "pd_20260717_100001_aaaaaa", status="running", worker_pid=4321,
+        notification_status="pending",
+    )
+    before = (run_dir / "status.json").read_bytes()
+    monkeypatch.setattr(core.os, "kill", lambda pid, signal: None)
+
+    same = core.profile_delegate_status(run_dir.name, caller_origin=ORIGIN_A)
+    other = core.profile_delegate_status(run_dir.name, caller_origin={**ORIGIN_A, "ui_session_id": "ui-other"})
+    unavailable = core.profile_delegate_status(run_dir.name, caller_origin={})
+
+    assert same["session_title"] == "inspection run"
+    assert same["origin"] == ORIGIN_A
+    assert same["belongs_to_current_session"] is True
+    assert same["origin_match_by"] == "ui_session_id"
+    assert same["background_worker_mode"] == "detached"
+    assert same["worker_pid"] == 4321
+    assert same["worker_alive"] is True
+    assert same["activity"] == "active"
+    assert same["notification_status"] == "pending"
+    assert other["belongs_to_current_session"] is False
+    assert unavailable["belongs_to_current_session"] is None
+    assert (run_dir / "status.json").read_bytes() == before
+
+
+def test_legacy_status_remains_readable_and_matches_by_lane(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(runs))
+    run_dir = runs / "pd_20260717_100001_aaaaaa"
+    run_dir.mkdir(parents=True)
+    core.json_safe_write(run_dir / "status.json", {
+        "task_id": run_dir.name, "profile": "builder", "status": "running",
+        "origin_session_key": ORIGIN_A["session_key"],
+    })
+    core.text_safe_write(run_dir / "stdout.txt", "")
+    core.text_safe_write(run_dir / "stderr.txt", "")
+
+    status = core.profile_delegate_status(run_dir.name, caller_origin=ORIGIN_A)
+    assert status["origin"]["session_key"] == ORIGIN_A["session_key"]
+    assert status["belongs_to_current_session"] is True
+    assert status["origin_match_by"] == "session_key"
+    assert status["activity"] == "unknown"
+
+
+def test_list_and_status_handlers_capture_origin_and_schema_contract(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(plugin, "_current_origin", lambda: dict(ORIGIN_A))
+    monkeypatch.setattr(
+        plugin, "profile_delegate_list",
+        lambda **kwargs: seen.setdefault("list", kwargs) or {"success": True},
+    )
+    monkeypatch.setattr(
+        plugin, "profile_delegate_status",
+        lambda *args, **kwargs: seen.setdefault("status", (args, kwargs)) or {"success": True},
+    )
+
+    json.loads(plugin._list_handler({"scope": "all", "status": ["running"], "profile": "builder", "limit": 5}))
+    json.loads(plugin._status_handler({"task_id": "pd_20260717_100001_aaaaaa", "tail_chars": 99}))
+
+    assert seen["list"] == {
+        "limit": 5, "scope": "all", "statuses": ["running"], "profile": "builder",
+        "caller_origin": ORIGIN_A,
+    }
+    assert seen["status"][1]["caller_origin"] == ORIGIN_A
+    list_props = plugin._list_schema()["parameters"]["properties"]
+    assert list_props["scope"]["default"] == "current_session"
+    assert list_props["scope"]["enum"] == ["current_session", "current_lane", "all"]
+    assert list_props["status"]["items"]["enum"] == ["running", "completed", "failed", "corrupt"]
+    assert "profile" in list_props

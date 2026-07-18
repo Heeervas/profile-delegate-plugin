@@ -8,6 +8,7 @@ import re
 import shutil
 import string
 import selectors
+import signal
 import subprocess
 import sys
 import threading
@@ -58,14 +59,46 @@ DEFAULT_MAX_STDERR_CHARS = 100_000
 DEFAULT_MAX_DEPTH = 1
 DEFAULT_MAX_CONCURRENT = 1
 DEFAULT_MAX_ASYNC = 2
+DEFAULT_MAX_TRANSIENT_RESUMES = 2
+TRANSIENT_RESUME_DELAY_SECONDS = 10
+DIAGNOSTIC_TAIL_CHARS = 4_000
+DIAGNOSTIC_TAIL_LINES = 20
 VALID_RESULT_STATUSES = {"ok", "blocked", "failed"}
 VALID_SESSION_MODES = {"new", "resume"}
-VALID_CHILD_APPROVAL_MODES = {"deny", "approve_yolo", "strip_only"}
+VALID_CHILD_APPROVAL_MODES = {"deny", "approve_yolo"}
+LEGACY_CHILD_APPROVAL_MODES = {"strip_only"}
+VALID_CAPABILITY_PRESETS = {"review", "build"}
+REVIEW_TOOLSETS = ["web", "file"]
+REVIEW_BLOCKED_TOOLS = [
+    "write_file", "patch", "execute_code", "terminal", "process",
+    "skill_manage", "memory", "cronjob", "send_message", "delegate_task",
+    "profile_delegate", "profile_delegate_prune",
+]
 VALID_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 DEFAULT_CHILD_APPROVAL_MODE = "deny"
+DEFAULT_CAPABILITY_PRESET = "build"
 TRUTHY = {"1", "true", "yes", "on"}
 MAX_EXECUTION_NAME_CHARS = 200
 MAX_EXECUTION_LIST_ITEMS = 100
+APPROVAL_TIMEOUT_MARKERS = ("Timeout — denying command", "Timeout - denying command")
+PLUGIN_DIR = Path(__file__).resolve().parent
+CHILD_BOOTSTRAP = PLUGIN_DIR / "child_bootstrap.py"
+ARTIFACT_SCHEMA_VERSION = 2
+ORIGIN_FIELDS = ("platform", "source", "profile", "session_id", "ui_session_id", "session_key")
+MAX_ORIGIN_VALUE_CHARS = 500
+VALID_INSPECTION_SCOPES = {"current_session", "current_lane", "all"}
+VALID_RUN_STATUSES = {"running", "completed", "failed", "corrupt"}
+
+TRANSIENT_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
+    ("incomplete_chunked_read", re.compile(r"^(?:[\w.]+\.)?RemoteProtocolError:\s*(?:peer closed connection without sending complete message body|incomplete chunked read).*$", re.I)),
+    ("connection_reset", re.compile(r"^(?:[\w.]+(?:Error|Exception):\s*)?.*Connection reset by peer\.?$", re.I)),
+    ("stream_closed_prematurely", re.compile(r"^(?:API call failed after \d+ retries:|(?:[\w.]+\.)?(?:ReadError|WriteError|NetworkError):)\s*.*(?:stream closed prematurely|stream ended unexpectedly)\.?$", re.I)),
+    ("provider_503", re.compile(r"^API call failed after \d+ retries:\s*HTTP 503(?::|\s).*(?:Service Unavailable|upstream|temporarily unavailable|try again|retry later).*$", re.I)),
+    ("codex_slots_temporarily_unavailable", re.compile(r"^(?:HTTP 503:\s*)?All Codex auth slots are temporarily unavailable.*(?:upstream|try again|retry later).*$", re.I)),
+    ("server_disconnected", re.compile(r"^(?:[\w.]+\.)?ServerDisconnectedError:\s*\S.*$", re.I)),
+    ("remote_protocol_error", re.compile(r"^(?:[\w.]+\.)?RemoteProtocolError:\s*\S.*$", re.I)),
+    ("connection_error", re.compile(r"^API call failed after \d+ retries:\s*Connection error\.?$", re.I)),
+)
 
 
 class ProfileDelegateError(Exception):
@@ -119,6 +152,82 @@ def parse_iso(value: str) -> Optional[datetime]:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+def normalize_origin(origin: Any = None, legacy_session_key: Any = "") -> Dict[str, str]:
+    """Return the bounded, privacy-minimal origin provenance shape."""
+    source = origin if isinstance(origin, dict) else {}
+    normalized = {
+        field: ensure_text(source.get(field, "")).strip()[:MAX_ORIGIN_VALUE_CHARS]
+        for field in ORIGIN_FIELDS
+    }
+    if not normalized["session_key"]:
+        normalized["session_key"] = ensure_text(legacy_session_key).strip()[:MAX_ORIGIN_VALUE_CHARS]
+    return normalized
+
+
+def normalize_persisted_origin(artifact: Any) -> Dict[str, str]:
+    artifact_dict = artifact if isinstance(artifact, dict) else {}
+    return normalize_origin(
+        artifact_dict.get("origin"),
+        artifact_dict.get("origin_session_key", ""),
+    )
+
+
+def origin_match(
+    run_origin: Any,
+    caller_origin: Any,
+    scope: str = "current_session",
+) -> Tuple[bool, Optional[str]]:
+    """Compare run provenance without weakening a present identifier mismatch."""
+    if scope == "all":
+        return True, None
+    run = normalize_origin(run_origin)
+    caller = normalize_origin(caller_origin)
+    fields = ("session_key",) if scope == "current_lane" else (
+        "ui_session_id", "session_id", "session_key"
+    )
+    for field in fields:
+        if caller[field] and run[field]:
+            return run[field] == caller[field], field
+    return False, None
+
+
+def probe_worker_alive(pid: Any) -> Optional[bool]:
+    """Return advisory process liveness without changing run state."""
+    if isinstance(pid, bool):
+        return None
+    try:
+        normalized_pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if normalized_pid <= 0:
+        return None
+    try:
+        os.kill(normalized_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def derive_activity(status: Any) -> Dict[str, Any]:
+    """Project advisory activity from canonical status; never mutate artifacts."""
+    data = status if isinstance(status, dict) else {}
+    lifecycle = ensure_text(data.get("status")).strip().lower()
+    if lifecycle in {"completed", "failed"}:
+        return {"activity": "finished", "worker_alive": None}
+    if lifecycle != "running" or data.get("background_worker_mode") != "detached":
+        return {"activity": "unknown", "worker_alive": None}
+    alive = probe_worker_alive(data.get("worker_pid"))
+    if alive is True:
+        return {"activity": "active", "worker_alive": True}
+    if alive is False:
+        return {"activity": "stale", "worker_alive": False}
+    return {"activity": "unknown", "worker_alive": None}
 
 
 def make_task_id() -> str:
@@ -287,6 +396,39 @@ def normalize_requested_execution(
         "max_turns": normalized_turns,
         "toolsets": _execution_list("toolsets", toolsets, "PROFILE_DELEGATE_ALLOWED_TOOLSETS"),
         "skills": _execution_list("skills", skills, "PROFILE_DELEGATE_ALLOWED_SKILLS"),
+    }
+
+
+def resolve_capability_preset(
+    preset: Any, requested_execution: Dict[str, Any]
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Resolve a plugin-owned child capability posture without widening parent policy."""
+    normalized = (ensure_text(preset) or DEFAULT_CAPABILITY_PRESET).strip().lower().replace("-", "_")
+    if normalized not in VALID_CAPABILITY_PRESETS:
+        raise ProfileDelegateError("capability_preset must be one of: review, build", "validation_error")
+    effective = dict(requested_execution)
+    if normalized == "review":
+        if effective.get("toolsets"):
+            raise ProfileDelegateError(
+                "capability_preset='review' cannot be combined with toolsets overrides",
+                "validation_error",
+            )
+        # Hermes' file toolset also contains mutators. The child bootstrap removes
+        # those tool schemas before agent execution, leaving read_file/search_files.
+        effective["toolsets"] = list(REVIEW_TOOLSETS)
+        return effective, {
+            "preset": "review",
+            "toolsets": list(REVIEW_TOOLSETS),
+            "blocked_tools": list(REVIEW_BLOCKED_TOOLS),
+            "terminal_access": False,
+            "read_only_terminal_claimed": False,
+        }
+    return effective, {
+        "preset": "build",
+        "toolsets": list(effective.get("toolsets") or []),
+        "blocked_tools": [],
+        "terminal_access": "terminal" in (effective.get("toolsets") or []),
+        "read_only_terminal_claimed": False,
     }
 
 
@@ -488,7 +630,7 @@ def coerce_session_mode(value: Any) -> str:
     return mode
 
 
-def coerce_child_approval_mode(value: Any) -> str:
+def coerce_child_approval_mode(value: Any, *, allow_legacy_config: bool = False) -> str:
     mode = (ensure_text(value) or DEFAULT_CHILD_APPROVAL_MODE).strip().lower().replace("-", "_")
     aliases = {
         "approve": "approve_yolo",
@@ -501,9 +643,16 @@ def coerce_child_approval_mode(value: Any) -> str:
         "none": "strip_only",
     }
     mode = aliases.get(mode, mode)
+    if mode in LEGACY_CHILD_APPROVAL_MODES:
+        if allow_legacy_config:
+            return "deny"
+        raise ProfileDelegateError(
+            "child_approval_mode='strip_only' is deprecated and no longer accepted for new calls; use 'deny'",
+            "validation_error",
+        )
     if mode not in VALID_CHILD_APPROVAL_MODES:
         raise ProfileDelegateError(
-            "child_approval_mode must be one of: deny, approve_yolo, strip_only",
+            "child_approval_mode must be one of: deny, approve_yolo",
             "validation_error",
         )
     return mode
@@ -516,7 +665,10 @@ def plugin_config_child_approval_mode() -> str:
         cfg = load_config() or {}
         entries = (cfg.get("plugins") or {}).get("entries") or {}
         entry = entries.get("profile-delegate") or {}
-        return coerce_child_approval_mode(entry.get("child_approval_mode", DEFAULT_CHILD_APPROVAL_MODE))
+        return coerce_child_approval_mode(
+            entry.get("child_approval_mode", DEFAULT_CHILD_APPROVAL_MODE),
+            allow_legacy_config=True,
+        )
     except ProfileDelegateError:
         raise
     except Exception:
@@ -586,26 +738,46 @@ def prepare_reasoning_config(run_dir: Path, reasoning_effort: str) -> Path:
     return managed_dir
 
 
-def build_child_command(request: Dict[str, Any], run_dir: Path) -> List[str]:
-    requested = request.get("requested_execution") or {}
-    cmd = [ensure_text(request.get("hermes_bin")), "-p", ensure_text(request.get("profile")),
-           "chat", "-q", f"@file:{run_dir / 'prompt.txt'}", "-Q"]
-    if ensure_text(request.get("child_approval_mode")) == "approve_yolo":
-        cmd.append("--yolo")
+def build_child_command(
+    request: Dict[str, Any], run_dir: Path, *,
+    prompt_path: Optional[Path] = None,
+    resume_session_id: Optional[str] = None,
+) -> List[str]:
+    requested = request.get("effective_execution") or request.get("requested_execution") or {}
+    hermes_cmd = [ensure_text(request.get("hermes_bin")), "-p", ensure_text(request.get("profile")),
+                  "chat", "-q", f"@file:{prompt_path or (run_dir / 'prompt.txt')}", "-Q"]
+    approval_mode = ensure_text(request.get("child_approval_mode")) or DEFAULT_CHILD_APPROVAL_MODE
+    if approval_mode == "approve_yolo":
+        hermes_cmd.append("--yolo")
     if requested.get("model"):
-        cmd += ["--model", ensure_text(requested["model"])]
+        hermes_cmd += ["--model", ensure_text(requested["model"])]
     if requested.get("provider"):
-        cmd += ["--provider", ensure_text(requested["provider"])]
+        hermes_cmd += ["--provider", ensure_text(requested["provider"])]
     if requested.get("max_turns") is not None:
-        cmd += ["--max-turns", str(requested["max_turns"])]
+        hermes_cmd += ["--max-turns", str(requested["max_turns"])]
     if requested.get("toolsets"):
-        cmd += ["--toolsets", ",".join(requested["toolsets"])]
+        hermes_cmd += ["--toolsets", ",".join(requested["toolsets"])]
     if requested.get("skills"):
-        cmd += ["--skills", ",".join(requested["skills"])]
-    if ensure_text(request.get("session_mode") or "new") == "resume":
-        cmd += ["--resume", ensure_text(request.get("requested_session_id"))]
-    cmd += ["--pass-session-id", "--source", "profile-delegate"]
-    return cmd
+        hermes_cmd += ["--skills", ",".join(requested["skills"])]
+    effective_resume_id = resume_session_id
+    if effective_resume_id is None and ensure_text(request.get("session_mode") or "new") == "resume":
+        effective_resume_id = ensure_text(request.get("requested_session_id"))
+    if effective_resume_id:
+        hermes_cmd += ["--resume", effective_resume_id]
+    hermes_cmd += ["--pass-session-id", "--source", "profile-delegate"]
+
+    capabilities = request.get("effective_capabilities") or {}
+    blocked_tools = capabilities.get("blocked_tools") or []
+    child_python = str(Path(ensure_text(request.get("hermes_bin"))).resolve().parent / "python")
+    if not Path(child_python).is_file():
+        child_python = sys.executable
+    return [
+        child_python, str(CHILD_BOOTSTRAP),
+        "--approval-mode", approval_mode,
+        "--events-path", str(run_dir / "approval_events.jsonl"),
+        "--blocked-tools", ",".join(ensure_text(item) for item in blocked_tools),
+        "--", *hermes_cmd,
+    ]
 
 
 def capped_text(text: str, limit: int) -> Tuple[str, bool]:
@@ -643,6 +815,7 @@ def run_capped_subprocess(cmd: List[str], cwd: Path, env: Dict[str, str], timeou
     stderr_truncated = False
     timed_out = False
     exit_code: Optional[int] = None
+    diagnostic_tails = {"stdout": "", "stderr": ""}
 
     with subprocess.Popen(
         cmd,
@@ -650,6 +823,7 @@ def run_capped_subprocess(cmd: List[str], cwd: Path, env: Dict[str, str], timeou
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        start_new_session=True,
     ) as proc:
         assert proc.stdout is not None
         assert proc.stderr is not None
@@ -662,7 +836,10 @@ def run_capped_subprocess(cmd: List[str], cwd: Path, env: Dict[str, str], timeou
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
-                proc.kill()
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 break
             events = sel.select(timeout=min(0.2, remaining))
             if not events:
@@ -679,6 +856,7 @@ def run_capped_subprocess(cmd: List[str], cwd: Path, env: Dict[str, str], timeou
                         pass
                     continue
                 chunk = chunk_bytes.decode("utf-8", "replace")
+                diagnostic_tails[key.data] = (diagnostic_tails[key.data] + chunk)[-DIAGNOSTIC_TAIL_CHARS:]
                 if key.data == "stdout":
                     stdout_written, truncated = append_capped(stdout_path, chunk, stdout_written, stdout_limit)
                     stdout_truncated = stdout_truncated or truncated
@@ -706,6 +884,8 @@ def run_capped_subprocess(cmd: List[str], cwd: Path, env: Dict[str, str], timeou
         "stderr_chars": stderr_written,
         "stdout_limit": stdout_limit,
         "stderr_limit": stderr_limit,
+        "stdout_diagnostic_tail": diagnostic_tails["stdout"],
+        "stderr_diagnostic_tail": diagnostic_tails["stderr"],
     }
 
 def build_prompt(task: str, context: str = "", output_contract: str = "") -> str:
@@ -926,6 +1106,7 @@ def base_paths(run_dir: Path) -> Dict[str, str]:
         "prompt": str(run_dir / "prompt.txt"),
         "stdout": str(run_dir / "stdout.txt"),
         "stderr": str(run_dir / "stderr.txt"),
+        "approval_events": str(run_dir / "approval_events.jsonl"),
         "worker_stdout": str(run_dir / "worker_stdout.txt"),
         "worker_stderr": str(run_dir / "worker_stderr.txt"),
         "result": str(run_dir / "result.json"),
@@ -951,6 +1132,45 @@ def extract_session_id_footer(text: str) -> str:
 
 def strip_session_id_footer(text: str) -> str:
     return split_session_id_footer(text)[0]
+
+
+def _bounded_diagnostic_lines(text: str) -> List[str]:
+    lines = [line.strip() for line in strip_session_id_footer(text)[-DIAGNOSTIC_TAIL_CHARS:].splitlines() if line.strip()]
+    return lines[-DIAGNOSTIC_TAIL_LINES:]
+
+
+def classify_transient_failure(
+    *, exit_code: Optional[int], timed_out: bool, stdout: str, stderr: str,
+    parsed_result: Optional[Dict[str, Any]], stdout_truncated: bool = False,
+    stderr_truncated: bool = False,
+) -> Optional[str]:
+    if timed_out or exit_code in {None, 0, -9, 137}:
+        return None
+    if isinstance(parsed_result, dict) and ensure_text(parsed_result.get("status")).lower() in VALID_RESULT_STATUSES:
+        return None
+    lines = _bounded_diagnostic_lines(stdout) + _bounded_diagnostic_lines(stderr)
+    joined = "\n".join(lines)
+    exclusions = (
+        r"\bHTTP\s+(?:400|401|403|404)\b", r"\b(?:quota|billing|credential|invalid model|invalid provider)\b",
+        r"\b(?:context length|context window|approval|policy|validation|SIGKILL|out of memory|OOM)\b",
+    )
+    if any(re.search(pattern, joined, re.I) for pattern in exclusions):
+        return None
+    for reason, pattern in TRANSIENT_PATTERNS:
+        if any(pattern.fullmatch(line) for line in lines):
+            return reason
+    return None
+
+
+def build_recovery_prompt(attempt_number: int) -> str:
+    prompt = (
+        "The previous delegated run ended because of a transient connection or stream failure.\n"
+        "Continue exactly where you left off in this same session. Do not restart the original task or repeat work/actions already completed.\n"
+        "Finish the original task and return the requested final JSON result.\n"
+    )
+    if attempt_number >= 3:
+        prompt += "This is the final automatic recovery attempt.\n"
+    return prompt
 
 
 def rename_session(hermes_bin: str, profile: str, session_id: str, title: str, cwd: Path, env: Dict[str, str], timeout: int = 30) -> Dict[str, Any]:
@@ -989,11 +1209,9 @@ def child_environment(parent_depth: int, child_approval_mode: str = DEFAULT_CHIL
         # Explicit trusted mode: match Hermes -z/script semantics.
         env["HERMES_YOLO_MODE"] = "1"
         env["HERMES_ACCEPT_HOOKS"] = "1"
-    elif mode == "deny":
-        # Plugin-only fail-closed path using Hermes' existing non-interactive
-        # cron denial branch. This avoids parent-chat prompts and makes tools
-        # recover from a structured refusal instead of hanging.
-        env["HERMES_CRON_SESSION"] = "1"
+    # Approval is owned by child_bootstrap.py in both modes. Do not simulate a
+    # cron run: quiet chat may re-enable interactivity, and cron state is not an
+    # approval contract for delegated subprocesses.
     return env
 
 
@@ -1079,134 +1297,118 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     title_text = ensure_text(request.get("session_title") or "")
     depth = int(request.get("delegate_depth") or 0)
     child_approval_mode = coerce_child_approval_mode(request.get("child_approval_mode", DEFAULT_CHILD_APPROVAL_MODE))
-
-    cmd = build_child_command(request, run_dir)
     env = child_environment(depth, child_approval_mode)
-    requested_execution = request.get("requested_execution") or {}
+    requested_execution = request.get("effective_execution") or request.get("requested_execution") or {}
     reasoning_effort = requested_execution.get("reasoning_effort")
     if reasoning_effort:
         profile_home = Path(ensure_text(request.get("profile_home"))).resolve()
         existing_managed_dir = discover_managed_scope(env)
         if existing_managed_dir is not None:
-            raise ProfileDelegateError(
-                f"reasoning_effort cannot replace existing Hermes managed scope: {existing_managed_dir}",
-                "reasoning_managed_scope_conflict",
-            )
-        managed_dir = prepare_reasoning_config(run_dir, ensure_text(reasoning_effort))
-        # Keep persistence and all profile resources canonical. This temporary
-        # managed input is allowed only when no administrator scope exists.
+            raise ProfileDelegateError(f"reasoning_effort cannot replace existing Hermes managed scope: {existing_managed_dir}", "reasoning_managed_scope_conflict")
         env["HERMES_HOME"] = str(profile_home)
-        env["HERMES_MANAGED_DIR"] = str(managed_dir)
+        env["HERMES_MANAGED_DIR"] = str(prepare_reasoning_config(run_dir, ensure_text(reasoning_effort)))
+
+    deadline = time.monotonic() + timeout
+    max_resumes = env_int("PROFILE_DELEGATE_MAX_TRANSIENT_RESUMES", DEFAULT_MAX_TRANSIENT_RESUMES, 0, 2)
+    history: List[Dict[str, Any]] = []
+    stable_session_id = resume_id
+    run_meta: Dict[str, Any] = {}
+    exit_code: Optional[int] = None
+    timed_out = False
+    integrity_error = ""
 
     with acquire_concurrency_slot() as slot:
         status["concurrency_slot"] = slot.slot
         json_safe_write(run_dir / "status.json", status)
-        run_meta = run_capped_subprocess(
-            cmd,
-            cwd=cwd,
-            env=env,
-            timeout=timeout,
-            stdout_path=run_dir / "stdout.txt",
-            stderr_path=run_dir / "stderr.txt",
-        )
-        exit_code = run_meta["exit_code"]
-        timed_out = bool(run_meta["timed_out"])
+        for attempt_index in range(max_resumes + 1):
+            attempt = attempt_index + 1
+            remaining = int(deadline - time.monotonic())
+            if remaining < 1:
+                timed_out = True
+                break
+            prompt_path = run_dir / ("prompt.txt" if attempt == 1 else f"recovery_prompt_{attempt}.txt")
+            if attempt > 1:
+                text_safe_write(prompt_path, build_recovery_prompt(attempt))
+            stdout_path = run_dir / ("stdout.txt" if attempt == 1 else f"attempt_{attempt}_stdout.txt")
+            stderr_path = run_dir / ("stderr.txt" if attempt == 1 else f"attempt_{attempt}_stderr.txt")
+            cmd = build_child_command(request, run_dir, prompt_path=prompt_path, resume_session_id=stable_session_id if attempt > 1 else None)
+            started = time.monotonic()
+            run_meta = run_capped_subprocess(cmd, cwd=cwd, env=env, timeout=remaining, stdout_path=stdout_path, stderr_path=stderr_path)
+            exit_code = run_meta["exit_code"]
+            timed_out = bool(run_meta["timed_out"])
+            stdout_attempt = tail_text(stdout_path, run_meta["stdout_limit"])
+            stderr_attempt = tail_text(stderr_path, run_meta["stderr_limit"])
+            footer_id = extract_session_id_footer(stdout_attempt) or extract_session_id_footer(stderr_attempt)
+            if footer_id:
+                if stable_session_id and footer_id != stable_session_id:
+                    integrity_error = "resume_session_mismatch"
+                else:
+                    stable_session_id = footer_id
+            parsed_attempt = extract_json_object(strip_session_id_footer(stdout_attempt))
+            transient = None if integrity_error else classify_transient_failure(
+                exit_code=exit_code, timed_out=timed_out,
+                stdout=run_meta.get("stdout_diagnostic_tail", stdout_attempt),
+                stderr=run_meta.get("stderr_diagnostic_tail", stderr_attempt),
+                parsed_result=parsed_attempt,
+                stdout_truncated=bool(run_meta.get("stdout_truncated")),
+                stderr_truncated=bool(run_meta.get("stderr_truncated")),
+            )
+            history.append({"attempt": attempt, "exit_code": exit_code, "timed_out": timed_out, "transient_reason": transient, "session_id": stable_session_id, "duration_seconds": round(time.monotonic() - started, 3), "stdout": str(stdout_path), "stderr": str(stderr_path)})
+            if integrity_error or not transient or attempt_index >= max_resumes:
+                break
+            if not stable_session_id:
+                integrity_error = "transient_resume_session_missing"
+                break
+            if deadline - time.monotonic() < TRANSIENT_RESUME_DELAY_SECONDS + 10:
+                integrity_error = "transient_resume_budget_exhausted"
+                break
+            time.sleep(TRANSIENT_RESUME_DELAY_SECONDS)
 
-    stdout = tail_text(run_dir / "stdout.txt", run_meta["stdout_limit"])
-    stderr = tail_text(run_dir / "stderr.txt", run_meta["stderr_limit"])
-    footer_session_id = extract_session_id_footer(stdout) or extract_session_id_footer(stderr)
+    if history and history[-1]["attempt"] > 1:
+        shutil.copyfile(history[-1]["stdout"], run_dir / "stdout.txt")
+        shutil.copyfile(history[-1]["stderr"], run_dir / "stderr.txt")
+    stdout = tail_text(run_dir / "stdout.txt", int(run_meta.get("stdout_limit", DEFAULT_MAX_STDOUT_CHARS)))
+    stderr = tail_text(run_dir / "stderr.txt", int(run_meta.get("stderr_limit", DEFAULT_MAX_STDERR_CHARS)))
     parse_stdout = strip_session_id_footer(stdout)
+    approval_timeout_marker = next((marker for marker in APPROVAL_TIMEOUT_MARKERS if marker in stdout or marker in stderr), None)
 
     if timed_out:
-        result = {
-            "status": "failed",
-            "summary": f"Delegated profile timed out after {timeout} seconds.",
-            "artifacts": [],
-            "errors": ["timeout"],
-            "next_steps": ["Retry with a smaller task or larger timeout_seconds."],
-            "structured": True,
-            "error_code": "timeout",
-        }
-        final_status = "timed_out"
-        error_code = "timeout"
+        error_code, final_status = "timeout", "timed_out"
+        result = {"status": "failed", "summary": f"Delegated profile timed out after {timeout} seconds.", "artifacts": [], "errors": ["timeout"], "next_steps": [], "structured": True, "error_code": error_code}
+    elif integrity_error:
+        error_code, final_status = integrity_error, "failed"
+        result = {"status": "failed", "summary": f"Automatic recovery stopped safely: {integrity_error}.", "artifacts": [], "errors": [integrity_error], "next_steps": [], "structured": True, "error_code": error_code}
+    elif approval_timeout_marker:
+        error_code, final_status = "approval_timeout", "failed"
+        result = {"status": "failed", "summary": "Delegated child reached an approval timeout.", "artifacts": [str(run_dir / "approval_events.jsonl")], "errors": ["approval_timeout_marker"], "next_steps": [], "structured": True, "error_code": error_code}
     else:
-        parsed = extract_json_object(parse_stdout)
-        result = normalize_result(parsed, str(run_dir / "stdout.txt"), raw_output=parse_stdout)
+        result = normalize_result(extract_json_object(parse_stdout), str(run_dir / "stdout.txt"), raw_output=parse_stdout)
         error_code = result.get("error_code") if isinstance(result.get("error_code"), str) else None
         if exit_code != 0:
             result["status"] = "failed"
-            errors = coerce_list(result.get("errors"))
-            errors.append(f"hermes_exit_code_{exit_code}")
-            if run_meta.get("stdout_truncated"):
-                errors.append("stdout_truncated")
-            if run_meta.get("stderr_truncated"):
-                errors.append("stderr_truncated")
-            if stderr.strip():
-                errors.append("stderr_nonempty")
-            result["errors"] = errors
-            result["error_code"] = "nonzero_exit"
-            error_code = "nonzero_exit"
+            result["errors"] = coerce_list(result.get("errors")) + [f"hermes_exit_code_{exit_code}"]
+            error_code = "transient_resume_exhausted" if history and history[-1].get("transient_reason") else "nonzero_exit"
+            result["error_code"] = error_code
         final_status = "completed" if exit_code == 0 else "failed"
 
-    child_session_id = resume_id if mode == "resume" else footer_session_id
-    rename_meta = {"session_renamed": False}
-    if mode == "new" and final_status == "completed":
-        try:
-            rename_meta = rename_session(hermes_bin, profile, child_session_id, title_text, cwd, env)
-        except Exception as exc:
-            rename_meta = {"session_renamed": False, "rename_error": f"{type(exc).__name__}: {exc}"}
+    child_session_id = stable_session_id
+    rename_meta: Dict[str, Any] = {"session_renamed": False}
+    if mode == "new" and final_status == "completed" and result.get("status") != "failed":
+        remaining = int(deadline - time.monotonic())
+        if remaining >= 1:
+            try:
+                rename_meta = rename_session(hermes_bin, profile, child_session_id, title_text, cwd, env, timeout=min(30, remaining))
+            except Exception as exc:
+                rename_meta = {"session_renamed": False, "rename_error": f"{type(exc).__name__}: {exc}"}
+        else:
+            rename_meta["rename_skipped"] = "deadline_exhausted"
     if child_session_id:
         result["session_id"] = child_session_id
-    result["requested_execution"] = request.get("requested_execution") or {}
-
+    result.update({"requested_execution": request.get("requested_execution") or {}, "effective_execution": request.get("effective_execution") or {}, "effective_capabilities": request.get("effective_capabilities") or {}, "approval_policy": request.get("approval_policy") or {}, "recovery_history": history})
     json_safe_write(run_dir / "result.json", result)
-    try:
-        latest_status = read_json_file(run_dir / "status.json")
-        if status.get("concurrency_slot") is not None:
-            latest_status["concurrency_slot"] = status.get("concurrency_slot")
-        status = latest_status
-    except Exception:
-        pass
-    status.update(
-        {
-            "status": final_status,
-            "ended_at": now_iso(),
-            "exit_code": exit_code,
-            "timed_out": timed_out,
-            "error_code": error_code,
-            "stdout_truncated": run_meta.get("stdout_truncated"),
-            "stderr_truncated": run_meta.get("stderr_truncated"),
-            "stdout_chars": run_meta.get("stdout_chars"),
-            "stderr_chars": run_meta.get("stderr_chars"),
-            "stdout_limit": run_meta.get("stdout_limit"),
-            "stderr_limit": run_meta.get("stderr_limit"),
-            "child_session_id": child_session_id,
-            **rename_meta,
-        }
-    )
+    status.update({"status": final_status, "ended_at": now_iso(), "exit_code": exit_code, "timed_out": timed_out, "error_code": error_code, "stdout_truncated": bool(run_meta.get("stdout_truncated")), "stderr_truncated": bool(run_meta.get("stderr_truncated")), "stdout_chars": run_meta.get("stdout_chars"), "stderr_chars": run_meta.get("stderr_chars"), "stdout_limit": run_meta.get("stdout_limit"), "stderr_limit": run_meta.get("stderr_limit"), "child_session_id": child_session_id, "recovery_history": history, **rename_meta})
     json_safe_write(run_dir / "status.json", status)
-
-    return {
-        "success": final_status == "completed" and result.get("status") not in {"failed"},
-        "mode": "sync",
-        "task_id": request.get("task_id", run_dir.name),
-        "profile": profile,
-        "status": final_status,
-        "error_code": error_code,
-        "session_title": title_text,
-        "session_mode": mode,
-        "requested_session_id": resume_id,
-        "child_approval_mode": child_approval_mode,
-        "requested_execution": request.get("requested_execution") or {},
-        "child_session_id": child_session_id,
-        **rename_meta,
-        "result": result,
-        "paths": base_paths(run_dir),
-        "exit_code": exit_code,
-        "timed_out": timed_out,
-        "stdout_truncated": run_meta.get("stdout_truncated"),
-        "stderr_truncated": run_meta.get("stderr_truncated"),
-    }
+    return {"success": final_status == "completed" and result.get("status") != "failed", "mode": "sync", "task_id": request.get("task_id", run_dir.name), "profile": profile, "status": final_status, "error_code": error_code, "session_title": title_text, "session_mode": mode, "requested_session_id": resume_id, "child_approval_mode": child_approval_mode, "requested_execution": request.get("requested_execution") or {}, "effective_execution": request.get("effective_execution") or {}, "effective_capabilities": request.get("effective_capabilities") or {}, "approval_policy": request.get("approval_policy") or {}, "child_session_id": child_session_id, "recovery_history": history, **rename_meta, "result": result, "paths": base_paths(run_dir), "exit_code": exit_code, "timed_out": timed_out, "stdout_truncated": run_meta.get("stdout_truncated"), "stderr_truncated": run_meta.get("stderr_truncated")}
 
 
 _async_lock = threading.Lock()
@@ -1368,6 +1570,7 @@ def delegate_profile(
     background: bool = False,
     notify_on_complete: bool = True,
     origin_session_key: str = "",
+    origin: Optional[Dict[str, Any]] = None,
     child_approval_mode: Any = None,
     model: Any = None,
     provider: Any = None,
@@ -1375,6 +1578,7 @@ def delegate_profile(
     max_turns: Any = None,
     toolsets: Any = None,
     skills: Any = None,
+    capability_preset: Any = DEFAULT_CAPABILITY_PRESET,
 ) -> Dict[str, Any]:
     depth, max_depth = enforce_depth_policy()
     validated = validate_profile(profile)
@@ -1394,6 +1598,9 @@ def delegate_profile(
         model=model, provider=provider, reasoning_effort=reasoning_effort,
         max_turns=max_turns, toolsets=toolsets, skills=skills,
     )
+    effective_execution, effective_capabilities = resolve_capability_preset(
+        capability_preset, requested_execution
+    )
     if requested_execution["reasoning_effort"] and validated.canonical == "default":
         raise ProfileDelegateError(
             "reasoning_effort override is not supported for the default profile",
@@ -1401,6 +1608,8 @@ def delegate_profile(
         )
     cwd = resolve_workdir(workdir)
     hermes_bin = resolve_hermes_bin()
+    normalized_origin = normalize_origin(origin, origin_session_key)
+    normalized_origin_session_key = normalized_origin["session_key"]
 
     task_id = make_task_id()
     run_dir = get_runs_root() / task_id
@@ -1409,6 +1618,7 @@ def delegate_profile(
 
     prompt = build_prompt(task_text, context_text, contract_text)
     request = {
+        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
         "task_id": task_id,
         "profile": validated.canonical,
         "requested_profile": validated.requested,
@@ -1428,10 +1638,20 @@ def delegate_profile(
         "delegate_depth": depth,
         "delegate_max_depth": max_depth,
         "child_approval_mode": resolved_child_approval_mode,
+        "approval_policy": {
+            "requested": ensure_text(child_approval_mode) or "config/default",
+            "effective": resolved_child_approval_mode,
+            "owner": "profile-delegate-child-bootstrap",
+            "interactive": False,
+        },
+        "capability_preset": effective_capabilities["preset"],
+        "effective_capabilities": effective_capabilities,
         "requested_execution": requested_execution,
+        "effective_execution": effective_execution,
         "background": bool(background),
         "notify_on_complete": bool(notify_on_complete),
-        "origin_session_key": origin_session_key or "",
+        "origin": normalized_origin,
+        "origin_session_key": normalized_origin_session_key,
     }
     status = {
         **request,
@@ -1492,8 +1712,11 @@ def delegate_profile(
             "requested_session_id": resume_id,
             "child_approval_mode": resolved_child_approval_mode,
             "requested_execution": requested_execution,
+            "effective_execution": effective_execution,
+            "effective_capabilities": effective_capabilities,
+            "approval_policy": request["approval_policy"],
             "notify_on_complete": bool(notify_on_complete),
-            "origin_session_key_present": bool(origin_session_key),
+            "origin_session_key_present": bool(normalized_origin_session_key),
             "paths": base_paths(run_dir),
         }
 
@@ -1518,7 +1741,11 @@ def resolve_run_dir(task_id: str) -> Path:
     return run_dir
 
 
-def profile_delegate_status(task_id: str, tail_chars: Any = 4000) -> Dict[str, Any]:
+def profile_delegate_status(
+    task_id: str,
+    tail_chars: Any = 4000,
+    caller_origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     run_dir = resolve_run_dir(task_id)
     try:
         max_tail = max(0, min(int(tail_chars or 4000), 20_000))
@@ -1526,10 +1753,18 @@ def profile_delegate_status(task_id: str, tail_chars: Any = 4000) -> Dict[str, A
         raise ProfileDelegateError("tail_chars must be an integer", "validation_error") from exc
     status = read_json_file(run_dir / "status.json")
     result = read_json_file(run_dir / "result.json") if (run_dir / "result.json").exists() else None
+    persisted_origin = normalize_persisted_origin(status)
+    normalized_caller = normalize_origin(caller_origin)
+    belongs, matched_by = origin_match(persisted_origin, normalized_caller, "current_session")
+    caller_available = any(normalized_caller.values())
+    run_available = any(persisted_origin.values())
+    ownership: Optional[bool] = belongs if caller_available and run_available and matched_by else None
+    activity = derive_activity(status)
     return {
         "success": True,
         "task_id": status.get("task_id", task_id),
         "profile": status.get("profile"),
+        "session_title": status.get("session_title"),
         "status": status.get("status", "unknown"),
         "error_code": status.get("error_code"),
         "exit_code": status.get("exit_code"),
@@ -1540,6 +1775,14 @@ def profile_delegate_status(task_id: str, tail_chars: Any = 4000) -> Dict[str, A
         "started_at": status.get("started_at"),
         "ended_at": status.get("ended_at"),
         "requested_execution": status.get("requested_execution") or {},
+        "origin": persisted_origin,
+        "belongs_to_current_session": ownership,
+        "origin_match_by": matched_by,
+        "background_worker_mode": status.get("background_worker_mode"),
+        "worker_pid": status.get("worker_pid"),
+        "worker_alive": activity["worker_alive"],
+        "activity": activity["activity"],
+        "notification_status": status.get("notification_status"),
         "result": result,
         "stdout_tail": tail_text(run_dir / "stdout.txt", max_tail),
         "stderr_tail": tail_text(run_dir / "stderr.txt", max_tail),
@@ -1554,29 +1797,108 @@ def iter_run_dirs() -> Iterable[Path]:
     return sorted((p for p in root.iterdir() if p.is_dir() and p.name.startswith("pd_")), key=lambda p: p.name, reverse=True)
 
 
-def profile_delegate_list(limit: Any = 20) -> Dict[str, Any]:
+def profile_delegate_list(
+    limit: Any = 20,
+    scope: str = "current_session",
+    statuses: Optional[List[str]] = None,
+    profile: str = "",
+    caller_origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     try:
         max_items = max(1, min(int(limit or 20), 100))
     except Exception as exc:
         raise ProfileDelegateError("limit must be an integer", "validation_error") from exc
+    requested_scope = ensure_text(scope or "current_session").strip().lower()
+    if requested_scope not in VALID_INSPECTION_SCOPES:
+        raise ProfileDelegateError(
+            "scope must be one of: current_session, current_lane, all",
+            "validation_error",
+        )
+    if statuses is None:
+        normalized_statuses: Optional[set[str]] = None
+    elif not isinstance(statuses, list):
+        raise ProfileDelegateError("status must be an array", "validation_error")
+    else:
+        normalized_statuses = {ensure_text(item).strip().lower() for item in statuses}
+        if normalized_statuses - VALID_RUN_STATUSES:
+            raise ProfileDelegateError(
+                "status entries must be one of: running, completed, failed, corrupt",
+                "validation_error",
+            )
+    profile_filter = ensure_text(profile).strip()
+    normalized_caller = normalize_origin(caller_origin)
+    required_caller_field = (
+        "session_key"
+        if requested_scope == "current_lane" and normalized_caller["session_key"]
+        else None
+    )
+    if requested_scope == "current_session":
+        required_caller_field = next(
+            (field for field in ("ui_session_id", "session_id", "session_key") if normalized_caller[field]),
+            None,
+        )
+    if requested_scope != "all" and not required_caller_field:
+        return {
+            "success": True,
+            "runs_root": str(get_runs_root()),
+            "scope_requested": requested_scope,
+            "scope_effective": "unresolved",
+            "origin_match_by": None,
+            "warning": "current caller origin is unavailable; pass scope='all' explicitly for global inspection",
+            "count": 0,
+            "runs": [],
+        }
+
     runs = []
-    for run_dir in list(iter_run_dirs())[:max_items]:
+    match_by_values: set[str] = set()
+    for run_dir in iter_run_dirs():
         try:
             status = read_json_file(run_dir / "status.json")
         except ProfileDelegateError:
             status = {"task_id": run_dir.name, "status": "corrupt"}
+        lifecycle = ensure_text(status.get("status") or "corrupt").strip().lower()
+        if normalized_statuses is not None and lifecycle not in normalized_statuses:
+            continue
+        if profile_filter and ensure_text(status.get("profile")).strip() != profile_filter:
+            continue
+        persisted_origin = normalize_persisted_origin(status)
+        matches, matched_by = origin_match(persisted_origin, normalized_caller, requested_scope)
+        if not matches:
+            continue
+        if matched_by:
+            match_by_values.add(matched_by)
+        activity = derive_activity(status)
         runs.append(
             {
                 "task_id": status.get("task_id", run_dir.name),
                 "profile": status.get("profile"),
-                "status": status.get("status"),
+                "session_title": status.get("session_title"),
+                "status": lifecycle,
+                "activity": activity["activity"],
+                "worker_alive": activity["worker_alive"],
                 "error_code": status.get("error_code"),
                 "created_at": status.get("created_at"),
                 "ended_at": status.get("ended_at"),
+                "origin": persisted_origin,
                 "run_dir": str(run_dir),
             }
         )
-    return {"success": True, "runs_root": str(get_runs_root()), "count": len(runs), "runs": runs}
+        if len(runs) >= max_items:
+            break
+    origin_match_by = None
+    if len(match_by_values) == 1:
+        origin_match_by = next(iter(match_by_values))
+    elif requested_scope != "all":
+        origin_match_by = required_caller_field
+    return {
+        "success": True,
+        "runs_root": str(get_runs_root()),
+        "scope_requested": requested_scope,
+        "scope_effective": requested_scope,
+        "origin_match_by": origin_match_by,
+        "count": len(runs),
+        "runs": runs,
+    }
 
 
 def profile_delegate_prune(max_age_days: Any = 14, dry_run: bool = True) -> Dict[str, Any]:

@@ -1,6 +1,6 @@
 # Profile Delegate 🤝
 
-Version: `1.2.1`
+Version: `1.4.0`
 
 > Stable local-power-user Hermes Agent plugin. It is **not a sandbox** and should be configured deliberately before broad use.
 
@@ -19,8 +19,8 @@ Example uses:
 
 - Model-callable `profile_delegate` tool.
 - Runs the target profile with its normal Hermes context, memory, rules, tools, and model defaults unless a temporary per-call override is requested.
-- Supports requested per-call `model`, `provider`, `reasoning_effort`, `max_turns`, `toolsets`, and preloaded `skills`; omitted values inherit profile defaults.
-- Uses Hermes quiet single-query mode with a prompt file reference: `hermes -p <profile> chat -q @file:<prompt.txt> -Q --pass-session-id`; native overrides are separate argv elements and `--yolo` is added only when `child_approval_mode: approve_yolo` is explicitly configured or passed.
+- Supports requested per-call `model`, `provider`, `reasoning_effort`, `max_turns`, `toolsets`, preloaded `skills`, and `review`/`build` capability presets; omitted values inherit profile defaults.
+- Launches Hermes in-process through a plugin-owned bootstrap before agent construction. The bootstrap installs deterministic child approvals and optional schema filtering, then runs quiet single-query mode with a prompt file reference. `--yolo` is added only when `child_approval_mode: approve_yolo` is explicit.
 - Explicit target-profile allowlist by default.
 - Recursion/depth guard via `PROFILE_DELEGATE_MAX_DEPTH`.
 - Global concurrency guard via lock files and `PROFILE_DELEGATE_MAX_CONCURRENT`.
@@ -29,7 +29,8 @@ Example uses:
 - Absolute/configurable Hermes binary path resolution.
 - Defensive JSON extraction and schema normalization, including warning-prefixed stdout and nested JSON objects.
 - Cheap local fallback for useful non-JSON child output; no automatic profile retry on parse failure.
-- Private local run artifacts: request, prompt, status, stdout, stderr, result.
+- Strict automatic recovery for recognized terminal transport failures: resume the same child session up to twice, wait 10 seconds between attempts, and share one total timeout budget. Never restart in a fresh session.
+- Private local run artifacts: request, prompt, status, stdout, stderr, result, and redacted/hash-only approval events.
 - Async background mode with best-effort notify-on-complete through Hermes' native async-delegation completion queue.
 - Stable error codes for common failures.
 - Tool preview patch so users see the target profile and one-line task summary.
@@ -40,7 +41,7 @@ Example uses:
 - Not a security sandbox. Profiles isolate context/state, not operating-system permissions.
 - Not a durable profile message bus.
 - Supports explicit target-profile session resume via `session_mode: "resume"` and `session_id`.
-- Does not auto-discover or manage session continuity keys yet.
+- Automatic recovery requires the strict final `session_id:` footer; a recognized transient failure without one fails closed instead of repeating the task.
 - Not a guaranteed delivery system; async notifications are best-effort and `profile_delegate_status` remains the durable source of truth.
 - Not approval brokering between parent and target profile.
 - Not safe for untrusted users without explicit policy configuration.
@@ -103,18 +104,18 @@ export PROFILE_DELEGATE_ALLOWED_WORKDIRS=/opt/data/repos,/workspace
 export PROFILE_DELEGATE_RUNS_ROOT=/path/to/private/profile-delegate-runs
 ```
 
-Delegated child processes are forced non-interactive by stripping inherited gateway/session approval env. Child approval behavior is controlled by YAML config or a per-call tool argument, not by env by default:
+Delegated child processes are forced non-interactive by stripping inherited gateway/session approval env. Approval is installed inside the child process by the plugin bootstrap before Hermes constructs the agent; it does not depend on cron-session simulation or a parent approval queue. Child approval behavior is controlled by YAML config or a per-call tool argument:
 
 ```yaml
 plugins:
   entries:
     profile-delegate:
-      child_approval_mode: deny  # deny | approve_yolo | strip_only
+      child_approval_mode: deny  # deny | approve_yolo
 ```
 
-- `deny` (default): strip parent approval env and mark the child as non-interactive-deny so dangerous commands / `execute_code` fail closed instead of prompting the parent chat.
+- `deny` (default): immediately deny dangerous terminal commands and host-access `execute_code` inside the child. Safe terminal commands still use normal Hermes guards. Decisions are recorded in `approval_events.jsonl` using hashes and character counts, never raw command/code text.
 - `approve_yolo`: explicit trusted mode; adds `--yolo`, sets `HERMES_YOLO_MODE=1`, and auto-accepts hooks for the child. Hermes' hardline unconditional blocklist still applies.
-- `strip_only`: only strip inherited interactive env and rely on Hermes' non-interactive defaults. Mostly for compatibility/debugging.
+- `strip_only` migration: new tool calls reject it. A legacy YAML value is read as `deny` so existing installations fail closed; update configuration to `deny` explicitly.
 
 The `profile_delegate` tool also accepts `child_approval_mode` to override YAML for one call.
 
@@ -173,7 +174,9 @@ Input:
   "reasoning_effort": "high",
   "max_turns": 50,
   "toolsets": ["file", "terminal"],
-  "skills": ["test-driven-development"]
+  "skills": ["test-driven-development"],
+  "capability_preset": "build",
+  "child_approval_mode": "deny"
 }
 ```
 
@@ -183,16 +186,19 @@ Notes:
 - `task` should be self-contained.
 - `session_title` is required, truncated to 50 chars, and used to rename new sessions after the parent parses Hermes' `session_id:` footer. Short Spanish/broken-English shorthand is fine.
 - `session_mode` defaults to `new`; use `resume` with `session_id` to continue a target-profile session. Find ids with `hermes -p <profile> sessions list`.
+- `PROFILE_DELEGATE_MAX_TRANSIENT_RESUMES` controls automatic same-session transport recovery (`0..2`, default `2`). Recovery is limited to the plugin's anchored allowlist; timeout, policy/approval, validation, quota/auth, OOM/SIGKILL, and ambiguous failures are never retried.
 - `context` is caller-selected. Keep it compact; pass paths and summaries instead of dumping whole transcripts.
 - `workdir` defaults to the current process working directory.
 - Explicit `workdir` values require `PROFILE_DELEGATE_ALLOWED_WORKDIRS`.
 - `timeout_seconds` is synchronous and bounded from 10 to `PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS` seconds; default local config is 1200 seconds and max is 1800 seconds.
 - Execution precedence is per-call override > target profile default; blank/omitted `model`, `provider`, and `reasoning_effort` inherit. These are requested controls: Hermes/provider still validates model/provider compatibility.
 - `toolsets` and `skills` are capability-bearing and fail closed unless every requested item is present in the corresponding plugin allowlist.
+- `capability_preset` defaults to `build`, which preserves the selected/inherited child capabilities and never bypasses approval policy. `review` selects Hermes' `web` and `file` toolsets, then removes `write_file`, `patch`, `terminal`, `process`, `execute_code`, and other mutating/delegating schemas inside the child before agent construction. It leaves `read_file` and `search_files`; it does not claim a read-only terminal. To avoid ambiguous widening, `review` cannot be combined with a per-call `toolsets` override.
 - `reasoning_effort` uses a config-only temporary managed scope at `<run_dir>/reasoning_config` only when no administrator-managed scope exists. If inherited `HERMES_MANAGED_DIR` is nonblank, or `/etc/hermes` exists, the call fails before subprocess execution with `reasoning_managed_scope_conflict`; the plugin never copies, composes, or replaces administrator-managed files. The child keeps canonical target `HERMES_HOME`, so new/resumed sessions and rename operations remain durable. Default-profile reasoning overrides remain rejected because `-p default` has special root resolution.
 - Accepted reasoning requests are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Runtime/provider support still decides whether a request executes successfully. `max` is retained for forward-compatible GPT-5.6 use; `ultra` is a separate multi-agent mode, not a reasoning effort.
-- `request.json`, `status.json`, sync/async responses, and final `result.json` expose normalized values under `requested_execution`; they do not claim remote acceptance.
+- `request.json`, `status.json`, sync/async responses, and final `result.json` expose `requested_execution`, `effective_execution`, `effective_capabilities`, and `approval_policy`. `approval_events.jsonl` records bootstrap/policy outcomes with timestamp, effective policy, detector/reason, outcome, SHA-256, and input length where applicable.
 - `background=true` returns immediately with `mode: "async"`, `task_id`, and run artifact paths; the delegated run continues in the configured thread or detached worker using persisted request data.
+- Both synchronous and detached runs execute the same bootstrap path. If legacy/core output contains `Timeout — denying command`, the run is finalized as structured `approval_timeout` failure instead of being reported as successful or left active.
 - `notify_on_complete=true` queues a native Hermes `async_delegation` completion event back to the originating gateway session when the background run finishes. This requires a fresh gateway/CLI process after plugin upgrade so the new schema/code is loaded.
 
 Default result requested from the target profile:
@@ -220,17 +226,53 @@ Read a run by `task_id`.
 }
 ```
 
-Returns status, result, stdout/stderr tails, and artifact paths.
+Returns status, result, stdout/stderr tails, artifact paths, `session_title`, normalized
+`origin`, worker metadata, notification status, and advisory `activity`. The
+`belongs_to_current_session` field is `true`, `false`, or `null` when caller/run
+provenance cannot be compared. Lookup remains global by task id; provenance is
+observability metadata, not access control.
 
-### `profile_delegate_list`
-
-List recent runs.
+Example output fragment:
 
 ```json
 {
-  "limit": 20
+  "session_title": "fix profile delegate listing",
+  "origin": {"session_id": "20260717_...", "session_key": "discord:guild:channel:thread"},
+  "belongs_to_current_session": true,
+  "origin_match_by": "session_id",
+  "worker_pid": 1234,
+  "worker_alive": true,
+  "activity": "active"
 }
 ```
+
+### `profile_delegate_list`
+
+List recent runs. The default scope is `current_session`; it uses UI session id,
+durable session id, then lane key in that precedence order and never falls back to
+a weaker key after a stronger mismatch. Use `current_lane` explicitly to include
+the same gateway lane across session rotations, or `all` for global inspection.
+
+```json
+{
+  "limit": 20,
+  "scope": "current_session",
+  "status": ["running"],
+  "profile": "builder"
+}
+```
+
+`limit` applies after scope and optional status/profile filters. If caller origin
+is unavailable, current scope returns an empty result with
+`scope_effective: "unresolved"`; it never silently widens to global scope. Run
+summaries include `session_title`, normalized `origin`, `worker_alive`, and
+`activity`.
+
+Liveness is advisory and read-only: terminal runs are `finished`; a running
+detached worker with a live/dead PID is `active`/`stale`; legacy or uncheckable
+runs are `unknown`. Inspection never rewrites canonical status. Older artifacts
+remain readable without migration, but missing provenance or PID metadata can
+produce `null` ownership and `unknown` activity.
 
 ### `profile_delegate_prune`
 

@@ -137,15 +137,25 @@ def _schema() -> Dict[str, Any]:
                     "type": "array", "items": {"type": "string"}, "maxItems": 100,
                     "description": "Optional skills to preload. Every item must be explicitly allowed by PROFILE_DELEGATE_ALLOWED_SKILLS.",
                 },
+                "capability_preset": {
+                    "type": "string",
+                    "enum": ["review", "build"],
+                    "default": "build",
+                    "description": (
+                        "Plugin-owned capability posture. review exposes web plus file reads/search while the child bootstrap "
+                        "removes mutating file tools, terminal/process, and execute_code from the child schema. build preserves "
+                        "the selected/inherited build capabilities; it does not bypass approval policy."
+                    ),
+                },
                 "child_approval_mode": {
                     "type": "string",
-                    "enum": ["deny", "approve_yolo", "strip_only"],
+                    "enum": ["deny", "approve_yolo"],
                     "description": (
                         "Optional per-call child approval policy. Default comes from config.yaml "
                         "plugins.entries.profile-delegate.child_approval_mode, or 'deny' if unset. "
-                        "deny strips parent gateway/session approval env and makes child dangerous commands fail closed; "
+                        "deny installs a plugin-owned immediate denial policy inside the child before agent execution; "
                         "approve_yolo explicitly runs the child with --yolo/HERMES_YOLO_MODE=1; "
-                        "strip_only only strips inherited interactive env and relies on Hermes non-interactive defaults."
+                        "hardline and user deny rules remain enforced. Legacy config value strip_only migrates to deny, but new calls reject it."
                     ),
                     "default": DEFAULT_CHILD_APPROVAL_MODE,
                 },
@@ -178,7 +188,21 @@ def _list_schema() -> Dict[str, Any]:
         "description": "List recent Profile Delegate runs for local inspection/debugging.",
         "parameters": {
             "type": "object",
-            "properties": {"limit": {"type": "integer", "description": "Maximum runs to list, 1-100.", "default": 20}},
+            "properties": {
+                "limit": {"type": "integer", "description": "Maximum matching runs to list, 1-100.", "default": 20},
+                "scope": {
+                    "type": "string",
+                    "enum": ["current_session", "current_lane", "all"],
+                    "default": "current_session",
+                    "description": "Origin scope. Defaults to the current caller session; use current_lane or all explicitly to widen.",
+                },
+                "status": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["running", "completed", "failed", "corrupt"]},
+                    "description": "Optional lifecycle status filters.",
+                },
+                "profile": {"type": "string", "description": "Optional exact canonical target-profile filter."},
+            },
             "required": [],
             "additionalProperties": False,
         },
@@ -216,6 +240,27 @@ def _current_session_key() -> str:
         return os.environ.get("HERMES_SESSION_KEY", "")
 
 
+def _current_origin() -> Dict[str, str]:
+    """Capture caller provenance from concurrency-safe Hermes session context."""
+    fields = {
+        "platform": "HERMES_SESSION_PLATFORM",
+        "source": "HERMES_SESSION_SOURCE",
+        "profile": "HERMES_SESSION_PROFILE",
+        "session_id": "HERMES_SESSION_ID",
+        "ui_session_id": "HERMES_UI_SESSION_ID",
+        "session_key": "HERMES_SESSION_KEY",
+    }
+    try:
+        from gateway.session_context import get_session_env
+
+        values = {field: str(get_session_env(env_name, "") or "").strip() for field, env_name in fields.items()}
+    except Exception:
+        values = {field: str(os.environ.get(env_name, "") or "").strip() for field, env_name in fields.items()}
+    if not values["session_key"]:
+        values["session_key"] = _current_session_key().strip()
+    return values
+
+
 def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     payload = args if isinstance(args, dict) else {}
     # Hermes may pass internal kwargs such as session_id/task_id to handlers.
@@ -223,6 +268,7 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     # accidentally replaced by the caller's own Hermes session id.
     payload = {**kwargs, **payload}
     try:
+        origin = _current_origin()
         result = delegate_profile(
             profile=payload.get("profile", ""),
             task=payload.get("task", ""),
@@ -235,7 +281,8 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
             session_id=payload.get("session_id", ""),
             background=bool(payload.get("background", False)),
             notify_on_complete=bool(payload.get("notify_on_complete", True)),
-            origin_session_key=_current_session_key(),
+            origin_session_key=origin["session_key"],
+            origin=origin,
             child_approval_mode=payload.get("child_approval_mode", None),
             model=payload.get("model"),
             provider=payload.get("provider"),
@@ -243,6 +290,7 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
             max_turns=payload.get("max_turns"),
             toolsets=payload.get("toolsets"),
             skills=payload.get("skills"),
+            capability_preset=payload.get("capability_preset", "build"),
         )
     except ProfileDelegateError as exc:
         result = _error_result(exc)
@@ -256,7 +304,11 @@ def _status_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str
     # Hermes may pass internal kwargs such as task_id; explicit tool args must win.
     payload = {**kwargs, **payload}
     try:
-        result = profile_delegate_status(payload.get("task_id", ""), payload.get("tail_chars", 4000))
+        result = profile_delegate_status(
+            payload.get("task_id", ""),
+            payload.get("tail_chars", 4000),
+            caller_origin=_current_origin(),
+        )
     except ProfileDelegateError as exc:
         result = _error_result(exc)
     except Exception as exc:
@@ -268,7 +320,13 @@ def _list_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     payload = args if isinstance(args, dict) else {}
     payload = {**kwargs, **payload}
     try:
-        result = profile_delegate_list(payload.get("limit", 20))
+        result = profile_delegate_list(
+            limit=payload.get("limit", 20),
+            scope=payload.get("scope", "current_session"),
+            statuses=payload.get("status"),
+            profile=payload.get("profile", ""),
+            caller_origin=_current_origin(),
+        )
     except ProfileDelegateError as exc:
         result = _error_result(exc)
     except Exception as exc:
