@@ -1,6 +1,7 @@
 """Profile Delegate core. Usage: imported by plugin; delegates bounded tasks to Hermes profiles."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -83,7 +84,8 @@ MAX_EXECUTION_LIST_ITEMS = 100
 APPROVAL_TIMEOUT_MARKERS = ("Timeout — denying command", "Timeout - denying command")
 PLUGIN_DIR = Path(__file__).resolve().parent
 CHILD_BOOTSTRAP = PLUGIN_DIR / "child_bootstrap.py"
-ARTIFACT_SCHEMA_VERSION = 2
+ARTIFACT_SCHEMA_VERSION = 3
+POLICY_SCHEMA_VERSION = 1
 ORIGIN_FIELDS = ("platform", "source", "profile", "session_id", "ui_session_id", "session_key")
 MAX_ORIGIN_VALUE_CHARS = 500
 VALID_INSPECTION_SCOPES = {"current_session", "current_lane", "all"}
@@ -104,9 +106,33 @@ TRANSIENT_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
 class ProfileDelegateError(Exception):
     """Expected profile-delegate failure with a stable machine-readable code."""
 
-    def __init__(self, message: str, code: str = "profile_delegate_error") -> None:
+    def __init__(self, message: str, code: str = "profile_delegate_error", **details: Any) -> None:
         super().__init__(message)
         self.code = code
+        self.details = details
+
+
+class PreflightError(ProfileDelegateError):
+    """Deterministic request failure with a one-shot corrective payload."""
+
+    def __init__(self, message: str, unsupported_fields: List[str], retry_patch: Dict[str, Any],
+                 *, allowed_values: Optional[Dict[str, Any]] = None,
+                 code: str = "execution_overrides_not_allowed") -> None:
+        super().__init__(
+            message, code,
+            unsupported_fields=unsupported_fields,
+            retry_patch=retry_patch,
+            allowed_values=allowed_values or {},
+            retryable=True,
+            run_created=False,
+            policy_ref="profile_delegate_policy",
+        )
+
+
+@dataclass(frozen=True)
+class EffectivePolicy:
+    values: Dict[str, Any]
+    sources: Dict[str, str]
 
 
 @dataclass
@@ -335,6 +361,165 @@ def parse_csv_env(name: str) -> List[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _plugin_entry() -> Dict[str, Any]:
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+    except Exception as exc:
+        raise ProfileDelegateError(f"failed to load Hermes plugin configuration: {exc}", "configuration_error") from exc
+    if not isinstance(cfg, dict):
+        raise ProfileDelegateError("Hermes configuration must be a mapping", "configuration_error")
+    plugins = cfg.get("plugins") or {}
+    entries = plugins.get("entries") if isinstance(plugins, dict) else None
+    entry = (entries or {}).get("profile-delegate", {}) if isinstance(entries, dict) else {}
+    if not isinstance(entry, dict):
+        raise ProfileDelegateError("plugins.entries.profile-delegate must be a mapping", "configuration_error")
+    return entry
+
+
+def _config_bool(value: Any, name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in TRUTHY | {"0", "false", "no", "off"}:
+        return value.strip().lower() in TRUTHY
+    raise ProfileDelegateError(f"{name} must be a boolean", "configuration_error")
+
+
+def _config_int(value: Any, name: str, minimum: int, maximum: int, *, allow_zero: bool = False) -> int:
+    if isinstance(value, bool):
+        raise ProfileDelegateError(f"{name} must be an integer", "configuration_error")
+    try:
+        result = int(value)
+    except Exception as exc:
+        raise ProfileDelegateError(f"{name} must be an integer", "configuration_error") from exc
+    if allow_zero and result == 0:
+        return 0
+    if result < minimum or result > maximum:
+        raise ProfileDelegateError(f"{name} must be between {minimum} and {maximum}", "configuration_error")
+    return result
+
+
+def _config_list(value: Any, name: str) -> List[str]:
+    if not isinstance(value, list):
+        raise ProfileDelegateError(f"{name} must be an array of strings", "configuration_error")
+    result: List[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip() or "," in item:
+            raise ProfileDelegateError(f"{name} entries must be non-empty strings without commas", "configuration_error")
+        if item.strip() not in result:
+            result.append(item.strip())
+    return result
+
+
+def load_effective_policy() -> EffectivePolicy:
+    """Load safe defaults < YAML < explicitly present environment overrides."""
+    entry = _plugin_entry()
+    duplicate = entry.get("duplicate_guard", {}) or {}
+    if not isinstance(duplicate, dict):
+        raise ProfileDelegateError("duplicate_guard must be a mapping", "configuration_error")
+    defaults: Dict[str, Any] = {
+        "allowed_profiles": [], "allow_all_profiles": False, "allowed_workdirs": [],
+        "allowed_toolsets": [], "allowed_skills": [], "allow_model_override": True,
+        "allow_provider_override": True, "allow_reasoning_override": True,
+        "allow_child_approval_override": True, "child_approval_mode": DEFAULT_CHILD_APPROVAL_MODE,
+        "max_depth": DEFAULT_MAX_DEPTH, "max_concurrent": DEFAULT_MAX_CONCURRENT,
+        "max_async": DEFAULT_MAX_ASYNC, "default_timeout_seconds": 1200,
+        "max_timeout_seconds": 1800, "max_transient_resumes": DEFAULT_MAX_TRANSIENT_RESUMES,
+        "duplicate_guard_enabled": True, "duplicate_active_window_seconds": 120,
+    }
+    values = dict(defaults)
+    sources = {key: "default" for key in values}
+    yaml_specs = {
+        "allowed_profiles": ("list", entry.get("allowed_profiles")),
+        "allow_all_profiles": ("bool", entry.get("allow_all_profiles")),
+        "allowed_workdirs": ("list", entry.get("allowed_workdirs")),
+        "allowed_toolsets": ("list", entry.get("allowed_toolsets")),
+        "allowed_skills": ("list", entry.get("allowed_skills")),
+        "allow_model_override": ("bool", entry.get("allow_model_override")),
+        "allow_provider_override": ("bool", entry.get("allow_provider_override")),
+        "allow_reasoning_override": ("bool", entry.get("allow_reasoning_override")),
+        "allow_child_approval_override": ("bool", entry.get("allow_child_approval_override")),
+        "max_depth": ("int", entry.get("max_depth")),
+        "max_concurrent": ("int", entry.get("max_concurrent")),
+        "max_async": ("int", entry.get("max_async")),
+        "default_timeout_seconds": ("int", entry.get("default_timeout_seconds")),
+        "max_timeout_seconds": ("timeout", entry.get("max_timeout_seconds")),
+        "max_transient_resumes": ("resume", entry.get("max_transient_resumes")),
+        "duplicate_guard_enabled": ("bool", duplicate.get("enabled")),
+        "duplicate_active_window_seconds": ("window", duplicate.get("active_window_seconds")),
+    }
+    if "child_approval_mode" in entry:
+        values["child_approval_mode"] = coerce_child_approval_mode(entry["child_approval_mode"], allow_legacy_config=True)
+        sources["child_approval_mode"] = "yaml"
+    for key, (kind, raw) in yaml_specs.items():
+        if raw is None:
+            continue
+        if kind == "list": values[key] = _config_list(raw, key)
+        elif kind == "bool": values[key] = _config_bool(raw, key)
+        elif kind == "resume": values[key] = _config_int(raw, key, 0, 2)
+        elif kind == "window": values[key] = _config_int(raw, key, 1, 3600)
+        elif kind == "timeout": values[key] = _config_int(raw, key, 10, 604800, allow_zero=True)
+        else:
+            bounds = {"max_depth": (0, 20), "max_concurrent": (1, 100), "max_async": (1, 100), "default_timeout_seconds": (10, 604800)}
+            values[key] = _config_int(raw, key, *bounds[key])
+        sources[key] = "yaml"
+    env_specs = {
+        "PROFILE_DELEGATE_ALLOWED_PROFILES": ("allowed_profiles", "list"),
+        "PROFILE_DELEGATE_ALLOW_ALL_PROFILES": ("allow_all_profiles", "bool"),
+        "PROFILE_DELEGATE_ALLOWED_WORKDIRS": ("allowed_workdirs", "list"),
+        "PROFILE_DELEGATE_ALLOWED_TOOLSETS": ("allowed_toolsets", "list"),
+        "PROFILE_DELEGATE_ALLOWED_SKILLS": ("allowed_skills", "list"),
+        "PROFILE_DELEGATE_MAX_DEPTH": ("max_depth", "int"),
+        "PROFILE_DELEGATE_MAX_CONCURRENT": ("max_concurrent", "int"),
+        "PROFILE_DELEGATE_MAX_ASYNC": ("max_async", "int"),
+        "PROFILE_DELEGATE_DEFAULT_TIMEOUT_SECONDS": ("default_timeout_seconds", "int"),
+        "PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS": ("max_timeout_seconds", "timeout"),
+        "PROFILE_DELEGATE_MAX_TRANSIENT_RESUMES": ("max_transient_resumes", "resume"),
+        "PROFILE_DELEGATE_DUPLICATE_GUARD_ENABLED": ("duplicate_guard_enabled", "bool"),
+        "PROFILE_DELEGATE_DUPLICATE_WINDOW_SECONDS": ("duplicate_active_window_seconds", "window"),
+    }
+    for env_name, (key, kind) in env_specs.items():
+        if env_name not in os.environ:
+            continue
+        raw = os.environ[env_name]
+        if kind == "list": values[key] = [item.strip() for item in raw.split(",") if item.strip()]
+        elif kind == "bool": values[key] = _config_bool(raw, env_name)
+        elif kind == "resume": values[key] = _config_int(raw, env_name, 0, 2)
+        elif kind == "window": values[key] = _config_int(raw, env_name, 1, 3600)
+        elif kind == "timeout": values[key] = _config_int(raw, env_name, 10, 604800, allow_zero=True)
+        else:
+            bounds = {"max_depth": (0, 20), "max_concurrent": (1, 100), "max_async": (1, 100), "default_timeout_seconds": (10, 604800)}
+            values[key] = _config_int(raw, env_name, *bounds[key])
+        sources[key] = "env"
+    maximum = values["max_timeout_seconds"]
+    if maximum and values["default_timeout_seconds"] > maximum:
+        raise ProfileDelegateError("default_timeout_seconds must not exceed max_timeout_seconds", "configuration_error")
+    return EffectivePolicy(values, sources)
+
+
+def profile_delegate_policy(policy: Optional[EffectivePolicy] = None) -> Dict[str, Any]:
+    policy = policy or load_effective_policy()
+    managed = discover_managed_scope(os.environ.copy())
+    values = policy.values
+    return {
+        "success": True, "policy_schema_version": POLICY_SCHEMA_VERSION,
+        "profiles": {"allow_all": values["allow_all_profiles"], "allowed": values["allowed_profiles"]},
+        "workdirs": {"allowed_roots": values["allowed_workdirs"]},
+        "execution_overrides": {
+            "model": values["allow_model_override"], "provider": values["allow_provider_override"],
+            "reasoning": values["allow_reasoning_override"], "allowed_reasoning": list(VALID_REASONING_EFFORTS),
+            "allowed_toolsets": values["allowed_toolsets"], "allowed_skills": values["allowed_skills"],
+            "child_approval": values["allow_child_approval_override"],
+        },
+        "reasoning_state": "inherit_only" if managed is not None else "override_available",
+        "approval_mode": values["child_approval_mode"],
+        "limits": {key: values[key] for key in ("max_depth", "max_concurrent", "max_async", "default_timeout_seconds", "max_timeout_seconds", "max_transient_resumes")},
+        "duplicate_guard": {"enabled": values["duplicate_guard_enabled"], "active_window_seconds": values["duplicate_active_window_seconds"], "active_action": "reuse"},
+        "config_sources": policy.sources,
+    }
+
+
 def _optional_execution_string(name: str, value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -348,7 +533,7 @@ def _optional_execution_string(name: str, value: Any) -> Optional[str]:
     return text
 
 
-def _execution_list(name: str, value: Any, policy_env: str) -> List[str]:
+def _execution_list(name: str, value: Any) -> List[str]:
     if value is None:
         return []
     if not isinstance(value, list):
@@ -362,19 +547,13 @@ def _execution_list(name: str, value: Any, policy_env: str) -> List[str]:
             raise ProfileDelegateError(f"{name} entries must be non-empty strings without commas", "validation_error")
         if text not in normalized:
             normalized.append(text)
-    if normalized:
-        allowed = set(parse_csv_env(policy_env))
-        if not allowed:
-            raise ProfileDelegateError(f"{name} overrides require {policy_env}", "validation_error")
-        rejected = [item for item in normalized if item not in allowed]
-        if rejected:
-            raise ProfileDelegateError(f"{name} not allowed by {policy_env}: {', '.join(rejected)}", "validation_error")
     return normalized
 
 
 def normalize_requested_execution(
     model: Any = None, provider: Any = None, reasoning_effort: Any = None,
     max_turns: Any = None, toolsets: Any = None, skills: Any = None,
+    policy: Optional[EffectivePolicy] = None, validate_policy: bool = True,
 ) -> Dict[str, Any]:
     normalized_reasoning = _optional_execution_string("reasoning_effort", reasoning_effort)
     if normalized_reasoning and normalized_reasoning not in VALID_REASONING_EFFORTS:
@@ -389,14 +568,83 @@ def normalize_requested_execution(
             raise ProfileDelegateError("max_turns must be an integer", "validation_error") from exc
         if normalized_turns < 1 or normalized_turns > 10000:
             raise ProfileDelegateError("max_turns must be between 1 and 10000", "validation_error")
-    return {
+    result = {
         "model": _optional_execution_string("model", model),
         "provider": _optional_execution_string("provider", provider),
         "reasoning_effort": normalized_reasoning,
         "max_turns": normalized_turns,
-        "toolsets": _execution_list("toolsets", toolsets, "PROFILE_DELEGATE_ALLOWED_TOOLSETS"),
-        "skills": _execution_list("skills", skills, "PROFILE_DELEGATE_ALLOWED_SKILLS"),
+        "toolsets": _execution_list("toolsets", toolsets),
+        "skills": _execution_list("skills", skills),
     }
+    effective_policy = policy or load_effective_policy()
+    unsupported: List[str] = []
+    retry_patch: Dict[str, Any] = {}
+    allowed_values: Dict[str, Any] = {}
+    for name in ("toolsets", "skills"):
+        requested = result[name]
+        allowed = effective_policy.values[f"allowed_{name}"]
+        if requested and (not allowed or any(item not in allowed for item in requested)):
+            unsupported.append(name)
+            retry_patch[name] = []
+            allowed_values[name] = allowed
+    for name in ("model", "provider"):
+        if result[name] and not effective_policy.values[f"allow_{name}_override"]:
+            unsupported.append(name)
+            retry_patch[name] = None
+    if result["reasoning_effort"] and not effective_policy.values["allow_reasoning_override"]:
+        unsupported.append("reasoning_effort")
+        retry_patch["reasoning_effort"] = None
+    if unsupported and validate_policy:
+        raise PreflightError(
+            "requested execution overrides are not allowed by effective policy",
+            unsupported, retry_patch, allowed_values=allowed_values,
+        )
+    return result
+
+
+def validate_preflight(
+    requested: Dict[str, Any], policy: EffectivePolicy, *, reasoning_mode: str,
+    capability_preset: Any, target_profile: str, child_approval_explicit: bool,
+) -> None:
+    unsupported: List[str] = []
+    retry_patch: Dict[str, Any] = {}
+    allowed_values: Dict[str, Any] = {}
+    values = policy.values
+    if reasoning_mode == "inherit" and requested["reasoning_effort"] is not None:
+        unsupported.extend(["reasoning_mode", "reasoning_effort"])
+        retry_patch.update({"reasoning_mode": "inherit", "reasoning_effort": None})
+    elif reasoning_mode == "override" and requested["reasoning_effort"] is None:
+        unsupported.append("reasoning_effort")
+        retry_patch.update({"reasoning_mode": "inherit", "reasoning_effort": None})
+    for name in ("toolsets", "skills"):
+        allowed = values[f"allowed_{name}"]
+        if requested[name] and (not allowed or any(item not in allowed for item in requested[name])):
+            unsupported.append(name)
+            retry_patch[name] = []
+            allowed_values[name] = allowed
+    for name in ("model", "provider"):
+        if requested[name] and not values[f"allow_{name}_override"]:
+            unsupported.append(name)
+            retry_patch[name] = None
+    if reasoning_mode == "override" and (
+        not values["allow_reasoning_override"]
+        or target_profile == "default"
+        or discover_managed_scope(os.environ.copy()) is not None
+    ):
+        unsupported.extend(name for name in ("reasoning_mode", "reasoning_effort") if name not in unsupported)
+        retry_patch.update({"reasoning_mode": "inherit", "reasoning_effort": None})
+    if ensure_text(capability_preset).strip().lower() == "review" and requested["toolsets"]:
+        if "toolsets" not in unsupported:
+            unsupported.append("toolsets")
+        retry_patch["toolsets"] = []
+    if child_approval_explicit and not values["allow_child_approval_override"]:
+        unsupported.append("child_approval_mode")
+        retry_patch["child_approval_mode"] = None
+    if unsupported:
+        raise PreflightError(
+            "requested overrides conflict with effective policy or inheritance state",
+            unsupported, retry_patch, allowed_values=allowed_values,
+        )
 
 
 def resolve_capability_preset(
@@ -441,11 +689,12 @@ def normalize_profile_for_policy(profile: str) -> str:
         return profile.strip().lower()
 
 
-def enforce_profile_policy(canonical_profile: str) -> None:
+def enforce_profile_policy(canonical_profile: str, policy: Optional[EffectivePolicy] = None) -> None:
     """Require an explicit profile allowlist unless allow-all is deliberately enabled."""
-    if env_bool("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", False):
+    effective = policy or load_effective_policy()
+    if effective.values["allow_all_profiles"]:
         return
-    allowed = {normalize_profile_for_policy(item) for item in parse_csv_env("PROFILE_DELEGATE_ALLOWED_PROFILES")}
+    allowed = {normalize_profile_for_policy(item) for item in effective.values["allowed_profiles"]}
     if not allowed:
         raise ProfileDelegateError(
             "profile delegation is disabled until PROFILE_DELEGATE_ALLOWED_PROFILES is set "
@@ -470,9 +719,9 @@ def current_depth() -> int:
     return depth
 
 
-def enforce_depth_policy() -> Tuple[int, int]:
+def enforce_depth_policy(policy: Optional[EffectivePolicy] = None) -> Tuple[int, int]:
     depth = current_depth()
-    max_depth = env_int("PROFILE_DELEGATE_MAX_DEPTH", DEFAULT_MAX_DEPTH, 0, 20)
+    max_depth = (policy or load_effective_policy()).values["max_depth"]
     if depth >= max_depth:
         raise ProfileDelegateError(
             f"profile delegation recursion limit reached: depth={depth}, max={max_depth}",
@@ -481,8 +730,8 @@ def enforce_depth_policy() -> Tuple[int, int]:
     return depth, max_depth
 
 
-def acquire_concurrency_slot() -> ConcurrencySlot:
-    max_concurrent = env_int("PROFILE_DELEGATE_MAX_CONCURRENT", DEFAULT_MAX_CONCURRENT, 1, 100)
+def acquire_concurrency_slot(max_concurrent: Optional[int] = None) -> ConcurrencySlot:
+    max_concurrent = max_concurrent or load_effective_policy().values["max_concurrent"]
     if fcntl is None:
         if max_concurrent != 1:
             raise ProfileDelegateError("concurrency limits require fcntl on this platform", "configuration_error")
@@ -533,7 +782,7 @@ def resolve_hermes_bin() -> str:
     return str(path)
 
 
-def validate_profile(profile: str) -> ValidatedProfile:
+def validate_profile(profile: str, policy: Optional[EffectivePolicy] = None) -> ValidatedProfile:
     if not isinstance(profile, str) or not profile.strip():
         raise ProfileDelegateError("profile must be a non-empty string", "validation_error")
     raw = profile.strip()
@@ -557,19 +806,21 @@ def validate_profile(profile: str) -> ValidatedProfile:
             f"failed to validate profile {raw!r}: {type(exc).__name__}: {exc}",
             "profile_validation_failed",
         ) from exc
-    enforce_profile_policy(canonical)
+    enforce_profile_policy(canonical, policy)
     return ValidatedProfile(requested=raw, canonical=canonical, home=home)
 
 
-def coerce_timeout(value: Any) -> int:
+def coerce_timeout(value: Any, policy: Optional[EffectivePolicy] = None) -> int:
+    effective = (policy or load_effective_policy()).values
     try:
-        timeout = int(value or DEFAULT_TIMEOUT_SECONDS)
+        timeout = int(value if value not in {None, ""} else effective["default_timeout_seconds"])
     except Exception as exc:
         raise ProfileDelegateError("timeout_seconds must be an integer", "validation_error") from exc
     if timeout < 10:
         raise ProfileDelegateError("timeout_seconds must be >= 10", "validation_error")
-    if MAX_TIMEOUT_SECONDS > 0 and timeout > MAX_TIMEOUT_SECONDS:
-        raise ProfileDelegateError(f"timeout_seconds must be <= {MAX_TIMEOUT_SECONDS} (set PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS=0 for no plugin cap)", "validation_error")
+    maximum = effective["max_timeout_seconds"]
+    if maximum > 0 and timeout > maximum:
+        raise ProfileDelegateError(f"timeout_seconds must be <= {maximum} (set max_timeout_seconds=0 for no plugin cap)", "validation_error")
     return timeout
 
 
@@ -582,8 +833,8 @@ def bounded_text(name: str, value: Any, limit: int) -> str:
     return text
 
 
-def allowed_workdir_roots() -> List[Path]:
-    return [Path(item).expanduser().resolve() for item in parse_csv_env("PROFILE_DELEGATE_ALLOWED_WORKDIRS")]
+def allowed_workdir_roots(policy: Optional[EffectivePolicy] = None) -> List[Path]:
+    return [Path(item).expanduser().resolve() for item in (policy or load_effective_policy()).values["allowed_workdirs"]]
 
 
 def is_relative_to(path: Path, root: Path) -> bool:
@@ -594,8 +845,8 @@ def is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
-def enforce_workdir_policy(cwd: Path, explicit_workdir: bool) -> None:
-    roots = allowed_workdir_roots()
+def enforce_workdir_policy(cwd: Path, explicit_workdir: bool, policy: Optional[EffectivePolicy] = None) -> None:
+    roots = allowed_workdir_roots(policy)
     if roots:
         if any(is_relative_to(cwd, root) for root in roots):
             return
@@ -659,20 +910,7 @@ def coerce_child_approval_mode(value: Any, *, allow_legacy_config: bool = False)
 
 
 def plugin_config_child_approval_mode() -> str:
-    try:
-        from hermes_cli.config import load_config
-
-        cfg = load_config() or {}
-        entries = (cfg.get("plugins") or {}).get("entries") or {}
-        entry = entries.get("profile-delegate") or {}
-        return coerce_child_approval_mode(
-            entry.get("child_approval_mode", DEFAULT_CHILD_APPROVAL_MODE),
-            allow_legacy_config=True,
-        )
-    except ProfileDelegateError:
-        raise
-    except Exception:
-        return DEFAULT_CHILD_APPROVAL_MODE
+    return load_effective_policy().values["child_approval_mode"]
 
 
 def validate_session_id(value: Any, required: bool = False) -> str:
@@ -684,14 +922,14 @@ def validate_session_id(value: Any, required: bool = False) -> str:
     return text
 
 
-def resolve_workdir(workdir: str = "") -> Path:
+def resolve_workdir(workdir: str = "", policy: Optional[EffectivePolicy] = None) -> Path:
     raw = (workdir or "").strip()
     explicit = bool(raw)
     candidate = Path(raw).expanduser() if raw else Path.cwd()
     cwd = candidate.resolve()
     if not cwd.exists() or not cwd.is_dir():
         raise ProfileDelegateError(f"workdir does not exist or is not a directory: {cwd}", "workdir_not_found")
-    enforce_workdir_policy(cwd, explicit)
+    enforce_workdir_policy(cwd, explicit, policy)
     return cwd
 
 
@@ -716,6 +954,62 @@ def discover_managed_scope(env: Dict[str, str]) -> Optional[Path]:
     if override:
         return Path(override)
     return DEFAULT_MANAGED_SCOPE if DEFAULT_MANAGED_SCOPE.exists() else None
+
+
+def normalize_reasoning_request(mode: Any, effort: Any) -> Tuple[str, Optional[str]]:
+    """Omission inherits; legacy effort-without-mode remains an explicit override."""
+    normalized_effort = _optional_execution_string("reasoning_effort", effort)
+    normalized_mode = _optional_execution_string("reasoning_mode", mode)
+    if normalized_mode is None:
+        normalized_mode = "override" if normalized_effort is not None else "inherit"
+    normalized_mode = normalized_mode.lower()
+    if normalized_mode not in {"inherit", "override"}:
+        raise ProfileDelegateError("reasoning_mode must be inherit or override", "validation_error")
+    return normalized_mode, normalized_effort
+
+
+def request_fingerprint(payload: Dict[str, Any]) -> str:
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _active_matching_run(fingerprint: str, window_seconds: int) -> Optional[Dict[str, Any]]:
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+    for run_dir in iter_run_dirs():
+        try:
+            status = read_json_file(run_dir / "status.json")
+        except ProfileDelegateError:
+            continue
+        if status.get("request_fingerprint") != fingerprint or status.get("status") != "running":
+            continue
+        created = parse_iso(ensure_text(status.get("created_at")))
+        if created is None or created < cutoff:
+            continue
+        pid = status.get("owner_pid") or status.get("worker_pid")
+        if probe_worker_alive(pid) is False:
+            continue
+        return status
+    return None
+
+
+class FingerprintLock:
+    def __init__(self, fingerprint: str) -> None:
+        root = get_locks_root() / "requests"
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.path = root / f"{fingerprint}.lock"
+        self.handle = self.path.open("a+", encoding="utf-8")
+        chmod_best_effort(self.path, 0o600)
+
+    def __enter__(self) -> "FingerprintLock":
+        if fcntl is None:
+            raise ProfileDelegateError("duplicate guard requires fcntl", "configuration_error")
+        fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+        if fcntl is not None:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        self.handle.close()
 
 
 def prepare_reasoning_config(run_dir: Path, reasoning_effort: str) -> Path:
@@ -768,9 +1062,16 @@ def build_child_command(
 
     capabilities = request.get("effective_capabilities") or {}
     blocked_tools = capabilities.get("blocked_tools") or []
-    child_python = str(Path(ensure_text(request.get("hermes_bin"))).resolve().parent / "python")
-    if not Path(child_python).is_file():
-        child_python = sys.executable
+    hermes_path = Path(ensure_text(request.get("hermes_bin"))).resolve()
+    sibling_python = hermes_path.parent / "python"
+    # Only trust a sibling interpreter for the real Hermes launcher. Test
+    # doubles and system utilities such as /bin/echo may sit beside a Python
+    # installation that lacks Hermes dependencies.
+    if hermes_path.name == "hermes" and sibling_python.is_file():
+        child_python = str(sibling_python)
+    else:
+        runtime_python = Path("/opt/hermes/.venv/bin/python")
+        child_python = str(runtime_python if runtime_python.is_file() else Path(sys.executable))
     return [
         child_python, str(CHILD_BOOTSTRAP),
         "--approval-mode", approval_mode,
@@ -1309,7 +1610,10 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
         env["HERMES_MANAGED_DIR"] = str(prepare_reasoning_config(run_dir, ensure_text(reasoning_effort)))
 
     deadline = time.monotonic() + timeout
-    max_resumes = env_int("PROFILE_DELEGATE_MAX_TRANSIENT_RESUMES", DEFAULT_MAX_TRANSIENT_RESUMES, 0, 2)
+    persisted_policy = request.get("effective_policy") if isinstance(request.get("effective_policy"), dict) else {}
+    persisted_limits = persisted_policy.get("limits") if isinstance(persisted_policy.get("limits"), dict) else {}
+    max_resumes = int(persisted_limits.get("max_transient_resumes", DEFAULT_MAX_TRANSIENT_RESUMES))
+    max_concurrent = int(persisted_limits.get("max_concurrent", DEFAULT_MAX_CONCURRENT))
     history: List[Dict[str, Any]] = []
     stable_session_id = resume_id
     run_meta: Dict[str, Any] = {}
@@ -1317,7 +1621,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     timed_out = False
     integrity_error = ""
 
-    with acquire_concurrency_slot() as slot:
+    with acquire_concurrency_slot(max_concurrent) as slot:
         status["concurrency_slot"] = slot.slot
         json_safe_write(run_dir / "status.json", status)
         for attempt_index in range(max_resumes + 1):
@@ -1445,7 +1749,8 @@ def _background_mode() -> str:
 
 def _start_background_thread(run_dir: Path) -> None:
     global _async_running
-    max_async = env_int("PROFILE_DELEGATE_MAX_ASYNC", DEFAULT_MAX_ASYNC, 1, 20)
+    request = read_json_file(run_dir / "request.json")
+    max_async = int(((request.get("effective_policy") or {}).get("limits") or {}).get("max_async", DEFAULT_MAX_ASYNC))
     with _async_lock:
         if _async_running >= max_async:
             raise ProfileDelegateError(
@@ -1480,34 +1785,45 @@ def _start_detached_background_worker(run_dir: Path) -> None:
     child Hermes session alive but stop updating status.json/result.json. The
     detached worker makes the run artifact itself the source of truth.
     """
-    stdout_path = run_dir / "worker_stdout.txt"
-    stderr_path = run_dir / "worker_stderr.txt"
-    text_safe_write(stdout_path, "")
-    text_safe_write(stderr_path, "")
-    cmd = [sys.executable, str(Path(__file__).resolve()), "--background-worker", str(run_dir)]
-    env = os.environ.copy()
-    with stdout_path.open("a", encoding="utf-8") as out, stderr_path.open("a", encoding="utf-8") as err:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(Path.cwd()),
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=out,
-            stderr=err,
-            close_fds=True,
-            start_new_session=True,
-        )
-    status = read_json_file(run_dir / "status.json")
-    status.update(
-        {
-            "background_worker_mode": "detached",
-            "worker_pid": proc.pid,
-            "worker_started_at": now_iso(),
-            "worker_stdout": str(stdout_path),
+    request = read_json_file(run_dir / "request.json")
+    max_async = int(((request.get("effective_policy") or {}).get("limits") or {}).get("max_async", DEFAULT_MAX_ASYNC))
+    dispatch_lock = FingerprintLock("detached-async-capacity")
+    with dispatch_lock:
+        active = 0
+        for candidate in iter_run_dirs():
+            if candidate == run_dir:
+                continue
+            try:
+                candidate_status = read_json_file(candidate / "status.json")
+            except ProfileDelegateError:
+                continue
+            if candidate_status.get("status") != "running" or candidate_status.get("background_worker_mode") != "detached":
+                continue
+            if probe_worker_alive(candidate_status.get("worker_pid")) is not False:
+                active += 1
+        if active >= max_async:
+            raise ProfileDelegateError(
+                f"profile_delegate background capacity reached ({max_async} running)",
+                "async_concurrency_limit",
+            )
+        stdout_path = run_dir / "worker_stdout.txt"
+        stderr_path = run_dir / "worker_stderr.txt"
+        text_safe_write(stdout_path, "")
+        text_safe_write(stderr_path, "")
+        cmd = [sys.executable, str(Path(__file__).resolve()), "--background-worker", str(run_dir)]
+        env = os.environ.copy()
+        with stdout_path.open("a", encoding="utf-8") as out, stderr_path.open("a", encoding="utf-8") as err:
+            proc = subprocess.Popen(
+                cmd, cwd=str(Path.cwd()), env=env, stdin=subprocess.DEVNULL,
+                stdout=out, stderr=err, close_fds=True, start_new_session=True,
+            )
+        status = read_json_file(run_dir / "status.json")
+        status.update({
+            "background_worker_mode": "detached", "worker_pid": proc.pid,
+            "worker_started_at": now_iso(), "worker_stdout": str(stdout_path),
             "worker_stderr": str(stderr_path),
-        }
-    )
-    json_safe_write(run_dir / "status.json", status)
+        })
+        json_safe_write(run_dir / "status.json", status)
 
     def _watch_for_notification() -> None:
         try:
@@ -1575,13 +1891,16 @@ def delegate_profile(
     model: Any = None,
     provider: Any = None,
     reasoning_effort: Any = None,
+    reasoning_mode: Any = None,
     max_turns: Any = None,
     toolsets: Any = None,
     skills: Any = None,
     capability_preset: Any = DEFAULT_CAPABILITY_PRESET,
+    duplicate_policy: Any = "reuse",
 ) -> Dict[str, Any]:
-    depth, max_depth = enforce_depth_policy()
-    validated = validate_profile(profile)
+    policy = load_effective_policy()
+    depth, max_depth = enforce_depth_policy(policy)
+    validated = validate_profile(profile, policy)
     task_text = bounded_text("task", task, MAX_TASK_CHARS).strip()
     if not task_text:
         raise ProfileDelegateError("task must be non-empty", "validation_error")
@@ -1590,135 +1909,119 @@ def delegate_profile(
     title_text = normalize_session_title(session_title)
     mode = coerce_session_mode(session_mode)
     resume_id = validate_session_id(session_id, required=(mode == "resume"))
+    child_approval_explicit = child_approval_mode not in {None, ""}
     resolved_child_approval_mode = coerce_child_approval_mode(
-        child_approval_mode if child_approval_mode not in {None, ""} else plugin_config_child_approval_mode()
+        child_approval_mode if child_approval_explicit else policy.values["child_approval_mode"]
     )
-    timeout = coerce_timeout(timeout_seconds)
+    reasoning_mode_value, normalized_reasoning = normalize_reasoning_request(reasoning_mode, reasoning_effort)
+    timeout = coerce_timeout(timeout_seconds, policy)
     requested_execution = normalize_requested_execution(
-        model=model, provider=provider, reasoning_effort=reasoning_effort,
+        model=model, provider=provider, reasoning_effort=normalized_reasoning,
         max_turns=max_turns, toolsets=toolsets, skills=skills,
+        policy=policy, validate_policy=False,
+    )
+    validate_preflight(
+        requested_execution, policy, reasoning_mode=reasoning_mode_value,
+        capability_preset=capability_preset, target_profile=validated.canonical,
+        child_approval_explicit=child_approval_explicit,
     )
     effective_execution, effective_capabilities = resolve_capability_preset(
         capability_preset, requested_execution
     )
-    if requested_execution["reasoning_effort"] and validated.canonical == "default":
-        raise ProfileDelegateError(
-            "reasoning_effort override is not supported for the default profile",
-            "validation_error",
-        )
-    cwd = resolve_workdir(workdir)
+    cwd = resolve_workdir(workdir, policy)
     hermes_bin = resolve_hermes_bin()
     normalized_origin = normalize_origin(origin, origin_session_key)
     normalized_origin_session_key = normalized_origin["session_key"]
-
-    task_id = make_task_id()
-    run_dir = get_runs_root() / task_id
-    run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
-    chmod_best_effort(run_dir, 0o700)
-
-    prompt = build_prompt(task_text, context_text, contract_text)
-    request = {
-        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
-        "task_id": task_id,
-        "profile": validated.canonical,
-        "requested_profile": validated.requested,
-        "profile_home": validated.home,
-        "created_at": now_iso(),
-        "dispatched_at_epoch": time.time(),
-        "timeout_seconds": timeout,
-        "workdir": str(cwd),
-        "task_chars": len(task_text),
-        "context_chars": len(context_text),
-        "output_contract_chars": len(contract_text),
-        "session_title": title_text,
-        "session_mode": mode,
-        "requested_session_id": resume_id,
-        "runs_root": str(get_runs_root()),
-        "hermes_bin": hermes_bin,
-        "delegate_depth": depth,
-        "delegate_max_depth": max_depth,
-        "child_approval_mode": resolved_child_approval_mode,
-        "approval_policy": {
-            "requested": ensure_text(child_approval_mode) or "config/default",
-            "effective": resolved_child_approval_mode,
-            "owner": "profile-delegate-child-bootstrap",
-            "interactive": False,
-        },
+    duplicate_mode = ensure_text(duplicate_policy or "reuse").strip().lower()
+    if duplicate_mode not in {"reuse", "new"}:
+        raise ProfileDelegateError("duplicate_policy must be reuse or new", "validation_error")
+    fingerprint_payload = {
+        "origin": next((normalized_origin[key] for key in ("ui_session_id", "session_id", "session_key") if normalized_origin[key]), ""),
+        "profile": validated.canonical, "session_mode": mode, "session_id": resume_id,
+        "session_title": title_text, "task_sha256": hashlib.sha256(task_text.encode()).hexdigest(),
+        "context_sha256": hashlib.sha256(context_text.encode()).hexdigest(),
+        "contract_sha256": hashlib.sha256(contract_text.encode()).hexdigest(),
+        "workdir": str(cwd), "timeout_seconds": timeout, "background": bool(background),
+        "notify_on_complete": bool(notify_on_complete), "requested_execution": requested_execution,
         "capability_preset": effective_capabilities["preset"],
-        "effective_capabilities": effective_capabilities,
-        "requested_execution": requested_execution,
-        "effective_execution": effective_execution,
-        "background": bool(background),
-        "notify_on_complete": bool(notify_on_complete),
-        "origin": normalized_origin,
-        "origin_session_key": normalized_origin_session_key,
+        "child_approval_mode": resolved_child_approval_mode,
     }
-    status = {
-        **request,
-        "status": "running",
-        "started_at": now_iso(),
-        "ended_at": None,
-        "exit_code": None,
-        "error_code": None,
-        "concurrency_slot": None,
-        "notified_at": None,
-        "notification_status": None,
-    }
+    fingerprint = request_fingerprint(fingerprint_payload)
+    guard_enabled = bool(policy.values["duplicate_guard_enabled"] and fingerprint_payload["origin"] and duplicate_mode == "reuse")
 
-    json_safe_write(run_dir / "request.json", {**request, "task": task_text, "context": context_text, "output_contract": contract_text})
-    text_safe_write(run_dir / "prompt.txt", prompt)
-    json_safe_write(run_dir / "status.json", status)
-    text_safe_write(run_dir / "stdout.txt", "")
-    text_safe_write(run_dir / "stderr.txt", "")
-
-    if background:
-        try:
-            _start_background_run(run_dir)
-        except ProfileDelegateError as exc:
-            status.update({"status": "failed", "ended_at": now_iso(), "error_code": exc.code})
-            json_safe_write(run_dir / "status.json", status)
-            json_safe_write(run_dir / "result.json", {
-                "status": "failed",
-                "summary": str(exc),
-                "artifacts": [],
-                "errors": [exc.code],
-                "next_steps": ["Wait for another background profile_delegate run to finish or raise PROFILE_DELEGATE_MAX_ASYNC."],
-                "structured": True,
-                "error_code": exc.code,
-            })
-            raise
-        except Exception as exc:
-            status.update({"status": "failed", "ended_at": now_iso(), "error_code": "background_start_failed"})
-            json_safe_write(run_dir / "status.json", status)
-            json_safe_write(run_dir / "result.json", {
-                "status": "failed",
-                "summary": f"Failed to start background profile_delegate run: {type(exc).__name__}: {exc}",
-                "artifacts": [],
-                "errors": ["background_start_failed"],
-                "next_steps": [],
-                "structured": True,
-                "error_code": "background_start_failed",
-            })
-            raise ProfileDelegateError(f"failed to start background run: {type(exc).__name__}: {exc}", "background_start_failed") from exc
-        return {
-            "success": True,
-            "mode": "async",
-            "task_id": task_id,
-            "profile": validated.canonical,
-            "status": "running",
-            "error_code": None,
-            "session_title": title_text,
-            "session_mode": mode,
-            "requested_session_id": resume_id,
-            "child_approval_mode": resolved_child_approval_mode,
-            "requested_execution": requested_execution,
-            "effective_execution": effective_execution,
-            "effective_capabilities": effective_capabilities,
-            "approval_policy": request["approval_policy"],
-            "notify_on_complete": bool(notify_on_complete),
-            "origin_session_key_present": bool(normalized_origin_session_key),
-            "paths": base_paths(run_dir),
+    lock_context = FingerprintLock(fingerprint)
+    with lock_context:
+        if guard_enabled:
+            existing = _active_matching_run(fingerprint, policy.values["duplicate_active_window_seconds"])
+            if existing:
+                existing_id = ensure_text(existing.get("task_id"))
+                return {
+                    "success": True, "status": "running", "mode": "async" if existing.get("background") else "sync",
+                    "task_id": existing_id, "profile": validated.canonical, "deduplicated": True,
+                    "run_created": False, "paths": base_paths(get_runs_root() / existing_id),
+                }
+        task_id = make_task_id()
+        run_dir = get_runs_root() / task_id
+        run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+        chmod_best_effort(run_dir, 0o700)
+        prompt = build_prompt(task_text, context_text, contract_text)
+        request = {
+            "artifact_schema_version": ARTIFACT_SCHEMA_VERSION, "policy_schema_version": POLICY_SCHEMA_VERSION,
+            "task_id": task_id, "profile": validated.canonical, "requested_profile": validated.requested,
+            "profile_home": validated.home, "created_at": now_iso(), "dispatched_at_epoch": time.time(),
+            "timeout_seconds": timeout, "workdir": str(cwd), "task_chars": len(task_text),
+            "context_chars": len(context_text), "output_contract_chars": len(contract_text),
+            "session_title": title_text, "session_mode": mode, "requested_session_id": resume_id,
+            "runs_root": str(get_runs_root()), "hermes_bin": hermes_bin, "delegate_depth": depth,
+            "delegate_max_depth": max_depth, "child_approval_mode": resolved_child_approval_mode,
+            "approval_policy": {"requested": ensure_text(child_approval_mode) or "config/default", "effective": resolved_child_approval_mode, "owner": "profile-delegate-child-bootstrap", "interactive": False},
+            "capability_preset": effective_capabilities["preset"], "effective_capabilities": effective_capabilities,
+            "requested_execution": requested_execution, "effective_execution": effective_execution,
+            "reasoning_mode": reasoning_mode_value, "background": bool(background),
+            "notify_on_complete": bool(notify_on_complete), "origin": normalized_origin,
+            "origin_session_key": normalized_origin_session_key, "request_fingerprint": fingerprint,
+            "owner_pid": os.getpid(), "effective_policy": profile_delegate_policy(policy),
         }
+        status = {**request, "status": "running", "started_at": now_iso(), "ended_at": None,
+                  "exit_code": None, "error_code": None, "concurrency_slot": None,
+                  "notified_at": None, "notification_status": None}
+        json_safe_write(run_dir / "request.json", {**request, "task": task_text, "context": context_text, "output_contract": contract_text})
+        text_safe_write(run_dir / "prompt.txt", prompt)
+        json_safe_write(run_dir / "status.json", status)
+        text_safe_write(run_dir / "stdout.txt", "")
+        text_safe_write(run_dir / "stderr.txt", "")
+
+        if background:
+            try:
+                _start_background_run(run_dir)
+            except ProfileDelegateError as exc:
+                status.update({"status": "failed", "ended_at": now_iso(), "error_code": exc.code})
+                json_safe_write(run_dir / "status.json", status)
+                json_safe_write(run_dir / "result.json", {
+                    "status": "failed", "summary": str(exc), "artifacts": [], "errors": [exc.code],
+                    "next_steps": ["Wait for another background profile_delegate run to finish or raise max_async."],
+                    "structured": True, "error_code": exc.code,
+                })
+                raise
+            except Exception as exc:
+                status.update({"status": "failed", "ended_at": now_iso(), "error_code": "background_start_failed"})
+                json_safe_write(run_dir / "status.json", status)
+                json_safe_write(run_dir / "result.json", {
+                    "status": "failed", "summary": f"Failed to start background profile_delegate run: {type(exc).__name__}: {exc}",
+                    "artifacts": [], "errors": ["background_start_failed"], "next_steps": [],
+                    "structured": True, "error_code": "background_start_failed",
+                })
+                raise ProfileDelegateError(f"failed to start background run: {type(exc).__name__}: {exc}", "background_start_failed") from exc
+            return {
+                "success": True, "mode": "async", "task_id": task_id, "profile": validated.canonical,
+                "status": "running", "error_code": None, "session_title": title_text,
+                "session_mode": mode, "requested_session_id": resume_id,
+                "child_approval_mode": resolved_child_approval_mode, "requested_execution": requested_execution,
+                "effective_execution": effective_execution, "effective_capabilities": effective_capabilities,
+                "approval_policy": request["approval_policy"], "notify_on_complete": bool(notify_on_complete),
+                "origin_session_key_present": bool(normalized_origin_session_key), "run_created": True,
+                "deduplicated": False, "paths": base_paths(run_dir),
+            }
 
     final = _execute_delegate_run(run_dir)
     final["notify_on_complete"] = False

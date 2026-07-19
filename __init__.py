@@ -13,6 +13,7 @@ try:
         ProfileDelegateError,
         delegate_profile,
         profile_delegate_list,
+        profile_delegate_policy,
         profile_delegate_prune,
         profile_delegate_status,
     )
@@ -30,6 +31,7 @@ except ImportError:  # direct import / pytest from plugin directory
         ProfileDelegateError,
         delegate_profile,
         profile_delegate_list,
+        profile_delegate_policy,
         profile_delegate_prune,
         profile_delegate_status,
     )
@@ -123,7 +125,11 @@ def _schema() -> Dict[str, Any]:
                 "reasoning_effort": {
                     "type": "string",
                     "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
-                    "description": "Optional temporary reasoning effort, applied through a private per-run profile overlay. Supported values are runtime/provider-dependent; max is accepted for forward-compatible GPT-5.6 use.",
+                    "description": "Explicit child override, including 'none'. Omit it to inherit. Supplying it without reasoning_mode remains a backward-compatible explicit override.",
+                },
+                "reasoning_mode": {
+                    "type": "string", "enum": ["inherit", "override"], "default": "inherit",
+                    "description": "inherit creates no reasoning overlay; override requires reasoning_effort. 'none' is explicit, never inheritance.",
                 },
                 "max_turns": {
                     "type": "integer", "minimum": 1, "maximum": 10000,
@@ -158,6 +164,10 @@ def _schema() -> Dict[str, Any]:
                         "hardline and user deny rules remain enforced. Legacy config value strip_only migrates to deny, but new calls reject it."
                     ),
                     "default": DEFAULT_CHILD_APPROVAL_MODE,
+                },
+                "duplicate_policy": {
+                    "type": "string", "enum": ["reuse", "new"], "default": "reuse",
+                    "description": "reuse returns an identical active request from the same origin; new intentionally creates another run.",
                 },
             },
             "required": ["profile", "task", "session_title"],
@@ -209,6 +219,14 @@ def _list_schema() -> Dict[str, Any]:
     }
 
 
+def _policy_schema() -> Dict[str, Any]:
+    return {
+        "name": "profile_delegate_policy",
+        "description": "Inspect the effective non-secret Profile Delegate policy before constructing a call.",
+        "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+    }
+
+
 def _prune_schema() -> Dict[str, Any]:
     return {
         "name": "profile_delegate_prune",
@@ -227,7 +245,7 @@ def _prune_schema() -> Dict[str, Any]:
 
 def _error_result(exc: Exception) -> Dict[str, Any]:
     code = getattr(exc, "code", "internal_error")
-    return {"success": False, "error": str(exc), "error_code": code, "status": "failed"}
+    return {"success": False, "error": str(exc), "error_code": code, "status": "failed", **getattr(exc, "details", {})}
 
 
 def _current_session_key() -> str:
@@ -287,10 +305,12 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
             model=payload.get("model"),
             provider=payload.get("provider"),
             reasoning_effort=payload.get("reasoning_effort"),
+            reasoning_mode=payload.get("reasoning_mode"),
             max_turns=payload.get("max_turns"),
             toolsets=payload.get("toolsets"),
             skills=payload.get("skills"),
             capability_preset=payload.get("capability_preset", "build"),
+            duplicate_policy=payload.get("duplicate_policy", "reuse"),
         )
     except ProfileDelegateError as exc:
         result = _error_result(exc)
@@ -346,6 +366,16 @@ def _prune_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+def _policy_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
+    try:
+        result = profile_delegate_policy()
+    except ProfileDelegateError as exc:
+        result = _error_result(exc)
+    except Exception as exc:
+        result = {"success": False, "error": f"profile_delegate_policy internal error: {type(exc).__name__}: {exc}", "error_code": "internal_error", "status": "failed"}
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 def _oneline(text: str) -> str:
     return " ".join(str(text or "").split())
 
@@ -397,6 +427,7 @@ def register(ctx: Any) -> None:
         ("profile_delegate", _schema(), _handler, "Profile Delegate 🤝: bounded task delegation to another Hermes profile."),
         ("profile_delegate_status", _status_schema(), _status_handler, "Inspect a Profile Delegate run by task_id."),
         ("profile_delegate_list", _list_schema(), _list_handler, "List recent Profile Delegate runs."),
+        ("profile_delegate_policy", _policy_schema(), _policy_handler, "Inspect effective non-secret Profile Delegate policy."),
         ("profile_delegate_prune", _prune_schema(), _prune_handler, "Prune old Profile Delegate run artifacts."),
     ]:
         ctx.register_tool(

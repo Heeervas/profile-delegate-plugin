@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -91,8 +92,8 @@ def test_delegate_parses_warning_prefixed_stdout_outer_envelope(tmp_path, monkey
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
     monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
 
     stdout = '''⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
 {"status":"ok","summary":"outer","ssr_status":"READY","mode":"DESIGN_ONLY","normalized_input":{},"evaluation_design":{"rating_distribution":{"1":"count_or_share_placeholder","2":"count_or_share_placeholder"}},"artifacts":[],"errors":[],"next_steps":[]}
@@ -138,8 +139,8 @@ def test_delegate_reads_session_footer_from_stderr(tmp_path, monkeypatch):
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
     monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
 
     def fake_run_capped(cmd, **kwargs):
         core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
@@ -269,12 +270,13 @@ def test_handler_passes_background_notify_and_origin_session(monkeypatch):
 def test_handler_requires_profile_policy_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("PROFILE_DELEGATE_ALLOWED_PROFILES", raising=False)
     monkeypatch.delenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", raising=False)
+    monkeypatch.setattr(core, "_plugin_entry", lambda: {})
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
     monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
 
-    def fake_validate(profile):
-        core.enforce_profile_policy(profile)
+    def fake_validate(profile, policy=None):
+        core.enforce_profile_policy(profile, policy)
         return core.ValidatedProfile(profile, profile, str(tmp_path / profile))
 
     monkeypatch.setattr(core, "validate_profile", fake_validate)
@@ -475,8 +477,8 @@ def test_approval_timeout_marker_becomes_structured_failure(tmp_path, monkeypatc
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
     monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
 
     def fake_run(_cmd, **kwargs):
@@ -548,6 +550,7 @@ def test_resolve_hermes_bin_env_override(tmp_path, monkeypatch):
 
 def test_workdir_requires_policy_for_explicit_path(tmp_path, monkeypatch):
     monkeypatch.delenv("PROFILE_DELEGATE_ALLOWED_WORKDIRS", raising=False)
+    monkeypatch.setattr(core, "_plugin_entry", lambda: {})
     try:
         core.resolve_workdir(str(tmp_path))
     except core.ProfileDelegateError as exc:
@@ -605,8 +608,8 @@ def test_delegate_uses_prompt_file_not_raw_prompt_in_argv(tmp_path, monkeypatch)
     monkeypatch.delenv("PROFILE_DELEGATE_HERMES_BIN", raising=False)
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
     monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     seen = {}
 
     def fake_run_capped(cmd, **kwargs):
@@ -655,8 +658,8 @@ def test_delegate_reports_truncated_output(tmp_path, monkeypatch):
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
     monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     monkeypatch.setattr(core, "resolve_hermes_bin", lambda: sys.executable)
 
     def fake_run_capped(cmd, **kwargs):
@@ -706,8 +709,8 @@ def test_delegate_background_returns_running_and_finishes(tmp_path, monkeypatch)
     monkeypatch.setenv("PROFILE_DELEGATE_BACKGROUND_MODE", "thread")
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
     monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     monkeypatch.setattr(core, "_push_profile_delegate_completion", lambda run_dir, final: None)
 
     def fake_run_capped(cmd, **kwargs):
@@ -739,8 +742,8 @@ def test_detached_background_worker_finalizes_completed_run(tmp_path, monkeypatc
     monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
     monkeypatch.delenv("PROFILE_DELEGATE_BACKGROUND_MODE", raising=False)
-    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     monkeypatch.setenv("PROFILE_DELEGATE_HERMES_BIN", "/bin/echo")
 
     result = core.delegate_profile("reviewer", "task", session_title="detached", background=True, notify_on_complete=True)
@@ -769,8 +772,8 @@ def test_delegate_background_start_failure_marks_run_failed(tmp_path, monkeypatc
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
     monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     monkeypatch.setattr(core, "_start_background_run", lambda run_dir: (_ for _ in ()).throw(core.ProfileDelegateError("capacity", "async_concurrency_limit")))
     try:
         core.delegate_profile("reviewer", "task", session_title="async", background=True, origin_session_key="discord:guild:chan")
@@ -904,8 +907,8 @@ def test_transient_failure_resumes_same_session(tmp_path, monkeypatch):
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
     monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     monkeypatch.setattr(core.time, "sleep", lambda _s: None)
     calls = []
 
@@ -934,8 +937,8 @@ def test_transient_failure_without_session_id_fails_closed(tmp_path, monkeypatch
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
     monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     calls = []
 
     def fake_run(cmd, **kwargs):
@@ -957,8 +960,8 @@ def test_delegate_resume_uses_resume_flag_and_skips_rename(tmp_path, monkeypatch
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
     monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     seen = {}
 
     def fake_run_capped(cmd, **kwargs):
@@ -985,8 +988,8 @@ def test_delegate_approve_yolo_tool_arg_adds_yolo_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
     monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     seen = {}
 
     def fake_run_capped(cmd, **kwargs):
@@ -1012,8 +1015,8 @@ def test_delegate_new_renames_when_session_id_present(tmp_path, monkeypatch):
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
     monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     renamed = {}
 
     def fake_run_capped(cmd, **kwargs):
@@ -1041,8 +1044,8 @@ def test_delegate_new_missing_session_id_keeps_success_without_rename(tmp_path, 
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
     monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
 
     def fake_run_capped(cmd, **kwargs):
         core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
@@ -1088,7 +1091,7 @@ def test_execution_override_normalization_and_fail_closed_policy(monkeypatch):
         try:
             core.normalize_requested_execution(**kwargs)
         except core.ProfileDelegateError as exc:
-            assert exc.code == "validation_error"
+            assert exc.code in {"validation_error", "execution_overrides_not_allowed"}
         else:
             raise AssertionError(f"expected validation error for {kwargs}")
 
@@ -1220,9 +1223,11 @@ def test_reasoning_override_without_scope_keeps_canonical_home_and_session(tmp_p
 def test_default_profile_reasoning_override_rejected_before_run_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core, "validate_profile", lambda p: core.ValidatedProfile("default", "default", str(tmp_path)))
-    with pytest.raises(core.ProfileDelegateError, match="default profile"):
+    monkeypatch.setattr(core, "validate_profile", lambda p, policy=None: core.ValidatedProfile("default", "default", str(tmp_path)))
+    with pytest.raises(core.PreflightError) as exc_info:
         core.delegate_profile("default", "task", session_title="default override", reasoning_effort="high")
+    assert "reasoning_effort" in exc_info.value.details["unsupported_fields"]
+    assert exc_info.value.details["run_created"] is False
     assert not (tmp_path / "runs").exists()
 
 
@@ -1230,8 +1235,8 @@ def test_execution_metadata_persisted_sync(tmp_path, monkeypatch):
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
     monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core, "validate_profile", lambda p: core.ValidatedProfile(p, p, str(tmp_path / p)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda p, policy=None: core.ValidatedProfile(p, p, str(tmp_path / p)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
     def fake_run(cmd, **kwargs):
         core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
@@ -1317,11 +1322,11 @@ def test_handler_passes_origin_without_overwriting_target_session_id(monkeypatch
     assert seen["origin_session_key"] == ORIGIN_A["session_key"]
 
 
-def test_delegate_persists_schema_v2_origin_and_legacy_key(tmp_path, monkeypatch):
+def test_delegate_persists_schema_v3_origin_and_legacy_key(tmp_path, monkeypatch):
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core, "validate_profile", lambda p: core.ValidatedProfile(p, p, str(tmp_path / p)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="": tmp_path)
+    monkeypatch.setattr(core, "validate_profile", lambda p, policy=None: core.ValidatedProfile(p, p, str(tmp_path / p)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
     monkeypatch.setattr(core, "_start_background_run", lambda run_dir: None)
 
@@ -1334,8 +1339,8 @@ def test_delegate_persists_schema_v2_origin_and_legacy_key(tmp_path, monkeypatch
     status = json.loads((run_dir / "status.json").read_text())
 
     for artifact in (request, status):
-        assert artifact["artifact_schema_version"] == 2
-        assert artifact["origin"] == ORIGIN_A
+        assert artifact["artifact_schema_version"] == 3
+        assert artifact["origin"]["session_id"] == "session-a"
         assert artifact["origin_session_key"] == ORIGIN_A["session_key"]
         assert "unexpected" not in artifact["origin"]
 
@@ -1541,3 +1546,162 @@ def test_list_and_status_handlers_capture_origin_and_schema_contract(monkeypatch
     assert list_props["scope"]["enum"] == ["current_session", "current_lane", "all"]
     assert list_props["status"]["items"]["enum"] == ["running", "completed", "failed", "corrupt"]
     assert "profile" in list_props
+
+
+def test_active_duplicate_lookup_reuses_only_active_identical_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    fingerprint = "f" * 64
+    run_dir = tmp_path / "runs" / "pd_20260719_000000_aaaaaa"
+    run_dir.mkdir(parents=True)
+    core.json_safe_write(run_dir / "status.json", {
+        "task_id": run_dir.name,
+        "status": "running",
+        "request_fingerprint": fingerprint,
+        "created_at": core.now_iso(),
+        "dispatched_at_epoch": core.time.time(),
+        "background": True,
+        "owner_pid": core.os.getpid(),
+    })
+    active = core._active_matching_run(fingerprint, 120)
+    assert active is not None
+    assert active["task_id"] == run_dir.name
+    assert core._active_matching_run("0" * 64, 120) is None
+    status = core.read_json_file(run_dir / "status.json")
+    status["status"] = "completed"
+    core.json_safe_write(run_dir / "status.json", status)
+    assert core._active_matching_run(fingerprint, 120) is None
+
+
+def test_preflight_aggregates_reasoning_toolsets_and_skills():
+    policy = core.EffectivePolicy({
+        "allowed_toolsets": [], "allowed_skills": [], "allow_model_override": True,
+        "allow_provider_override": True, "allow_reasoning_override": True,
+        "allow_child_approval_override": True,
+    }, {})
+    requested = {"model": None, "provider": None, "reasoning_effort": "none",
+                 "max_turns": None, "toolsets": ["terminal"], "skills": ["x"]}
+    with pytest.raises(core.PreflightError) as exc_info:
+        core.validate_preflight(requested, policy, reasoning_mode="inherit",
+                                capability_preset="build", target_profile="reviewer",
+                                child_approval_explicit=False)
+    assert exc_info.value.details["unsupported_fields"] == [
+        "reasoning_mode", "reasoning_effort", "toolsets", "skills"
+    ]
+    assert exc_info.value.details["run_created"] is False
+
+
+def test_reasoning_omission_inherits_and_none_is_explicit():
+    assert core.normalize_reasoning_request(None, None) == ("inherit", None)
+    assert core.normalize_reasoning_request(None, "none") == ("override", "none")
+
+
+def test_identical_concurrent_background_requests_create_one_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core, "validate_profile", lambda p, policy=None: core.ValidatedProfile(p, p, str(tmp_path / p)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
+    monkeypatch.setattr(core, "_start_background_run", lambda run_dir: None)
+    origin = {"session_id": "same-origin"}
+    barrier = threading.Barrier(2)
+    results = []
+
+    def invoke():
+        barrier.wait()
+        results.append(core.delegate_profile("reviewer", "same task", session_title="same",
+                                             background=True, origin=origin))
+
+    threads = [threading.Thread(target=invoke) for _ in range(2)]
+    for thread in threads: thread.start()
+    for thread in threads: thread.join(timeout=5)
+    assert len(results) == 2
+    assert len({item["task_id"] for item in results}) == 1
+    assert sorted(item["run_created"] for item in results) == [False, True]
+    assert len(list((tmp_path / "runs").iterdir())) == 1
+
+    fresh = core.delegate_profile("reviewer", "same task", session_title="same", background=True,
+                                  origin=origin, duplicate_policy="new")
+    assert fresh["run_created"] is True
+    assert fresh["task_id"] != results[0]["task_id"]
+    assert len(list((tmp_path / "runs").iterdir())) == 2
+
+
+def test_effective_policy_precedence_and_public_output(monkeypatch):
+    monkeypatch.setattr(core, "_plugin_entry", lambda: {
+        "allowed_profiles": ["reviewer"], "allowed_toolsets": ["file"],
+        "max_async": 3, "duplicate_guard": {"enabled": False, "active_window_seconds": 90},
+    })
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOWED_PROFILES", "builder")
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOWED_TOOLSETS", "")
+    monkeypatch.setenv("PROFILE_DELEGATE_MAX_ASYNC", "4")
+    policy = core.load_effective_policy()
+    assert policy.values["allowed_profiles"] == ["builder"]
+    assert policy.values["allowed_toolsets"] == []
+    assert policy.values["max_async"] == 4
+    assert policy.values["duplicate_guard_enabled"] is False
+    assert policy.sources["allowed_profiles"] == "env"
+    assert policy.sources["duplicate_guard_enabled"] == "yaml"
+    public = core.profile_delegate_policy(policy)
+    assert public["limits"]["max_async"] == 4
+    assert public["execution_overrides"]["allowed_toolsets"] == []
+    assert "secret" not in json.dumps(public).lower()
+
+
+def test_malformed_policy_fails_before_artifact_creation(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setattr(core, "_plugin_entry", lambda: {"max_async": "broken"})
+    with pytest.raises(core.ProfileDelegateError) as exc_info:
+        core.delegate_profile("reviewer", "task", session_title="bad config")
+    assert exc_info.value.code == "configuration_error"
+    assert not (tmp_path / "runs").exists()
+
+
+def test_detached_max_async_uses_persisted_policy(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    active = tmp_path / "runs" / "pd_20260719_000000_active1"
+    active.mkdir(parents=True)
+    core.json_safe_write(active / "status.json", {
+        "status": "running", "background_worker_mode": "detached", "worker_pid": 123,
+    })
+    pending = tmp_path / "runs" / "pd_20260719_000001_pending1"
+    pending.mkdir()
+    core.json_safe_write(pending / "request.json", {"effective_policy": {"limits": {"max_async": 1}}})
+    monkeypatch.setattr(core, "probe_worker_alive", lambda pid: True)
+    with pytest.raises(core.ProfileDelegateError) as exc_info:
+        core._start_detached_background_worker(pending)
+    assert exc_info.value.code == "async_concurrency_limit"
+
+
+def test_identical_concurrent_sync_requests_create_one_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core, "validate_profile", lambda p, policy=None: core.ValidatedProfile(p, p, str(tmp_path / p)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def fake_execute(run_dir):
+        entered.set()
+        release.wait(timeout=5)
+        return {"success": True, "mode": "sync", "task_id": run_dir.name, "status": "completed",
+                "paths": core.base_paths(run_dir)}
+
+    monkeypatch.setattr(core, "_execute_delegate_run", fake_execute)
+    results = []
+    first = threading.Thread(target=lambda: results.append(core.delegate_profile(
+        "reviewer", "same task", session_title="same", origin={"session_id": "sync-origin"})))
+    first.start()
+    assert entered.wait(timeout=5)
+    second = threading.Thread(target=lambda: results.append(core.delegate_profile(
+        "reviewer", "same task", session_title="same", origin={"session_id": "sync-origin"})))
+    second.start()
+    second.join(timeout=5)
+    release.set()
+    first.join(timeout=5)
+    assert len(results) == 2
+    assert len({item["task_id"] for item in results}) == 1
+    assert len(list((tmp_path / "runs").iterdir())) == 1

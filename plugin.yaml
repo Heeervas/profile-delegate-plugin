@@ -1,5 +1,5 @@
 name: profile-delegate
-version: "1.5.0"
+version: "1.6.0"
 description: "Profile Delegate 🤝: bounded cross-profile delegation with strict same-session transient recovery, deterministic child approvals, capability presets, origin-scoped inspection, and async support."
 author: Adan
 requires_env: []
@@ -8,4 +8,5 @@ provides_tools:
   - profile_delegate_status
   - profile_delegate_list
   - profile_delegate_prune
+  - profile_delegate_policy
 provides_hooks: []

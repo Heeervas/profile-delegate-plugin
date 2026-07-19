@@ -1,6 +1,6 @@
 # Profile Delegate 🤝
 
-Version: `1.4.0`
+Version: `1.6.0`
 
 > Stable local-power-user Hermes Agent plugin. It is **not a sandbox** and should be configured deliberately before broad use.
 
@@ -104,14 +104,34 @@ export PROFILE_DELEGATE_ALLOWED_WORKDIRS=/opt/data/repos,/workspace
 export PROFILE_DELEGATE_RUNS_ROOT=/path/to/private/profile-delegate-runs
 ```
 
-Delegated child processes are forced non-interactive by stripping inherited gateway/session approval env. Approval is installed inside the child process by the plugin bootstrap before Hermes constructs the agent; it does not depend on cron-session simulation or a parent approval queue. Child approval behavior is controlled by YAML config or a per-call tool argument:
+Delegated child processes are forced non-interactive by stripping inherited gateway/session approval env. Approval is installed inside the child process by the plugin bootstrap before Hermes constructs the agent; it does not depend on cron-session simulation or a parent approval queue. Non-secret operational policy can live in YAML; explicitly present environment variables remain higher-precedence operator overrides:
 
 ```yaml
 plugins:
   entries:
     profile-delegate:
       child_approval_mode: deny  # deny | approve_yolo
+      allowed_profiles: [builder, reviewer]
+      allow_all_profiles: false
+      allowed_workdirs: [/opt/data]
+      allowed_toolsets: []       # empty means deny per-call toolset overrides
+      allowed_skills: []         # empty means deny per-call skill overrides
+      allow_model_override: true
+      allow_provider_override: true
+      allow_reasoning_override: true
+      allow_child_approval_override: true
+      max_depth: 1
+      max_concurrent: 1
+      max_async: 2
+      default_timeout_seconds: 1200
+      max_timeout_seconds: 1800
+      max_transient_resumes: 2
+      duplicate_guard:
+        enabled: true
+        active_window_seconds: 120
 ```
+
+Precedence is safe hardcoded bounds/defaults, then YAML, then explicitly present `PROFILE_DELEGATE_*` environment variables, then permitted per-call values. Missing YAML preserves the previous fail-closed capability policy. Empty allowlists deny overrides. Malformed YAML/config/env values fail with `configuration_error` before a run is created; they are not replaced by broader defaults.
 
 - `deny` (default): immediately deny dangerous terminal commands and host-access `execute_code` inside the child. Safe terminal commands still use normal Hermes guards. Decisions are recorded in `approval_events.jsonl` using hashes and character counts, never raw command/code text.
 - `approve_yolo`: explicit trusted mode; adds `--yolo`, sets `HERMES_YOLO_MODE=1`, and auto-accepts hooks for the child. Hermes' hardline unconditional blocklist still applies.
@@ -193,11 +213,13 @@ Notes:
 - `timeout_seconds` is synchronous and bounded from 10 to `PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS` seconds; default local config is 1200 seconds and max is 1800 seconds.
 - Execution precedence is per-call override > target profile default; blank/omitted `model`, `provider`, and `reasoning_effort` inherit. These are requested controls: Hermes/provider still validates model/provider compatibility.
 - `toolsets` and `skills` are capability-bearing and fail closed unless every requested item is present in the corresponding plugin allowlist.
+- Call `profile_delegate_policy` before using optional overrides. Deterministic preflight failures report all `unsupported_fields` together with a one-shot `retry_patch` and `run_created:false`.
 - `capability_preset` defaults to `build`, which preserves the selected/inherited child capabilities and never bypasses approval policy. `review` selects Hermes' `web` and `file` toolsets, then removes `write_file`, `patch`, `terminal`, `process`, `execute_code`, and other mutating/delegating schemas inside the child before agent construction. It leaves `read_file` and `search_files`; it does not claim a read-only terminal. To avoid ambiguous widening, `review` cannot be combined with a per-call `toolsets` override.
-- `reasoning_effort` uses a config-only temporary managed scope at `<run_dir>/reasoning_config` only when no administrator-managed scope exists. If inherited `HERMES_MANAGED_DIR` is nonblank, or `/etc/hermes` exists, the call fails before subprocess execution with `reasoning_managed_scope_conflict`; the plugin never copies, composes, or replaces administrator-managed files. The child keeps canonical target `HERMES_HOME`, so new/resumed sessions and rename operations remain durable. Default-profile reasoning overrides remain rejected because `-p default` has special root resolution.
+- `reasoning_mode` defaults to `inherit`, which creates no overlay. `override` requires `reasoning_effort`; `none` is a real explicit override, never inheritance. For compatibility, an effort supplied without a mode still means override. Managed-scope/default-profile conflicts fail in preflight with a corrective patch before run allocation.
 - Accepted reasoning requests are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Runtime/provider support still decides whether a request executes successfully. `max` is retained for forward-compatible GPT-5.6 use; `ultra` is a separate multi-agent mode, not a reasoning effort.
 - `request.json`, `status.json`, sync/async responses, and final `result.json` expose `requested_execution`, `effective_execution`, `effective_capabilities`, and `approval_policy`. `approval_events.jsonl` records bootstrap/policy outcomes with timestamp, effective policy, detector/reason, outcome, SHA-256, and input length where applicable.
 - `background=true` returns immediately with `mode: "async"`, `task_id`, and run artifact paths; the delegated run continues in the configured thread or detached worker using persisted request data.
+- Identical active requests from the same resolved caller origin are reused under a per-fingerprint file lock. `duplicate_policy:"new"` permits intentional duplicate work. Completed runs are not silently reused.
 - Both synchronous and detached runs execute the same bootstrap path. If legacy/core output contains `Timeout — denying command`, the run is finalized as structured `approval_timeout` failure instead of being reported as successful or left active.
 - `notify_on_complete=true` queues a native Hermes `async_delegation` completion event back to the originating gateway session when the background run finishes. This requires a fresh gateway/CLI process after plugin upgrade so the new schema/code is loaded.
 

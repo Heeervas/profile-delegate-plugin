@@ -166,6 +166,10 @@ def _parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list
 
 def main(argv: list[str] | None = None) -> int:
     args, command = _parse_args(argv)
+    # Non-Hermes commands are test/compatibility shims. Execute them directly;
+    # importing the full Hermes tool graph would be both incorrect and slow.
+    if Path(command[0]).resolve().name != "hermes":
+        return subprocess.run(command, check=False).returncode
     try:
         install_policy(
             args.approval_mode,
