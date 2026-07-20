@@ -1,11 +1,13 @@
 name: profile-delegate
-version: "1.6.0"
-description: "Profile Delegate 🤝: bounded cross-profile delegation with strict same-session transient recovery, deterministic child approvals, capability presets, origin-scoped inspection, and async support."
+version: "1.7.0"
+description: "Profile Delegate 🤝: bounded cross-profile delegation with isolated TUI stdio workers, live status, native steer/cancel controls, strict origin authorization, deterministic child approvals, and async support."
 author: Adan
 requires_env: []
 provides_tools:
   - profile_delegate
   - profile_delegate_status
+  - profile_delegate_steer
+  - profile_delegate_cancel
   - profile_delegate_list
   - profile_delegate_prune
   - profile_delegate_policy

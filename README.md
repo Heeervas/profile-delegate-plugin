@@ -1,6 +1,6 @@
 # Profile Delegate 🤝
 
-Version: `1.6.0`
+Version: `1.7.0`
 
 > Stable local-power-user Hermes Agent plugin. It is **not a sandbox** and should be configured deliberately before broad use.
 
@@ -49,7 +49,7 @@ Example uses:
 ## Requirements
 
 - Hermes Agent installed and available as `hermes` on `PATH`, or configured with `PROFILE_DELEGATE_HERMES_BIN`.
-- Hermes version with plugin support and quiet single-query chat mode (`hermes chat -q ... -Q`).
+- Hermes version with plugin support and the TUI Gateway JSON-RPC stdio transport. Foreground and rollback execution retain quiet single-query chat compatibility.
 - At least one named profile created with `hermes profile create <name>`.
 - The plugin enabled in the caller profile.
 - Python on a Unix-like platform for lock-file concurrency control.
@@ -240,6 +240,22 @@ The plugin normalizes non-list fields into arrays where appropriate and converts
 ### `profile_delegate_status`
 
 Read a run by `task_id`.
+
+Active detached background runs use one isolated TUI Gateway JSON-RPC stdio
+child. Status includes bounded transport phase/activity metadata and omits raw
+prompts, reasoning, tool payloads, and control text.
+
+### `profile_delegate_steer`
+
+`profile_delegate_steer(task_id, text)` sends a bounded correction to an active
+TUI-backed run through native `session.steer`. It is available only to the exact
+originating session; the private run-local inbox records delivery acknowledgements.
+
+### `profile_delegate_cancel`
+
+`profile_delegate_cancel(task_id)` requests native `session.interrupt`, waits a
+short bounded grace period, then reaps/escalates the worker-owned TUI process if
+needed. Cancellation is idempotent and is committed only after cleanup.
 
 ```json
 {

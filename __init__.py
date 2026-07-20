@@ -12,10 +12,12 @@ try:
         MAX_TIMEOUT_SECONDS,
         ProfileDelegateError,
         delegate_profile,
+        profile_delegate_cancel as profile_delegate_cancel,
         profile_delegate_list,
         profile_delegate_policy,
         profile_delegate_prune,
         profile_delegate_status,
+        profile_delegate_steer as profile_delegate_steer,
     )
 except ImportError:  # direct import / pytest from plugin directory
     import sys
@@ -30,10 +32,12 @@ except ImportError:  # direct import / pytest from plugin directory
         MAX_TIMEOUT_SECONDS,
         ProfileDelegateError,
         delegate_profile,
+        profile_delegate_cancel as profile_delegate_cancel,
         profile_delegate_list,
         profile_delegate_policy,
         profile_delegate_prune,
         profile_delegate_status,
+        profile_delegate_steer as profile_delegate_steer,
     )
 
 
@@ -192,6 +196,37 @@ def _status_schema() -> Dict[str, Any]:
     }
 
 
+def _steer_schema() -> Dict[str, Any]:
+    return {
+        "name": "profile_delegate_steer",
+        "description": "Steer an active background TUI-backed Profile Delegate run from its exact originating session.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Active Profile Delegate task id."},
+                "text": {"type": "string", "minLength": 1, "maxLength": 12000, "description": "Bounded steering instruction delivered through native session.steer."},
+            },
+            "required": ["task_id", "text"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _cancel_schema() -> Dict[str, Any]:
+    return {
+        "name": "profile_delegate_cancel",
+        "description": "Cancel an active background TUI-backed Profile Delegate run through native session.interrupt.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Active Profile Delegate task id."},
+            },
+            "required": ["task_id"],
+            "additionalProperties": False,
+        },
+    }
+
+
 def _list_schema() -> Dict[str, Any]:
     return {
         "name": "profile_delegate_list",
@@ -336,6 +371,34 @@ def _status_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+def _steer_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
+    payload = {**kwargs, **(args if isinstance(args, dict) else {})}
+    try:
+        result = profile_delegate_steer(
+            payload.get("task_id", ""),
+            payload.get("text", ""),
+            caller_origin=_current_origin(),
+        )
+    except ProfileDelegateError as exc:
+        result = _error_result(exc)
+    except Exception as exc:
+        result = {"success": False, "error": f"profile_delegate_steer internal error: {type(exc).__name__}: {exc}", "error_code": "internal_error", "status": "failed"}
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def _cancel_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
+    payload = {**kwargs, **(args if isinstance(args, dict) else {})}
+    try:
+        result = profile_delegate_cancel(
+            payload.get("task_id", ""), caller_origin=_current_origin()
+        )
+    except ProfileDelegateError as exc:
+        result = _error_result(exc)
+    except Exception as exc:
+        result = {"success": False, "error": f"profile_delegate_cancel internal error: {type(exc).__name__}: {exc}", "error_code": "internal_error", "status": "failed"}
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 def _list_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     payload = args if isinstance(args, dict) else {}
     payload = {**kwargs, **payload}
@@ -426,6 +489,8 @@ def register(ctx: Any) -> None:
     for name, schema, handler, desc in [
         ("profile_delegate", _schema(), _handler, "Profile Delegate 🤝: bounded task delegation to another Hermes profile."),
         ("profile_delegate_status", _status_schema(), _status_handler, "Inspect a Profile Delegate run by task_id."),
+        ("profile_delegate_steer", _steer_schema(), _steer_handler, "Steer an active Profile Delegate run."),
+        ("profile_delegate_cancel", _cancel_schema(), _cancel_handler, "Cancel an active Profile Delegate run."),
         ("profile_delegate_list", _list_schema(), _list_handler, "List recent Profile Delegate runs."),
         ("profile_delegate_policy", _policy_schema(), _policy_handler, "Inspect effective non-secret Profile Delegate policy."),
         ("profile_delegate_prune", _prune_schema(), _prune_handler, "Prune old Profile Delegate run artifacts."),

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -89,7 +90,9 @@ POLICY_SCHEMA_VERSION = 1
 ORIGIN_FIELDS = ("platform", "source", "profile", "session_id", "ui_session_id", "session_key")
 MAX_ORIGIN_VALUE_CHARS = 500
 VALID_INSPECTION_SCOPES = {"current_session", "current_lane", "all"}
-VALID_RUN_STATUSES = {"running", "completed", "failed", "corrupt"}
+VALID_RUN_STATUSES = {"running", "cancelling", "completed", "failed", "cancelled", "timed_out", "corrupt"}
+TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
+MAX_STEER_CHARS = 12_000
 
 TRANSIENT_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     ("incomplete_chunked_read", re.compile(r"^(?:[\w.]+\.)?RemoteProtocolError:\s*(?:peer closed connection without sending complete message body|incomplete chunked read).*$", re.I)),
@@ -244,9 +247,9 @@ def derive_activity(status: Any) -> Dict[str, Any]:
     """Project advisory activity from canonical status; never mutate artifacts."""
     data = status if isinstance(status, dict) else {}
     lifecycle = ensure_text(data.get("status")).strip().lower()
-    if lifecycle in {"completed", "failed"}:
+    if lifecycle in TERMINAL_RUN_STATUSES:
         return {"activity": "finished", "worker_alive": None}
-    if lifecycle != "running" or data.get("background_worker_mode") != "detached":
+    if lifecycle not in {"running", "cancelling"} or data.get("background_worker_mode") != "detached":
         return {"activity": "unknown", "worker_alive": None}
     alive = probe_worker_alive(data.get("worker_pid"))
     if alive is True:
@@ -455,11 +458,16 @@ def load_effective_policy() -> EffectivePolicy:
     for key, (kind, raw) in yaml_specs.items():
         if raw is None:
             continue
-        if kind == "list": values[key] = _config_list(raw, key)
-        elif kind == "bool": values[key] = _config_bool(raw, key)
-        elif kind == "resume": values[key] = _config_int(raw, key, 0, 2)
-        elif kind == "window": values[key] = _config_int(raw, key, 1, 3600)
-        elif kind == "timeout": values[key] = _config_int(raw, key, 10, 604800, allow_zero=True)
+        if kind == "list":
+            values[key] = _config_list(raw, key)
+        elif kind == "bool":
+            values[key] = _config_bool(raw, key)
+        elif kind == "resume":
+            values[key] = _config_int(raw, key, 0, 2)
+        elif kind == "window":
+            values[key] = _config_int(raw, key, 1, 3600)
+        elif kind == "timeout":
+            values[key] = _config_int(raw, key, 10, 604800, allow_zero=True)
         else:
             bounds = {"max_depth": (0, 20), "max_concurrent": (1, 100), "max_async": (1, 100), "default_timeout_seconds": (10, 604800)}
             values[key] = _config_int(raw, key, *bounds[key])
@@ -483,11 +491,16 @@ def load_effective_policy() -> EffectivePolicy:
         if env_name not in os.environ:
             continue
         raw = os.environ[env_name]
-        if kind == "list": values[key] = [item.strip() for item in raw.split(",") if item.strip()]
-        elif kind == "bool": values[key] = _config_bool(raw, env_name)
-        elif kind == "resume": values[key] = _config_int(raw, env_name, 0, 2)
-        elif kind == "window": values[key] = _config_int(raw, env_name, 1, 3600)
-        elif kind == "timeout": values[key] = _config_int(raw, env_name, 10, 604800, allow_zero=True)
+        if kind == "list":
+            values[key] = [item.strip() for item in raw.split(",") if item.strip()]
+        elif kind == "bool":
+            values[key] = _config_bool(raw, env_name)
+        elif kind == "resume":
+            values[key] = _config_int(raw, env_name, 0, 2)
+        elif kind == "window":
+            values[key] = _config_int(raw, env_name, 1, 3600)
+        elif kind == "timeout":
+            values[key] = _config_int(raw, env_name, 10, 604800, allow_zero=True)
         else:
             bounds = {"max_depth": (0, 20), "max_concurrent": (1, 100), "max_async": (1, 100), "default_timeout_seconds": (10, 604800)}
             values[key] = _config_int(raw, env_name, *bounds[key])
@@ -1411,7 +1424,93 @@ def base_paths(run_dir: Path) -> Dict[str, str]:
         "worker_stdout": str(run_dir / "worker_stdout.txt"),
         "worker_stderr": str(run_dir / "worker_stderr.txt"),
         "result": str(run_dir / "result.json"),
+        "control": str(run_dir / "control"),
     }
+
+
+def _control_dirs(run_dir: Path) -> Tuple[Path, Path, Path]:
+    root = run_dir / "control"
+    commands, acks = root / "commands", root / "acks"
+    commands.mkdir(parents=True, exist_ok=True, mode=0o700)
+    acks.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for path in (root, commands, acks):
+        chmod_best_effort(path, 0o700)
+    return root, commands, acks
+
+
+def _control_filename(seq: int, command_id: str) -> str:
+    return f"{seq:012d}-{command_id}.json"
+
+
+def _write_control_command(run_dir: Path, command_type: str, payload: Dict[str, Any],
+                           caller_origin: Optional[Dict[str, Any]]) -> Tuple[Path, Dict[str, Any]]:
+    status = read_json_file(run_dir / "status.json")
+    lifecycle = ensure_text(status.get("status")).lower()
+    if lifecycle in TERMINAL_RUN_STATUSES:
+        raise ProfileDelegateError(f"run is already terminal: {lifecycle}", "run_terminal", status=lifecycle)
+    if not status.get("background") or status.get("transport") != "tui_stdio":
+        raise ProfileDelegateError("live controls require an active background TUI run", "control_unavailable")
+    allowed, matched_by = origin_match(
+        normalize_persisted_origin(status), normalize_origin(caller_origin), "current_session"
+    )
+    if not allowed or not matched_by:
+        raise ProfileDelegateError("control denied: caller is not the exact originating session", "origin_mismatch")
+    root, commands, _ = _control_dirs(run_dir)
+    with FingerprintLock(f"control-{run_dir.name}"):
+        seq_path = root / "next_seq.json"
+        try:
+            seq = int(read_json_file(seq_path).get("next_seq") or 1)
+        except ProfileDelegateError:
+            seq = 1
+        command_id = uuid.uuid4().hex
+        command = {
+            "schema_version": 1, "task_id": run_dir.name, "type": command_type,
+            "command_id": command_id, "seq": seq, "created_at": now_iso(),
+            "origin_match_by": matched_by, "payload": payload,
+        }
+        path = commands / _control_filename(seq, command_id)
+        json_safe_write(path, command)
+        json_safe_write(seq_path, {"next_seq": seq + 1})
+    return path, command
+
+
+def _wait_control_ack(run_dir: Path, command: Dict[str, Any], wait_seconds: float = 2.0) -> Optional[Dict[str, Any]]:
+    _, _, acks = _control_dirs(run_dir)
+    path = acks / _control_filename(int(command["seq"]), ensure_text(command["command_id"]))
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        if path.exists():
+            return read_json_file(path)
+        time.sleep(0.05)
+    return None
+
+
+def _pending_control_commands(run_dir: Path) -> Iterable[Tuple[Path, Dict[str, Any]]]:
+    _, commands, acks = _control_dirs(run_dir)
+    for path in sorted(commands.glob("*.json")):
+        if (acks / path.name).exists():
+            continue
+        try:
+            yield path, read_json_file(path)
+        except ProfileDelegateError:
+            continue
+
+
+def _ack_control(run_dir: Path, command_path: Path, command: Dict[str, Any], state: str,
+                 detail: str = "") -> Dict[str, Any]:
+    _, _, acks = _control_dirs(run_dir)
+    ack = {
+        "schema_version": 1, "task_id": run_dir.name, "type": command.get("type"),
+        "command_id": command.get("command_id"), "seq": command.get("seq"),
+        "state": state, "at": now_iso(),
+    }
+    if detail:
+        ack["detail"] = detail[:500]
+    json_safe_write(acks / command_path.name, ack)
+    status = read_json_file(run_dir / "status.json")
+    status["last_control"] = {"type": command.get("type"), "state": state, "at": ack["at"]}
+    json_safe_write(run_dir / "status.json", status)
+    return ack
 
 
 def split_session_id_footer(text: str) -> Tuple[str, str]:
@@ -1858,7 +1957,15 @@ def _start_background_run(run_dir: Path) -> None:
 def _background_worker_main(run_dir_arg: str) -> int:
     run_dir = Path(run_dir_arg).expanduser().resolve()
     try:
-        final = _execute_delegate_run(run_dir)
+        request = read_json_file(run_dir / "request.json")
+        if request.get("transport") == "tui_stdio":
+            try:
+                from .tui_runner import execute as execute_tui_run
+            except ImportError:
+                from tui_runner import execute as execute_tui_run
+            final = execute_tui_run(run_dir)
+        else:
+            final = _execute_delegate_run(run_dir)
         final["mode"] = "async"
         try:
             status = read_json_file(run_dir / "status.json")
@@ -1981,6 +2088,13 @@ def delegate_profile(
             "notify_on_complete": bool(notify_on_complete), "origin": normalized_origin,
             "origin_session_key": normalized_origin_session_key, "request_fingerprint": fingerprint,
             "owner_pid": os.getpid(), "effective_policy": profile_delegate_policy(policy),
+            "transport": (
+                "tui_stdio"
+                if bool(background)
+                and _background_mode() == "detached"
+                and ensure_text(os.getenv("PROFILE_DELEGATE_BACKGROUND_TRANSPORT", "tui_stdio")).lower() != "cli"
+                else "cli"
+            ),
         }
         status = {**request, "status": "running", "started_at": now_iso(), "ended_at": None,
                   "exit_code": None, "error_code": None, "concurrency_slot": None,
@@ -2085,11 +2199,95 @@ def profile_delegate_status(
         "worker_pid": status.get("worker_pid"),
         "worker_alive": activity["worker_alive"],
         "activity": activity["activity"],
+        "phase": status.get("phase"),
+        "transport": status.get("transport"),
+        "transport_alive": status.get("transport_alive"),
+        "child_session_id": status.get("child_session_id"),
+        "latest_activity": status.get("latest_activity"),
+        "last_control": status.get("last_control"),
         "notification_status": status.get("notification_status"),
         "result": result,
         "stdout_tail": tail_text(run_dir / "stdout.txt", max_tail),
         "stderr_tail": tail_text(run_dir / "stderr.txt", max_tail),
         "paths": base_paths(run_dir),
+    }
+
+
+def profile_delegate_steer(
+    task_id: str,
+    text: Any,
+    caller_origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    run_dir = resolve_run_dir(task_id)
+    steer_text = bounded_text("text", text, MAX_STEER_CHARS).strip()
+    if not steer_text:
+        raise ProfileDelegateError("text must be non-empty", "validation_error")
+    _, command = _write_control_command(run_dir, "steer", {"text": steer_text}, caller_origin)
+    ack = _wait_control_ack(run_dir, command)
+    return {
+        "success": True,
+        "task_id": run_dir.name,
+        "command_id": command["command_id"],
+        "state": ack.get("state") if ack else "pending",
+        "ack": ack,
+    }
+
+
+def profile_delegate_cancel(
+    task_id: str,
+    caller_origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    run_dir = resolve_run_dir(task_id)
+    status = read_json_file(run_dir / "status.json")
+    lifecycle = ensure_text(status.get("status")).lower()
+    allowed, matched_by = origin_match(
+        normalize_persisted_origin(status), normalize_origin(caller_origin), "current_session"
+    )
+    if not allowed or not matched_by:
+        raise ProfileDelegateError(
+            "control denied: caller is not the exact originating session", "origin_mismatch"
+        )
+    if lifecycle in TERMINAL_RUN_STATUSES:
+        return {
+            "success": True,
+            "task_id": run_dir.name,
+            "state": lifecycle,
+            "idempotent": True,
+        }
+    if lifecycle == "cancelling":
+        return {
+            "success": True,
+            "task_id": run_dir.name,
+            "state": "cancelling",
+            "idempotent": True,
+        }
+    _, commands, acks = _control_dirs(run_dir)
+    for path in sorted(commands.glob("*.json")):
+        try:
+            existing = read_json_file(path)
+        except ProfileDelegateError:
+            continue
+        if existing.get("type") != "cancel":
+            continue
+        ack_path = acks / path.name
+        ack = read_json_file(ack_path) if ack_path.exists() else None
+        return {
+            "success": True,
+            "task_id": run_dir.name,
+            "command_id": existing.get("command_id"),
+            "state": ack.get("state") if ack else "cancel_pending",
+            "idempotent": True,
+            "ack": ack,
+        }
+    _, command = _write_control_command(run_dir, "cancel", {}, caller_origin)
+    ack = _wait_control_ack(run_dir, command)
+    return {
+        "success": True,
+        "task_id": run_dir.name,
+        "command_id": command["command_id"],
+        "state": ack.get("state") if ack else "cancel_pending",
+        "idempotent": False,
+        "ack": ack,
     }
 
 
@@ -2125,7 +2323,7 @@ def profile_delegate_list(
         normalized_statuses = {ensure_text(item).strip().lower() for item in statuses}
         if normalized_statuses - VALID_RUN_STATUSES:
             raise ProfileDelegateError(
-                "status entries must be one of: running, completed, failed, corrupt",
+                "status entries must be one of: running, cancelling, completed, failed, cancelled, timed_out, corrupt",
                 "validation_error",
             )
     profile_filter = ensure_text(profile).strip()

@@ -156,10 +156,11 @@ def _parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list
     parser.add_argument("--approval-mode", required=True, choices=["deny", "approve_yolo"])
     parser.add_argument("--events-path", required=True)
     parser.add_argument("--blocked-tools", default="")
+    parser.add_argument("--tui-gateway", action="store_true")
     args, command = parser.parse_known_args(argv)
     if command and command[0] == "--":
         command = command[1:]
-    if not command:
+    if not command and not args.tui_gateway:
         parser.error("missing Hermes command after --")
     return args, command
 
@@ -168,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     args, command = _parse_args(argv)
     # Non-Hermes commands are test/compatibility shims. Execute them directly;
     # importing the full Hermes tool graph would be both incorrect and slow.
-    if Path(command[0]).resolve().name != "hermes":
+    if command and Path(command[0]).resolve().name != "hermes" and not args.tui_gateway:
         return subprocess.run(command, check=False).returncode
     try:
         install_policy(
@@ -181,7 +182,14 @@ def main(argv: list[str] | None = None) -> int:
         # Hermes installs provide tools/hermes_cli and therefore stay in-process.
         if exc.name not in {"tools", "hermes_cli"}:
             raise
-        return subprocess.run(command, check=False).returncode
+        if command:
+            return subprocess.run(command, check=False).returncode
+        raise
+    if args.tui_gateway:
+        from tui_gateway.entry import main as tui_main
+
+        result = tui_main()
+        return int(result) if isinstance(result, int) else 0
     # Stay in-process so monkeypatches remain active. The executable path is
     # retained for auditability but hermes_cli.main is the installed entrypoint.
     sys.argv = [command[0], *command[1:]]

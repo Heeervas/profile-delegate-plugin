@@ -194,7 +194,10 @@ def test_plugin_registers_tools():
 
     plugin.register(Ctx())
     names = {call["name"] for call in calls}
-    assert {"profile_delegate", "profile_delegate_status", "profile_delegate_list", "profile_delegate_prune"}.issubset(names)
+    assert {
+        "profile_delegate", "profile_delegate_status", "profile_delegate_steer",
+        "profile_delegate_cancel", "profile_delegate_list", "profile_delegate_prune",
+    }.issubset(names)
     first = next(call for call in calls if call["name"] == "profile_delegate")
     assert first["toolset"] == "delegation"
     assert first["emoji"] == "🤝"
@@ -741,6 +744,7 @@ def test_detached_background_worker_finalizes_completed_run(tmp_path, monkeypatc
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
     monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setenv("PROFILE_DELEGATE_BACKGROUND_TRANSPORT", "cli")
     monkeypatch.delenv("PROFILE_DELEGATE_BACKGROUND_MODE", raising=False)
     monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
     monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
@@ -1613,8 +1617,10 @@ def test_identical_concurrent_background_requests_create_one_run(tmp_path, monke
                                              background=True, origin=origin))
 
     threads = [threading.Thread(target=invoke) for _ in range(2)]
-    for thread in threads: thread.start()
-    for thread in threads: thread.join(timeout=5)
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
     assert len(results) == 2
     assert len({item["task_id"] for item in results}) == 1
     assert sorted(item["run_created"] for item in results) == [False, True]
