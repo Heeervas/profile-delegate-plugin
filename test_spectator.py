@@ -21,7 +21,10 @@ import spectator
 TASK_ID = "pd_20260721_085059_dzk2o9"
 
 
-def _write_fixture(root: Path, *, status: str = "completed", events: list[dict] | None = None) -> Path:
+def _write_fixture(
+    root: Path, *, status: str = "completed", events: list[dict] | None = None,
+    persist_message_text: bool = False,
+) -> Path:
     run = root / TASK_ID
     run.mkdir(parents=True, mode=0o700)
     (run / "status.json").write_text(json.dumps({
@@ -31,16 +34,41 @@ def _write_fixture(root: Path, *, status: str = "completed", events: list[dict] 
     if events is not None:
         lines = "".join(json.dumps(event) + "\n" for event in events)
         (run / "events.jsonl").write_text(lines, encoding="utf-8")
+    (run / "request.json").write_text(
+        json.dumps({"persist_message_text": persist_message_text}), encoding="utf-8",
+    )
     if status in {"completed", "failed", "cancelled", "timed_out"}:
-        (run / "result.json").write_text(json.dumps({"status": status, "summary": "done"}), encoding="utf-8")
+        (run / "result.json").write_text(json.dumps({
+            "status": status, "summary": "assistant summary", "error_code": "terminal-code",
+            "session_id": "child-session", "artifacts": ["/private/artifact"],
+            "errors": ["assistant error"], "next_steps": ["assistant next step"],
+        }), encoding="utf-8")
     return run
 
 
 def _event(seq: int, event_type: str = "lifecycle", **payload) -> dict:
+    defaults = {
+        "lifecycle": {"status": "running", "phase": "model_running"},
+        "message.start": {"message_id": "m1", "role": "assistant"},
+        "message.delta": {"message_id": "m1", "text": "visible"},
+        "message.complete": {"message_id": "m1", "status": "complete"},
+        "tool.start": {"tool_id": "t1", "tool": "terminal", "tool_class": "shell"},
+        "tool.complete": {
+            "tool_id": "t1", "tool": "terminal", "tool_class": "shell",
+            "duration_s": 0.1, "outcome": "complete",
+        },
+        "session.info": {"profile": "reviewer"},
+        "status.update": {"kind": "running"},
+        "journal.truncated": {"reason": "limit", "dropped_after_seq": seq - 1},
+        "terminal": {"status": "completed", "error_code": "", "child_session_id": "child"},
+        "event.dropped": {"reason": "record_too_large"},
+    }
+    event_payload = dict(defaults[event_type])
+    event_payload.update(payload)
     return {
         "schema_version": 1, "task_id": TASK_ID, "seq": seq,
         "at": "2026-07-21T08:53:10+00:00", "type": event_type,
-        "phase": "model_running", "payload": payload, "redacted": False,
+        "phase": "model_running", "payload": event_payload, "redacted": False,
         "dropped_fields": [],
     }
 
@@ -94,8 +122,41 @@ def test_iter_events_rejects_corrupt_complete_record(tmp_path):
     assert exc.value.exit_code == 4
 
 
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda item: item.update({"prompt": "private"}),
+        lambda item: item["payload"].update({"args": {"secret": "private"}}),
+        lambda item: item.update({"redacted": "false"}),
+        lambda item: item.update({"type": "unknown.event"}),
+        lambda item: item.update({"phase": "unknown_phase"}),
+        lambda item: item.update({"dropped_fields": ["private-secret"]}),
+    ],
+)
+def test_iter_events_rejects_unknown_forbidden_or_invalid_schema_keys(tmp_path, mutate):
+    item = _event(1, "tool.start")
+    mutate(item)
+    path = tmp_path / "events.jsonl"
+    path.write_text(json.dumps(item) + "\n", encoding="utf-8")
+    with pytest.raises(spectator.SpectatorError) as exc:
+        list(spectator.iter_events(path))
+    assert exc.value.exit_code == 4
+
+
+def test_iter_events_requires_frozen_opt_in_before_exposing_message_text(tmp_path):
+    path = tmp_path / "events.jsonl"
+    path.write_text(json.dumps(_event(1, "message.delta", text="private")) + "\n", encoding="utf-8")
+    with pytest.raises(spectator.SpectatorError) as exc:
+        list(spectator.iter_events(path))
+    assert exc.value.exit_code == 4
+    assert [item["seq"] for item in spectator.iter_events(path, allow_message_text=True)] == [1]
+
+
 def test_inspect_is_bounded_machine_readable_and_neutralizes_controls(tmp_path):
-    run = _write_fixture(tmp_path, events=[_event(1, "message.delta", text="safe\x1b]8;;bad\x07link")])
+    run = _write_fixture(
+        tmp_path, events=[_event(1, "message.delta", text="safe\x1b]8;;bad\x07link")],
+        persist_message_text=True,
+    )
     snapshot = spectator.inspect_run(run)
     encoded = json.dumps(snapshot)
     assert snapshot["task_id"] == TASK_ID
@@ -103,6 +164,26 @@ def test_inspect_is_bounded_machine_readable_and_neutralizes_controls(tmp_path):
     assert len(encoded) < 65536
     assert "\u001b" not in encoded and "\u0007" not in encoded
     assert "reasoning" not in encoded.lower()
+
+
+def test_inspect_default_exposes_only_terminal_result_metadata(tmp_path):
+    run = _write_fixture(tmp_path, events=[])
+    snapshot = spectator.inspect_run(run)
+    encoded = json.dumps(snapshot)
+    assert snapshot["result"] == {
+        "status": "completed", "error_code": "terminal-code", "session_id": "child-session",
+    }
+    for private in ("assistant summary", "/private/artifact", "assistant error", "assistant next step"):
+        assert private not in encoded
+
+
+def test_inspect_frozen_opt_in_exposes_bounded_assistant_result_fields(tmp_path):
+    run = _write_fixture(tmp_path, events=[], persist_message_text=True)
+    result = spectator.inspect_run(run)["result"]
+    assert result["summary"] == "assistant summary"
+    assert result["artifacts"] == ["/private/artifact"]
+    assert result["errors"] == ["assistant error"]
+    assert result["next_steps"] == ["assistant next step"]
 
 
 def test_inspect_legacy_run_is_clearly_limited(tmp_path):
@@ -135,6 +216,38 @@ def test_watch_jsonl_emits_sanitized_records_unchanged(tmp_path):
     out = io.StringIO()
     assert spectator.watch_run(run, output_mode="jsonl", poll_interval=0.01, stdout=out) == 0
     assert json.loads(out.getvalue().strip()) == event
+
+
+def test_watch_tty_renders_bounded_event_ring_and_final_status(tmp_path, monkeypatch):
+    events = [_event(index, "tool.start", tool=f"tool-{index}") for index in range(1, 30)]
+    run = _write_fixture(tmp_path, status="running", events=events)
+    statuses = iter([
+        {"task_id": TASK_ID, "status": "running", "phase": "model_running", "tool_calls": 29},
+        {"task_id": TASK_ID, "status": "completed", "phase": "completed", "tool_calls": 29},
+    ])
+    monkeypatch.setattr(spectator, "_status", lambda _run: next(statuses))
+    monkeypatch.setattr(spectator.time, "sleep", lambda _interval: None)
+    out = io.StringIO()
+    assert spectator.watch_run(run, output_mode="tty", poll_interval=0.01, stdout=out) == 0
+    rendered = out.getvalue()
+    assert "Recent events" in rendered and "tool-29" in rendered
+    assert "tool-1\n" not in rendered
+    assert "status=completed" in rendered
+    assert rendered.count("\x1b[2J\x1b[H") >= 2
+
+
+@pytest.mark.parametrize("bad_status", [None, "", "unknown", "corrupt"])
+def test_watch_and_inspect_reject_missing_or_unknown_status_without_looping(tmp_path, bad_status):
+    run = _write_fixture(tmp_path, events=[])
+    raw = {"task_id": TASK_ID, "phase": "running"}
+    if bad_status is not None:
+        raw["status"] = bad_status
+    (run / "status.json").write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(spectator.SpectatorError) as inspect_exc:
+        spectator.inspect_run(run)
+    with pytest.raises(spectator.SpectatorError) as watch_exc:
+        spectator.watch_run(run, output_mode="plain", poll_interval=0.01, stdout=io.StringIO())
+    assert inspect_exc.value.exit_code == watch_exc.value.exit_code == 4
 
 
 def test_spectator_opens_no_file_for_writing(tmp_path, monkeypatch):
@@ -204,6 +317,18 @@ def test_cli_errors_use_stderr_and_documented_code(tmp_path, capsys):
     assert exc.value.code == 2
     assert captured.out == ""
     assert "not found" in captured.err.lower()
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled", "timed_out"])
+def test_cli_inspect_uses_terminal_failure_exit_code(tmp_path, capsys, status):
+    _write_fixture(tmp_path, status=status, events=[])
+    parser = argparse.ArgumentParser(prog="hermes profile-delegate")
+    cli.register_cli(parser)
+    args = parser.parse_args(["inspect", TASK_ID, "--runs-root", str(tmp_path), "--json"])
+    with pytest.raises(SystemExit) as exc:
+        cli.profile_delegate_cli(args)
+    assert exc.value.code == 1
+    assert json.loads(capsys.readouterr().out)["status"] == status
 
 
 def test_default_output_mode_uses_plain_when_not_tty(tmp_path):

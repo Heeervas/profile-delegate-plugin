@@ -77,6 +77,7 @@ class TuiRpcClient:
         self._writer_lock = threading.Lock()
         self._closed = False
         self._stderr_tail = ""
+        self.last_event_type = "none"
 
     @property
     def stderr_tail(self) -> str:
@@ -138,8 +139,17 @@ class TuiRpcClient:
     def wait_ready(self, timeout: float = 15.0, *, on_event: Optional[Callable[[dict], None]] = None) -> dict:
         deadline = time.monotonic() + timeout
         while True:
-            frame = self.read_frame(deadline - time.monotonic())
+            try:
+                frame = self.read_frame(deadline - time.monotonic())
+            except TuiTransportError as exc:
+                if "timed out" in str(exc).lower():
+                    raise TuiTransportError(
+                        f"gateway_starting wait for gateway.ready timed out after {timeout:.1f}s; "
+                        f"last event={self.last_event_type}"
+                    ) from exc
+                raise
             if frame.get("method") == "event":
+                self.last_event_type = str((frame.get("params") or {}).get("type") or "unknown")
                 if on_event:
                     on_event(frame)
                 if (frame.get("params") or {}).get("type") == "gateway.ready":
@@ -148,7 +158,8 @@ class TuiRpcClient:
             raise TuiProtocolError("unexpected response before gateway.ready")
 
     def call(self, method: str, params: dict[str, Any], *, timeout: float = 30.0,
-             on_event: Optional[Callable[[dict], None]] = None) -> dict[str, Any]:
+             on_event: Optional[Callable[[dict], None]] = None,
+             stage: str = "rpc_waiting") -> dict[str, Any]:
         if not method or not isinstance(params, dict):
             raise ValueError("method and object params are required")
         request_id = self._next_id
@@ -156,8 +167,17 @@ class TuiRpcClient:
         self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
         deadline = time.monotonic() + timeout
         while True:
-            frame = self.read_frame(deadline - time.monotonic())
+            try:
+                frame = self.read_frame(deadline - time.monotonic())
+            except TuiTransportError as exc:
+                if "timed out" in str(exc).lower():
+                    raise TuiTransportError(
+                        f"{stage} RPC {method} timed out after {timeout:.1f}s; "
+                        f"last event={self.last_event_type}"
+                    ) from exc
+                raise
             if frame.get("method") == "event":
+                self.last_event_type = str((frame.get("params") or {}).get("type") or "unknown")
                 if on_event:
                     on_event(frame)
                 continue
@@ -227,10 +247,14 @@ def launch_gateway(*, python: str, cwd: str, env: dict[str, str],
 
 def start_session(client: Any, *, profile: str, mode: str, session_id: str,
                   title: str, cwd: str, model: str = "", provider: str = "",
-                  reasoning_effort: str = "", on_event: Optional[Callable[[dict], None]] = None) -> dict[str, str]:
+                  reasoning_effort: str = "", timeout: float = 60.0,
+                  on_event: Optional[Callable[[dict], None]] = None) -> dict[str, str]:
     common: dict[str, Any] = {"profile": profile, "cwd": cwd, "source": "profile-delegate", "cols": 100}
     if mode == "resume":
-        response = client.call("session.resume", {**common, "session_id": session_id}, timeout=60, on_event=on_event)
+        response = client.call(
+            "session.resume", {**common, "session_id": session_id}, timeout=timeout,
+            on_event=on_event, stage="session_creating",
+        )
         durable = str(response.get("resumed") or session_id)
     else:
         params = {**common, "title": title, "close_on_disconnect": True}
@@ -240,7 +264,10 @@ def start_session(client: Any, *, profile: str, mode: str, session_id: str,
             params["provider"] = provider
         if reasoning_effort:
             params["reasoning_effort"] = reasoning_effort
-        response = client.call("session.create", params, timeout=60, on_event=on_event)
+        response = client.call(
+            "session.create", params, timeout=timeout, on_event=on_event,
+            stage="session_creating",
+        )
         durable = str(response.get("stored_session_id") or response.get("session_key") or "")
     ui_id = str(response.get("session_id") or "")
     if not ui_id or not durable:
@@ -248,8 +275,12 @@ def start_session(client: Any, *, profile: str, mode: str, session_id: str,
     return {"ui_session_id": ui_id, "child_session_id": durable}
 
 
-def submit(client: Any, session_id: str, text: str, *, on_event: Optional[Callable[[dict], None]] = None) -> dict:
-    return client.call("prompt.submit", {"session_id": session_id, "text": text}, timeout=60, on_event=on_event)
+def submit(client: Any, session_id: str, text: str, *, timeout: float = 60.0,
+           on_event: Optional[Callable[[dict], None]] = None) -> dict:
+    return client.call(
+        "prompt.submit", {"session_id": session_id, "text": text}, timeout=timeout,
+        on_event=on_event, stage="agent_initializing",
+    )
 
 
 def steer(client: Any, session_id: str, text: str, *, on_event: Optional[Callable[[dict], None]] = None) -> dict:

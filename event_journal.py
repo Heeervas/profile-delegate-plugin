@@ -19,7 +19,8 @@ SCHEMA_VERSION = 1
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
 LIFECYCLE_STATUSES = TERMINAL_STATUSES | {"running", "cancelling"}
 KNOWN_PHASES = {
-    "starting", "transport_starting", "transport_ready", "session_ready", "model_running",
+    "starting", "transport_starting", "gateway_starting", "transport_ready", "session_creating",
+    "session_ready", "agent_initializing", "model_running",
     "tool_running", "message_complete", "interrupting", "completed", "failed", "cancelled",
     "timed_out", "running",
 }
@@ -133,8 +134,8 @@ class EventJournal:
         self.pending_message_id = ""
         self.pending_text = ""
         self.pending_started = 0.0
+        self.redaction_context = ""
         self.message_had_delta: Set[str] = set()
-        self.deferred_events: List[Dict[str, Any]] = []
         self.pre_session: List[Dict[str, Any]] = []
         self.pre_session_bytes = 0
         self._open()
@@ -253,15 +254,13 @@ class EventJournal:
         if projected is None:
             return False
         if projected["type"] == "message.delta":
+            if len(self.pending_text) >= self.coalesce_chars:
+                self.flush(force=True)
+                return True
+            self.flush()
             return False
-        if self.pending_text and projected["type"] != "message.complete":
-            self.deferred_events.append(projected)
-            return False
-        if projected["type"] == "message.complete":
+        if self.pending_text:
             self.flush(force=True)
-            for deferred in self.deferred_events:
-                self._append_projected(deferred)
-            self.deferred_events = []
         return self._append_projected(projected)
 
     def project(self, frame: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -294,6 +293,8 @@ class EventJournal:
             self.pending_text = (self.pending_text + fragment)[:self.max_message_chars]
             self.pending_started = self.pending_started or time.monotonic()
             self.message_had_delta.add(message_id)
+            if len(self.pending_text) >= self.coalesce_chars:
+                self.flush(force=True)
             return None
         elif kind == "message.complete":
             message_id = _bounded(payload.get("message_id") or payload.get("id"))
@@ -380,7 +381,25 @@ class EventJournal:
     def _pending_projection(self) -> Optional[Dict[str, Any]]:
         if not self.pending_text:
             return None
-        text, redacted = _redact(sanitize_text(self.pending_text, self.max_message_chars))
+        raw_text = sanitize_text(self.pending_text, self.max_message_chars)
+        combined = self.redaction_context + raw_text
+        boundary = len(self.redaction_context)
+        pieces: List[str] = []
+        cursor = boundary
+        redacted = False
+        for match in _SECRET_RE.finditer(combined):
+            if match.end() <= boundary:
+                continue
+            redacted = True
+            if match.start() >= boundary:
+                pieces.append(combined[cursor:match.start()])
+                pieces.append(f"{match.group(1)}=[REDACTED]")
+            else:
+                pieces.append("[REDACTED]")
+            cursor = match.end()
+        pieces.append(combined[max(cursor, boundary):])
+        text = "".join(pieces)
+        self.redaction_context = combined[-128:]
         projected = {"type": "message.delta", "phase": "model_running", "payload": {"message_id": self.pending_message_id, "text": text}, "redacted": redacted, "dropped_fields": []}
         self.pending_message_id = ""
         self.pending_text = ""
@@ -388,9 +407,12 @@ class EventJournal:
         return projected
 
     def flush(self, *, force: bool = False) -> None:
-        # Redaction is only safe over the bounded aggregate. A timer flush must
-        # not expose a prefix whose secret marker/value arrives in a later delta.
-        if force:
+        due = self.pending_text and self.pending_started and (
+            time.monotonic() - self.pending_started >= self.flush_interval_s
+        )
+        # The aggregate buffer is sanitized/redacted as one unit so secrets split
+        # across incoming deltas cannot bypass the pattern matcher.
+        if force or due:
             projected = self._pending_projection()
             if projected is not None:
                 self._append_projected(projected)
@@ -417,7 +439,8 @@ class EventJournal:
                 self._degrade("minimal_record_too_large")
                 return False
         ordinary_limit = self.max_bytes - self.terminal_reserve_bytes
-        exceeds = (not terminal and self.event_count >= self.max_events) or self.bytes_written + len(encoded) > (self.max_bytes if terminal else ordinary_limit)
+        counted = not terminal and projected["type"] != "journal.truncated"
+        exceeds = (counted and self.event_count >= self.max_events) or self.bytes_written + len(encoded) > (self.max_bytes if terminal else ordinary_limit)
         if exceeds and not terminal:
             if internal:
                 self.truncated = True
@@ -445,13 +468,14 @@ class EventJournal:
                 self.seq + 1,
             )
             ordinary_limit = self.max_bytes - self.terminal_reserve_bytes
-            if (not terminal and self.event_count >= self.max_events) or self.bytes_written + len(data) > (self.max_bytes if terminal else ordinary_limit):
+            counted = not terminal and projected["type"] != "journal.truncated"
+            if (counted and self.event_count >= self.max_events) or self.bytes_written + len(data) > (self.max_bytes if terminal else ordinary_limit):
                 raise OverflowError("journal limit reached")
             written = os.write(self.fd, data)
             if written != len(data):
                 raise OSError("short journal write")
             self.seq += 1
-            self.event_count += 0 if terminal else 1
+            self.event_count += 1 if counted else 0
             self.bytes_written += len(data)
         finally:
             fcntl.flock(self.lock_fd, fcntl.LOCK_UN)

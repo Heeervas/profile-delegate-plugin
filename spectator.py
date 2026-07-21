@@ -11,6 +11,7 @@ import sys
 import termios
 import time
 import tty
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, TextIO
 
@@ -21,6 +22,44 @@ READABLE_ARTIFACTS = {"status.json", "events.jsonl", "result.json", "request.jso
 MAX_JSON_BYTES = 262_144
 MAX_INSPECT_EVENTS = 100
 MAX_TEXT_CHARS = 8_192
+TTY_EVENT_RING = 20
+VALID_STATUSES = {"running", "cancelling"} | TERMINAL
+VALID_PHASES = {
+    "starting", "transport_starting", "gateway_starting", "transport_ready", "session_creating",
+    "session_ready", "agent_initializing", "model_running",
+    "tool_running", "message_complete", "interrupting", "completed", "failed", "cancelled",
+    "timed_out", "running",
+}
+COMMON_EVENT_KEYS = {
+    "schema_version", "task_id", "seq", "at", "type", "phase", "payload", "redacted",
+    "dropped_fields",
+}
+EVENT_PAYLOAD_KEYS = {
+    "lifecycle": ({"status", "phase"}, {"status", "phase"}),
+    "message.start": ({"message_id", "role"}, {"role"}),
+    "message.delta": ({"message_id", "text"}, {"text"}),
+    "message.complete": ({"message_id", "status", "text", "usage"}, {"status"}),
+    "tool.start": ({"tool_id", "tool", "tool_class"}, {"tool_id", "tool", "tool_class"}),
+    "tool.complete": (
+        {"tool_id", "tool", "tool_class", "duration_s", "outcome"},
+        {"tool_id", "tool", "tool_class", "duration_s", "outcome"},
+    ),
+    "session.info": ({"profile", "model", "provider", "usage"}, set()),
+    "status.update": ({"kind"}, {"kind"}),
+    "journal.truncated": ({"reason", "dropped_after_seq"}, {"reason", "dropped_after_seq"}),
+    "terminal": ({"status", "error_code", "child_session_id"}, {"status"}),
+    "event.dropped": ({"reason"}, {"reason"}),
+}
+SAFE_DROPPED_FIELDS = {
+    "args", "arguments", "result", "summary", "diff", "text", "reasoning", "rendered",
+    "warning",
+}
+TOOL_CLASSES = {"file", "web", "shell", "browser", "delegate", "other"}
+MESSAGE_STATUSES = {"complete", "error", "interrupted", "cancelled"}
+STATUS_KINDS = {
+    "compacting", "retrying", "waiting", "streaming", "queued", "running", "idle",
+    "rate_limited", "context_compacted",
+}
 
 # ESC/CSI/OSC plus C0/C1 controls. Newline and tab are retained for readable text.
 _OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)?")
@@ -131,8 +170,69 @@ def _read_json(path: Path) -> Dict[str, Any]:
     return neutralize_terminal(value)
 
 
-def iter_events(path: Path, *, after_seq: int = 0) -> Iterator[Dict[str, Any]]:
-    """Yield complete sanitized JSONL records newer than ``after_seq``."""
+def _valid_usage(value: Any) -> bool:
+    return isinstance(value, dict) and set(value) <= {"input", "output", "reasoning", "total", "calls"} and all(
+        isinstance(item, int) and not isinstance(item, bool) and item >= 0
+        for item in value.values()
+    )
+
+
+def _validate_event(item: Any, *, allow_message_text: bool) -> Dict[str, Any]:
+    if not isinstance(item, dict) or set(item) != COMMON_EVENT_KEYS:
+        raise SpectatorError("corrupt events.jsonl record schema", 4)
+    if item.get("schema_version") != 1 or not isinstance(item.get("seq"), int) or item["seq"] < 1:
+        raise SpectatorError("corrupt events.jsonl common fields", 4)
+    if not isinstance(item.get("task_id"), str) or len(item["task_id"]) > 128:
+        raise SpectatorError("corrupt events.jsonl task identity", 4)
+    if not isinstance(item.get("at"), str) or len(item["at"]) > 64:
+        raise SpectatorError("corrupt events.jsonl timestamp", 4)
+    if item.get("phase") not in VALID_PHASES or not isinstance(item.get("redacted"), bool):
+        raise SpectatorError("corrupt events.jsonl phase/redaction metadata", 4)
+    dropped = item.get("dropped_fields")
+    if not isinstance(dropped, list) or len(dropped) > 20 or any(
+        value not in SAFE_DROPPED_FIELDS for value in dropped
+    ):
+        raise SpectatorError("corrupt events.jsonl dropped-fields metadata", 4)
+    kind = item.get("type")
+    if kind not in EVENT_PAYLOAD_KEYS:
+        raise SpectatorError("corrupt events.jsonl event type", 4)
+    payload = item.get("payload")
+    allowed, required = EVENT_PAYLOAD_KEYS[kind]
+    if not isinstance(payload, dict) or not required <= set(payload) <= allowed:
+        raise SpectatorError("corrupt events.jsonl event payload schema", 4)
+    for key, value in payload.items():
+        if key == "usage":
+            if not _valid_usage(value):
+                raise SpectatorError("corrupt events.jsonl usage", 4)
+        elif key == "duration_s":
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= value <= 86_400:
+                raise SpectatorError("corrupt events.jsonl duration", 4)
+        elif key == "dropped_after_seq":
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise SpectatorError("corrupt events.jsonl truncation sequence", 4)
+        elif not isinstance(value, str) or len(value) > MAX_TEXT_CHARS:
+            raise SpectatorError("corrupt events.jsonl bounded string", 4)
+    if "role" in payload and payload["role"] != "assistant":
+        raise SpectatorError("corrupt events.jsonl message role", 4)
+    if "text" in payload and not allow_message_text:
+        raise SpectatorError("message text present without frozen opt-in", 4)
+    if kind in {"tool.start", "tool.complete"} and payload["tool_class"] not in TOOL_CLASSES:
+        raise SpectatorError("corrupt events.jsonl tool class", 4)
+    if kind == "tool.complete" and payload["outcome"] not in {"complete", "unknown"}:
+        raise SpectatorError("corrupt events.jsonl tool outcome", 4)
+    if kind == "message.complete" and payload["status"] not in MESSAGE_STATUSES:
+        raise SpectatorError("corrupt events.jsonl message status", 4)
+    if kind == "status.update" and payload["kind"] not in STATUS_KINDS:
+        raise SpectatorError("corrupt events.jsonl status kind", 4)
+    if kind in {"lifecycle", "terminal"} and payload["status"] not in VALID_STATUSES:
+        raise SpectatorError("corrupt events.jsonl lifecycle status", 4)
+    return neutralize_terminal(item)
+
+
+def iter_events(
+    path: Path, *, after_seq: int = 0, allow_message_text: bool = False,
+) -> Iterator[Dict[str, Any]]:
+    """Yield complete, exactly validated JSONL records newer than ``after_seq``."""
     try:
         with path.open("rb") as handle:
             raw = handle.read(1_048_577)
@@ -148,20 +248,40 @@ def iter_events(path: Path, *, after_seq: int = 0) -> Iterator[Dict[str, Any]]:
             item = json.loads(line.decode("utf-8"))
         except (UnicodeError, json.JSONDecodeError) as exc:
             raise SpectatorError(f"corrupt complete events.jsonl record: {exc}", 4) from None
-        if not isinstance(item, dict) or not isinstance(item.get("seq"), int):
-            raise SpectatorError("corrupt events.jsonl record shape", 4)
-        if item["seq"] > after_seq:
-            yield neutralize_terminal(item)
+        validated = _validate_event(item, allow_message_text=allow_message_text)
+        if validated["seq"] > after_seq:
+            yield validated
+
+
+def _validate_status(status: Dict[str, Any]) -> Dict[str, Any]:
+    if status.get("status") not in VALID_STATUSES:
+        raise SpectatorError("corrupt status.json: missing or unknown status", 4)
+    phase = status.get("phase")
+    if phase is not None and phase not in VALID_PHASES:
+        raise SpectatorError("corrupt status.json: unknown phase", 4)
+    return status
+
+
+def _message_text_opt_in(run_dir: Path) -> bool:
+    request_path = _artifact(run_dir, "request.json")
+    if request_path is None:
+        return False
+    request = _read_json(request_path)
+    value = request.get("persist_message_text", False)
+    if not isinstance(value, bool):
+        raise SpectatorError("corrupt request.json: persist_message_text must be boolean", 4)
+    return value
 
 
 def inspect_run(run_dir: Path) -> Dict[str, Any]:
     """Return one bounded, machine-readable snapshot from allowed artifacts."""
     status_path = _artifact(run_dir, "status.json", required=True)
     assert status_path is not None
-    status = _read_json(status_path)
+    status = _validate_status(_read_json(status_path))
+    allow_message_text = _message_text_opt_in(run_dir)
     events_path = _artifact(run_dir, "events.jsonl")
     result_path = _artifact(run_dir, "result.json")
-    events = list(iter_events(events_path))[-MAX_INSPECT_EVENTS:] if events_path else []
+    events = list(iter_events(events_path, allow_message_text=allow_message_text))[-MAX_INSPECT_EVENTS:] if events_path else []
     result = _read_json(result_path) if result_path else None
     allowed_status = {
         "task_id", "status", "phase", "created_at", "started_at", "ended_at",
@@ -176,17 +296,17 @@ def inspect_run(run_dir: Path) -> Dict[str, Any]:
         snapshot["observation_note"] = "limited observability: legacy run has no events.jsonl"
     snapshot["events"] = events
     if result is not None:
-        snapshot["result"] = {
-            key: result[key] for key in ("status", "summary", "error_code", "artifacts", "errors", "next_steps")
-            if key in result
-        }
+        result_keys = ["status", "error_code", "session_id"]
+        if allow_message_text:
+            result_keys.extend(["summary", "artifacts", "errors", "next_steps"])
+        snapshot["result"] = {key: result[key] for key in result_keys if key in result}
     return neutralize_terminal(snapshot)
 
 
 def _status(run_dir: Path) -> Dict[str, Any]:
     path = _artifact(run_dir, "status.json", required=True)
     assert path is not None
-    return _read_json(path)
+    return _validate_status(_read_json(path))
 
 
 def _pid_alive(pid: Any) -> bool:
@@ -222,6 +342,22 @@ def _terminal_code(status: str) -> int:
     return 1 if status in FAILED else 0
 
 
+def _tty_screen(status: Dict[str, Any], events: Any, *, limited: bool) -> str:
+    lines = [
+        "Profile Delegate spectator (read-only; q/Ctrl+C detaches)",
+        _status_line(status, limited=limited),
+    ]
+    counters = " | ".join(
+        f"{key}={status[key]}" for key in ("turn_count", "api_calls", "tool_calls")
+        if status.get(key) is not None
+    )
+    if counters:
+        lines.append(counters)
+    lines.append("Recent events (bounded):")
+    lines.extend(_event_line(event) for event in events)
+    return "\x1b[2J\x1b[H" + "\n".join(lines)
+
+
 def watch_run(
     run_dir: Path, *, output_mode: str = "auto", poll_interval: float = 0.2,
     stdout: Optional[TextIO] = None,
@@ -232,6 +368,7 @@ def watch_run(
     tty_mode = output_mode == "tty" or (output_mode == "auto" and bool(getattr(out, "isatty", lambda: False)()))
     mode = "tty" if tty_mode else ("jsonl" if output_mode == "jsonl" else "plain")
     events_path = _artifact(run_dir, "events.jsonl")
+    allow_message_text = _message_text_opt_in(run_dir)
     limited = events_path is None
     last_seq = 0
     last_status = ""
@@ -240,6 +377,7 @@ def watch_run(
     fd: Optional[int] = None
     old_winch = None
     redraw = True
+    event_ring = deque(maxlen=TTY_EVENT_RING)
 
     def on_winch(_signum, _frame):
         nonlocal redraw
@@ -259,8 +397,11 @@ def watch_run(
                 events_path = _artifact(run_dir, "events.jsonl")
                 limited = events_path is None
             if events_path is not None:
-                for event in iter_events(events_path, after_seq=last_seq):
+                for event in iter_events(
+                    events_path, after_seq=last_seq, allow_message_text=allow_message_text,
+                ):
                     last_seq = max(last_seq, int(event["seq"]))
+                    event_ring.append(event)
                     if mode == "jsonl":
                         print(json.dumps(event, ensure_ascii=False, separators=(",", ":")), file=out, flush=True)
                     elif mode == "plain":
@@ -269,12 +410,14 @@ def watch_run(
             status = _status(run_dir)
             status_name = str(status.get("status") or "unknown").lower()
             status_text = _status_line(status, limited=limited)
+            if status_text != last_status:
+                redraw = True
             if mode == "tty" and redraw:
-                print("\x1b[2J\x1b[HProfile Delegate spectator (read-only; q/Ctrl+C detaches)\n" + status_text, file=out, flush=True)
+                print(_tty_screen(status, event_ring, limited=limited), file=out, flush=True)
                 redraw = False
             elif mode == "plain" and status_text != last_status:
                 print(status_text, file=out, flush=True)
-                last_status = status_text
+            last_status = status_text
             if status_name in TERMINAL:
                 return _terminal_code(status_name)
             if status_name in {"running", "cancelling"} and status.get("worker_pid") and not _pid_alive(status.get("worker_pid")):

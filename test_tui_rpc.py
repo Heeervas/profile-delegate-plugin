@@ -101,6 +101,38 @@ def test_rpc_reports_eof_and_caps_diagnostics():
     assert client.stderr_tail == "x" * 12
 
 
+def test_rpc_timeout_names_exact_stage_method_and_last_event():
+    class SilentClient(tui_rpc.TuiRpcClient):
+        def __init__(self):
+            self._next_id = 1
+
+        def _write(self, frame):
+            pass
+
+        def read_frame(self, timeout):
+            raise tui_rpc.TuiTransportError("TUI RPC response timed out")
+
+    client = SilentClient()
+    setattr(client, "last_event_type", "session.info")
+    with pytest.raises(
+        tui_rpc.TuiTransportError,
+        match=r"session_creating RPC session.create timed out.*last event=session.info",
+    ):
+        client.call(
+            "session.create", {"profile": "reviewer"}, timeout=0.01,
+            stage="session_creating",
+        )
+
+
+def test_runner_exposes_separate_bounded_startup_and_agent_init_timeouts(monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_GATEWAY_STARTUP_TIMEOUT_SECONDS", "12")
+    monkeypatch.setenv("PROFILE_DELEGATE_AGENT_INIT_TIMEOUT_SECONDS", "34")
+    assert tui_runner._stage_timeout("PROFILE_DELEGATE_GATEWAY_STARTUP_TIMEOUT_SECONDS", 30) == 12.0
+    assert tui_runner._stage_timeout("PROFILE_DELEGATE_AGENT_INIT_TIMEOUT_SECONDS", 60) == 34.0
+    monkeypatch.setenv("PROFILE_DELEGATE_AGENT_INIT_TIMEOUT_SECONDS", "99999")
+    assert tui_runner._stage_timeout("PROFILE_DELEGATE_AGENT_INIT_TIMEOUT_SECONDS", 60) == 600.0
+
+
 def test_rpc_transport_has_no_projection_or_sanitization_policy():
     source = Path(tui_rpc.__file__).read_text(encoding="utf-8")
     assert "def reduce_event" not in source

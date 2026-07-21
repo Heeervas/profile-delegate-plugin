@@ -324,12 +324,26 @@ def merge_run_status(run_dir: Path, updates: Dict[str, Any], *, terminal: bool =
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
             raise ProfileDelegateError("unsafe status lock", "status_lock_unsafe")
+        identity = (info.st_dev, info.st_ino)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             try:
+                live_lock = os.stat(lock_path, follow_symlinks=False)
+                live_dir = os.stat(run_dir, follow_symlinks=False)
+            except FileNotFoundError as exc:
+                raise ProfileDelegateError(
+                    "run vanished while waiting for status lock", "run_status_vanished",
+                ) from exc
+            if not stat.S_ISDIR(live_dir.st_mode) or (live_lock.st_dev, live_lock.st_ino) != identity:
+                raise ProfileDelegateError(
+                    "run identity changed while waiting for status lock", "run_identity_changed",
+                )
+            try:
                 current = read_json_file(run_dir / "status.json")
-            except ProfileDelegateError:
-                current = {"task_id": run_dir.name}
+            except ProfileDelegateError as exc:
+                raise ProfileDelegateError(
+                    "run status vanished while waiting for status lock", "run_status_vanished",
+                ) from exc
             existing = ensure_text(current.get("status")).lower()
             requested = ensure_text(updates.get("status")).lower()
             if existing in TERMINAL_RUN_STATUSES:

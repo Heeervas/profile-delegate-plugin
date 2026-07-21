@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -13,6 +14,14 @@ except ImportError:
     import tui_rpc  # type: ignore[no-redef]
     import core  # type: ignore[no-redef]
     from event_journal import EventJournal  # type: ignore[no-redef]
+
+
+def _stage_timeout(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)).strip())
+    except (TypeError, ValueError):
+        value = default
+    return min(600.0, max(1.0, value))
 
 
 def _environment(request: Dict[str, Any], run_dir: Path) -> Dict[str, str]:
@@ -90,6 +99,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
         persist_message_text=bool(request.get("persist_message_text", False)),
     )
     last_snapshot = 0.0
+    last_observed_event = "none"
 
     def merge_status(updates: Dict[str, Any], *, force: bool = False, terminal: bool = False) -> None:
         nonlocal last_snapshot
@@ -103,8 +113,10 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             last_snapshot = now
 
     def persist_event(frame: Dict[str, Any]) -> None:
-        nonlocal final_text, message_status, terminal_event
-        params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
+        nonlocal final_text, message_status, terminal_event, last_observed_event
+        raw_params = frame.get("params")
+        params: Dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
+        last_observed_event = core.ensure_text(params.get("type") or "unknown")
         event_sid = params.get("session_id")
         if event_sid and ui_session_id and event_sid != ui_session_id:
             return
@@ -165,7 +177,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             core.merge_run_status(run_dir, {
                 "concurrency_slot": slot.slot,
                 "transport": "tui_stdio",
-                "phase": "transport_starting",
+                "phase": "gateway_starting",
                 "transport_alive": False,
             })
             env = _environment(request, run_dir)
@@ -176,11 +188,20 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                 command=_gateway_command(request, run_dir),
             )
             core.merge_run_status(run_dir, {"transport_pid": client.process.pid, "transport_alive": True})
+            gateway_timeout = min(
+                _stage_timeout("PROFILE_DELEGATE_GATEWAY_STARTUP_TIMEOUT_SECONDS", 30.0),
+                max(0.1, deadline - time.monotonic()),
+            )
             client.wait_ready(
-                timeout=min(30.0, max(0.1, deadline - time.monotonic())),
+                timeout=gateway_timeout,
                 on_event=persist_event,
             )
+            core.merge_run_status(run_dir, {"phase": "session_creating"})
             execution = request.get("effective_execution") or {}
+            agent_init_timeout = min(
+                _stage_timeout("PROFILE_DELEGATE_AGENT_INIT_TIMEOUT_SECONDS", 60.0),
+                max(0.1, deadline - time.monotonic()),
+            )
             identities = tui_rpc.start_session(
                 client,
                 profile=profile,
@@ -191,6 +212,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                 model=core.ensure_text(execution.get("model")),
                 provider=core.ensure_text(execution.get("provider")),
                 reasoning_effort=core.ensure_text(execution.get("reasoning_effort")),
+                timeout=agent_init_timeout,
                 on_event=persist_event,
             )
             ui_session_id = identities["ui_session_id"]
@@ -199,10 +221,13 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             core.merge_run_status(run_dir, {
                 "ui_child_session_id": ui_session_id,
                 "child_session_id": child_session_id,
-                "phase": "session_ready",
+                "phase": "agent_initializing",
             })
             prompt = (run_dir / "prompt.txt").read_text(encoding="utf-8")
-            tui_rpc.submit(client, ui_session_id, prompt, on_event=persist_event)
+            tui_rpc.submit(
+                client, ui_session_id, prompt, timeout=agent_init_timeout,
+                on_event=persist_event,
+            )
             core.merge_run_status(run_dir, {"phase": "model_running"})
 
             while not terminal_event:
@@ -251,7 +276,8 @@ def execute(run_dir: Path) -> Dict[str, Any]:
         final_status = "failed"
         core.text_safe_write(
             run_dir / "stderr.txt",
-            f"{type(exc).__name__}: {exc}\n" + (client.stderr_tail if client else ""),
+            f"{type(exc).__name__}: {exc}; last observed event={last_observed_event}\n"
+            + (client.stderr_tail if client else ""),
         )
     finally:
         if client is not None:

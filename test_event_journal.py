@@ -106,7 +106,7 @@ def test_caps_marker_terminal_reserve_and_oversized_reduction(tmp_path):
         journal.ingest(frame("tool.start", {"tool_id": str(index), "name": "x" * 500}))
     journal.finalize("completed", child_session_id="sid", error_code="code")
     saved = records(tmp_path / "events.jsonl")
-    assert sum(item["type"] == "journal.truncated" for item in saved) <= 1
+    assert sum(item["type"] == "journal.truncated" for item in saved) == 1
     assert saved[-1]["type"] == "terminal" and saved[-1]["payload"] == {"status": "completed", "error_code": "code", "child_session_id": "sid"}
     assert (tmp_path / "events.jsonl").stat().st_size <= 900 and journal.snapshot_fields()["event_stream_truncated"] is True
     other = tmp_path / "other"
@@ -190,6 +190,7 @@ def test_terminal_record_is_allowed_after_exact_ordinary_event_cap(tmp_path):
     assert journal.finalize("completed", child_session_id="child")
     saved = records(tmp_path / "events.jsonl")
     assert sum(item["type"] not in {"terminal", "journal.truncated"} for item in saved) == 2
+    assert sum(item["type"] == "journal.truncated" for item in saved) == 1
     assert saved[-1]["type"] == "terminal"
     assert (tmp_path / "events.jsonl").stat().st_size <= 4096
 
@@ -223,6 +224,37 @@ def test_split_secret_is_not_emitted_raw_across_flush_boundaries(tmp_path, monke
     persisted = _persisted_text(tmp_path / "events.jsonl")
     assert "obvious-secret" not in persisted
     assert "[REDACTED]" in persisted
+
+
+def test_coalescing_flushes_on_char_and_timer_thresholds(tmp_path, monkeypatch):
+    clock = [10.0]
+    monkeypatch.setattr(event_journal.time, "monotonic", lambda: clock[0])
+    journal = EventJournal(
+        tmp_path, task_id="pd_test", ui_session_id="ui-1",
+        persist_message_text=True, coalesce_chars=5, flush_interval_s=0.1,
+    )
+    journal.ingest(frame("message.delta", {"message_id": "m", "text": "12345"}))
+    assert [item["type"] for item in records(tmp_path / "events.jsonl")] == ["message.delta"]
+    journal.ingest(frame("message.delta", {"message_id": "m", "text": "later"}))
+    clock[0] += 0.2
+    journal.flush()
+    assert [item["type"] for item in records(tmp_path / "events.jsonl")] == [
+        "message.delta", "message.delta",
+    ]
+    journal.close()
+
+
+def test_non_delta_event_is_not_deferred_and_visible_order_is_preserved(tmp_path):
+    journal = EventJournal(
+        tmp_path, task_id="pd_test", ui_session_id="ui-1",
+        persist_message_text=True, coalesce_chars=4096, flush_interval_s=10,
+    )
+    journal.ingest(frame("message.delta", {"message_id": "m", "text": "before tool"}))
+    journal.ingest(frame("tool.start", {"tool_id": "t", "name": "terminal"}))
+    assert [item["type"] for item in records(tmp_path / "events.jsonl")] == [
+        "message.delta", "tool.start",
+    ]
+    journal.close()
 
 
 def test_positive_short_write_degrades_and_reopen_recovers_partial_tail(tmp_path, monkeypatch):

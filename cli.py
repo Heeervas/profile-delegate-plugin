@@ -103,7 +103,7 @@ def profile_delegate_cli(args: argparse.Namespace) -> NoReturn:
             snapshot = inspect_run(run_dir)
             # JSON is intentionally also the default: inspect is a bounded snapshot surface.
             print(json.dumps(snapshot, ensure_ascii=False, indent=2))
-            raise SystemExit(0)
+            raise SystemExit(1 if snapshot.get("status") in {"failed", "cancelled", "timed_out"} else 0)
         code = watch_run(
             run_dir,
             output_mode="jsonl" if getattr(args, "jsonl", False) else "auto",

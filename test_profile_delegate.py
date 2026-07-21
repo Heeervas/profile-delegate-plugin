@@ -969,6 +969,32 @@ def test_prune_renames_to_tombstone_before_deleting(tmp_path, monkeypatch):
     assert result["removed_count"] == 1 and len(deleted) == 1
 
 
+def test_status_writer_waiting_on_renamed_run_fails_closed_without_resurrection(tmp_path, monkeypatch):
+    run_dir = tmp_path / "pd_20200101_000000_abcdef"
+    run_dir.mkdir()
+    core.json_safe_write(run_dir / "status.json", {
+        "task_id": run_dir.name, "status": "completed",
+        "created_at": "2020-01-01T00:00:00+00:00",
+    })
+    tombstone = tmp_path / f".tombstone-{run_dir.name}-deterministic"
+    real_flock = core.fcntl.flock
+    renamed = False
+
+    def rename_while_waiter_acquires(fd, operation):
+        nonlocal renamed
+        if operation == core.fcntl.LOCK_EX and not renamed:
+            renamed = True
+            core.os.rename(run_dir, tombstone)
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(core.fcntl, "flock", rename_while_waiter_acquires)
+    with pytest.raises(core.ProfileDelegateError) as exc:
+        core.merge_run_status(run_dir, {"notification_status": "queued"})
+    assert exc.value.code in {"run_status_vanished", "run_identity_changed"}
+    assert not run_dir.exists()
+    assert tombstone.exists()
+
+
 def test_prune_rejects_symlink_run_and_wrong_uid(tmp_path, monkeypatch):
     runs = tmp_path / "runs"
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(runs))
