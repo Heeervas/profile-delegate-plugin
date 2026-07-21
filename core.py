@@ -87,6 +87,7 @@ APPROVAL_TIMEOUT_MARKERS = ("Timeout — denying command", "Timeout - denying co
 PLUGIN_DIR = Path(__file__).resolve().parent
 CHILD_BOOTSTRAP = PLUGIN_DIR / "child_bootstrap.py"
 ARTIFACT_SCHEMA_VERSION = 3
+RESULT_SCHEMA_VERSION = 1
 POLICY_SCHEMA_VERSION = 1
 ORIGIN_FIELDS = ("platform", "source", "profile", "session_id", "ui_session_id", "session_key")
 MAX_ORIGIN_VALUE_CHARS = 500
@@ -308,6 +309,17 @@ def json_safe_write(path: Path, data: Any) -> None:
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     chmod_best_effort(tmp, 0o600)
     tmp.replace(path)
+
+
+def write_result_artifact(run_dir: Path, result: Dict[str, Any]) -> None:
+    """Write a current-schema result with required lifecycle and run identity."""
+    status = result.get("status")
+    if not isinstance(status, str) or status not in VALID_RESULT_STATUSES:
+        raise ProfileDelegateError("result artifact requires a valid status", "invalid_result_status")
+    current = dict(result)
+    current["result_schema_version"] = RESULT_SCHEMA_VERSION
+    current["task_id"] = run_dir.name
+    json_safe_write(run_dir / "result.json", current)
 
 
 def merge_run_status(run_dir: Path, updates: Dict[str, Any], *, terminal: bool = False) -> Dict[str, Any]:
@@ -1876,7 +1888,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     if child_session_id:
         result["session_id"] = child_session_id
     result.update({"requested_execution": request.get("requested_execution") or {}, "effective_execution": request.get("effective_execution") or {}, "effective_capabilities": request.get("effective_capabilities") or {}, "approval_policy": request.get("approval_policy") or {}, "recovery_history": history})
-    json_safe_write(run_dir / "result.json", result)
+    write_result_artifact(run_dir, result)
     merge_run_status(run_dir, {"status": final_status, "phase": final_status, "ended_at": now_iso(), "exit_code": exit_code, "timed_out": timed_out, "error_code": error_code, "stdout_truncated": bool(run_meta.get("stdout_truncated")), "stderr_truncated": bool(run_meta.get("stderr_truncated")), "stdout_chars": run_meta.get("stdout_chars"), "stderr_chars": run_meta.get("stderr_chars"), "stdout_limit": run_meta.get("stdout_limit"), "stderr_limit": run_meta.get("stderr_limit"), "child_session_id": child_session_id, "recovery_history": history, **rename_meta}, terminal=True)
     return {"success": final_status == "completed" and result.get("status") != "failed", "mode": "sync", "task_id": request.get("task_id", run_dir.name), "profile": profile, "status": final_status, "error_code": error_code, "session_title": title_text, "session_mode": mode, "requested_session_id": resume_id, "child_approval_mode": child_approval_mode, "requested_execution": request.get("requested_execution") or {}, "effective_execution": request.get("effective_execution") or {}, "effective_capabilities": request.get("effective_capabilities") or {}, "approval_policy": request.get("approval_policy") or {}, "child_session_id": child_session_id, "recovery_history": history, **rename_meta, "result": result, "paths": base_paths(run_dir), "exit_code": exit_code, "timed_out": timed_out, "stdout_truncated": run_meta.get("stdout_truncated"), "stderr_truncated": run_meta.get("stderr_truncated")}
 
@@ -1896,7 +1908,7 @@ def _mark_background_worker_failure(run_dir: Path, exc: Exception) -> Dict[str, 
         "structured": True,
         "error_code": code,
     }
-    json_safe_write(run_dir / "result.json", result)
+    write_result_artifact(run_dir, result)
     merge_run_status(run_dir, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": code}, terminal=True)
     return {"success": False, "mode": "async", "task_id": run_dir.name, "status": "failed", "error_code": code, "result": result, "paths": base_paths(run_dir)}
 
@@ -2171,7 +2183,7 @@ def delegate_profile(
                 _start_background_run(run_dir)
             except ProfileDelegateError as exc:
                 merge_run_status(run_dir, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": exc.code}, terminal=True)
-                json_safe_write(run_dir / "result.json", {
+                write_result_artifact(run_dir, {
                     "status": "failed", "summary": str(exc), "artifacts": [], "errors": [exc.code],
                     "next_steps": ["Wait for another background profile_delegate run to finish or raise max_async."],
                     "structured": True, "error_code": exc.code,
@@ -2179,7 +2191,7 @@ def delegate_profile(
                 raise
             except Exception as exc:
                 merge_run_status(run_dir, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": "background_start_failed"}, terminal=True)
-                json_safe_write(run_dir / "result.json", {
+                write_result_artifact(run_dir, {
                     "status": "failed", "summary": f"Failed to start background profile_delegate run: {type(exc).__name__}: {exc}",
                     "artifacts": [], "errors": ["background_start_failed"], "next_steps": [],
                     "structured": True, "error_code": "background_start_failed",

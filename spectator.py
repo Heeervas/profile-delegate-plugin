@@ -323,15 +323,22 @@ def _validate_status(status: Dict[str, Any], *, expected_task_id: str = "") -> D
     return status
 
 
-def _validate_result(result: Dict[str, Any], *, expected_task_id: str = "") -> Dict[str, Any]:
-    if "task_id" in result and (
-        not _bounded_string(result["task_id"], EVENT_IDENTIFIER_MAX_CHARS)
-        or result["task_id"] != expected_task_id
+def _validate_result(
+    result: Dict[str, Any], *, expected_task_id: str = "", legacy: bool = False,
+) -> Dict[str, Any]:
+    current_schema = result.get("result_schema_version")
+    if current_schema is not None and current_schema != 1:
+        raise SpectatorError("corrupt result.json: unknown schema version", 4)
+    if not legacy and current_schema != 1:
+        raise SpectatorError("corrupt result.json: missing schema version", 4)
+    if (not legacy or current_schema is not None) and (
+        not _bounded_string(result.get("task_id"), EVENT_IDENTIFIER_MAX_CHARS)
+        or result.get("task_id") != expected_task_id
     ):
         raise SpectatorError("corrupt result.json: task identity mismatch", 4)
-    if "status" in result and (
-        not _bounded_string(result["status"], 32)
-        or result["status"] not in {"ok", "blocked", "failed", "completed", "cancelled", "timed_out"}
+    if (
+        not _bounded_string(result.get("status"), 32)
+        or result.get("status") not in {"ok", "blocked", "failed", "completed", "cancelled", "timed_out"}
     ):
         raise SpectatorError("corrupt result.json: invalid status", 4)
     for key in ("error_code", "session_id"):
@@ -374,7 +381,7 @@ def inspect_run(run_dir: Path) -> Dict[str, Any]:
         events_path, allow_message_text=allow_message_text, expected_task_id=run_dir.name,
     ))[-MAX_INSPECT_EVENTS:] if events_path else []
     result = _validate_result(
-        _read_json(result_path), expected_task_id=run_dir.name,
+        _read_json(result_path), expected_task_id=run_dir.name, legacy=events_path is None,
     ) if result_path else None
     allowed_status = {
         "task_id", "status", "phase", "created_at", "started_at", "ended_at",

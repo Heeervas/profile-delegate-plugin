@@ -40,6 +40,7 @@ def _write_fixture(
     )
     if status in {"completed", "failed", "cancelled", "timed_out"}:
         (run / "result.json").write_text(json.dumps({
+            "result_schema_version": 1, "task_id": TASK_ID,
             "status": status, "summary": "assistant summary", "error_code": "terminal-code",
             "session_id": "child-session", "artifacts": ["/private/artifact"],
             "errors": ["assistant error"], "next_steps": ["assistant next step"],
@@ -185,6 +186,41 @@ def test_inspect_frozen_opt_in_exposes_bounded_assistant_result_fields(tmp_path)
     assert result["artifacts"] == ["/private/artifact"]
     assert result["errors"] == ["assistant error"]
     assert result["next_steps"] == ["assistant next step"]
+
+
+@pytest.mark.parametrize("mutation", ["empty", "missing_task_id", "missing_status", "mismatch"])
+def test_inspect_rejects_invalid_current_result_identity_or_status_with_exit_4(
+    tmp_path, capsys, mutation,
+):
+    run = _write_fixture(tmp_path, events=[])
+    path = run / "result.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if mutation == "empty":
+        value = {}
+    elif mutation == "missing_task_id":
+        value.pop("task_id")
+    elif mutation == "missing_status":
+        value.pop("status")
+    else:
+        value["task_id"] = "pd_20260721_085059_other1"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    parser = argparse.ArgumentParser(prog="hermes profile-delegate")
+    cli.register_cli(parser)
+    args = parser.parse_args(["inspect", TASK_ID, "--runs-root", str(tmp_path), "--json"])
+    with pytest.raises(SystemExit) as exc:
+        cli.profile_delegate_cli(args)
+    assert exc.value.code == 4
+    assert "corrupt result.json" in capsys.readouterr().err
+
+
+def test_inspect_accepts_only_explicit_bounded_legacy_result_compatibility(tmp_path):
+    run = _write_fixture(tmp_path, events=None)
+    path = run / "result.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value.pop("result_schema_version")
+    value.pop("task_id")
+    path.write_text(json.dumps(value), encoding="utf-8")
+    assert spectator.inspect_run(run)["result"]["status"] == "completed"
 
 
 @pytest.mark.parametrize(

@@ -177,6 +177,18 @@ def test_normalize_result_invalid_shape():
     assert "invalid_status:weird" in result["errors"]
 
 
+def test_result_artifact_writer_adds_current_schema_identity_and_requires_status(tmp_path):
+    run_dir = tmp_path / "pd_20260721_120001_abcdef"
+    run_dir.mkdir()
+    core.write_result_artifact(run_dir, {"status": "ok", "summary": "done"})
+    saved = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    assert saved["result_schema_version"] == 1
+    assert saved["task_id"] == run_dir.name
+    assert saved["status"] == "ok"
+    with pytest.raises(core.ProfileDelegateError):
+        core.write_result_artifact(run_dir, {"summary": "missing status"})
+
+
 def test_build_prompt_contains_task_context_contract():
     prompt = core.build_prompt("Do the task", "ctx", "contract")
     assert "Do the task" in prompt

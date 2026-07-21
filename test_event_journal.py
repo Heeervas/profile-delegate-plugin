@@ -117,6 +117,48 @@ def test_caps_marker_terminal_reserve_and_oversized_reduction(tmp_path):
     assert records(other / "events.jsonl")[0]["type"] == "event.dropped"
 
 
+def test_marker_never_consumes_terminal_reserve_at_exact_byte_boundary(tmp_path, monkeypatch):
+    monkeypatch.setattr(event_journal, "_now", lambda: "2026-07-21T00:00:00+00:00")
+    journal = EventJournal(
+        tmp_path, task_id="pd_test", ui_session_id="ui-1",
+        max_bytes=100_000, terminal_reserve_bytes=0,
+    )
+    assert journal.ingest(frame("tool.start", {"tool_id": "seed", "name": "terminal"}))
+    maximum_identifier = "x" * 128
+    marker = {
+        "type": "journal.truncated", "phase": journal.phase,
+        "payload": {"reason": "limit", "dropped_after_seq": journal.seq},
+        "redacted": False, "dropped_fields": [],
+    }
+    terminal = {
+        "type": "terminal", "phase": "failed",
+        "payload": {
+            "status": "failed", "error_code": maximum_identifier,
+            "child_session_id": maximum_identifier,
+        },
+        "redacted": False, "dropped_fields": [],
+    }
+    marker_bytes = len(journal._record_bytes(marker, journal.seq + 1))
+    terminal_bytes = len(journal._record_bytes(terminal, journal.seq + 1))
+    # ``finalize`` uses the next sequence after a marker in the buggy path; reserve that
+    # maximal encoded size while making the marker miss the ordinary boundary by one byte.
+    terminal_reserve = max(
+        terminal_bytes, len(journal._record_bytes(terminal, journal.seq + 2)),
+    )
+    journal.terminal_reserve_bytes = terminal_reserve
+    journal.max_bytes = journal.bytes_written + marker_bytes - 1 + terminal_reserve
+
+    assert not journal.ingest(frame("tool.start", {"tool_id": "overflow", "name": "terminal"}))
+    assert journal.finalize(
+        "failed", error_code=maximum_identifier, child_session_id=maximum_identifier,
+    )
+    saved = records(tmp_path / "events.jsonl")
+    assert [item["type"] for item in saved] == ["tool.start", "terminal"]
+    assert saved[-1]["payload"]["error_code"] == maximum_identifier
+    assert saved[-1]["payload"]["child_session_id"] == maximum_identifier
+    assert (tmp_path / "events.jsonl").stat().st_size <= journal.max_bytes
+
+
 def test_symlink_and_write_failure_degrade_without_raise(tmp_path, monkeypatch):
     outside = tmp_path / "outside"
     outside.write_text("safe", encoding="utf-8")

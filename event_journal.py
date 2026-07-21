@@ -522,7 +522,8 @@ class EventJournal:
             "redacted": False, "dropped_fields": [],
         }
         encoded = self._record_bytes(marker, self.seq + 1)
-        if len(encoded) <= self.max_record_bytes and self.bytes_written + len(encoded) <= self.max_bytes:
+        ordinary_limit = self.max_bytes - self.terminal_reserve_bytes
+        if len(encoded) <= self.max_record_bytes and self.bytes_written + len(encoded) <= ordinary_limit:
             self._write_bytes(encoded)
             self.seq += 1
             self.bytes_written += len(encoded)

@@ -336,7 +336,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             "recovery_history": [],
         }
     )
-    core.json_safe_write(run_dir / "result.json", result)
+    core.write_result_artifact(run_dir, result)
     terminal_updates = {
         "status": final_status,
         "phase": final_status,
