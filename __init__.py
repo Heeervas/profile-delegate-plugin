@@ -485,7 +485,19 @@ def _install_tool_preview_patch() -> None:
 
 
 def register(ctx: Any) -> None:
+    try:
+        from .cli import profile_delegate_cli, register_cli
+    except ImportError:
+        from cli import profile_delegate_cli, register_cli
+
     _install_tool_preview_patch()
+    ctx.register_cli_command(
+        name="profile-delegate",
+        help="Watch or inspect Profile Delegate runs (read-only)",
+        setup_fn=register_cli,
+        handler_fn=profile_delegate_cli,
+        description="Local read-only spectator for delegated profile runs; never attaches to child control.",
+    )
     for name, schema, handler, desc in [
         ("profile_delegate", _schema(), _handler, "Profile Delegate 🤝: bounded task delegation to another Hermes profile."),
         ("profile_delegate_status", _status_schema(), _status_handler, "Inspect a Profile Delegate run by task_id."),

@@ -1481,6 +1481,14 @@ def base_paths(run_dir: Path) -> Dict[str, str]:
     }
 
 
+def spectator_watch_command(task_id: str, origin: Optional[Dict[str, Any]] = None) -> str:
+    """Return a shell-safe watch hint using only validated identifiers."""
+    profile = ensure_text((origin or {}).get("profile")).strip()
+    if profile and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", profile):
+        return f"hermes -p {profile} profile-delegate watch {task_id}"
+    return f"hermes profile-delegate watch {task_id}"
+
+
 def _control_dirs(run_dir: Path) -> Tuple[Path, Path, Path]:
     root = run_dir / "control"
     commands, acks = root / "commands", root / "acks"
@@ -2102,6 +2110,7 @@ def delegate_profile(
                 return {
                     "success": True, "status": "running", "mode": "async" if existing.get("background") else "sync",
                     "task_id": existing_id, "profile": validated.canonical, "deduplicated": True,
+                    "watch_command": spectator_watch_command(existing_id, normalize_persisted_origin(existing)),
                     "run_created": False, "paths": base_paths(get_runs_root() / existing_id),
                 }
         task_id = make_task_id()
@@ -2164,6 +2173,7 @@ def delegate_profile(
                 raise ProfileDelegateError(f"failed to start background run: {type(exc).__name__}: {exc}", "background_start_failed") from exc
             return {
                 "success": True, "mode": "async", "task_id": task_id, "profile": validated.canonical,
+                "watch_command": spectator_watch_command(task_id, normalized_origin),
                 "status": "running", "error_code": None, "session_title": title_text,
                 "session_mode": mode, "requested_session_id": resume_id,
                 "child_approval_mode": resolved_child_approval_mode, "requested_execution": requested_execution,
@@ -2192,6 +2202,17 @@ def resolve_run_dir(task_id: str) -> Path:
     if not run_dir.is_dir():
         raise ProfileDelegateError(f"run not found: {clean}", "run_not_found")
     return run_dir
+
+
+def _safe_event_metadata(status: Dict[str, Any]) -> Dict[str, Any]:
+    """Project only bounded spectator counters/health from a status snapshot."""
+    mapping = {
+        "event_schema_version": "schema_version", "event_seq": "seq",
+        "event_stream_truncated": "truncated", "observability_degraded": "degraded",
+        "observability_error": "degradation_reason", "turn_count": "turn_count",
+        "api_calls": "api_calls", "tool_calls": "tool_calls", "usage": "usage",
+    }
+    return {public: status[source] for source, public in mapping.items() if source in status}
 
 
 def profile_delegate_status(
@@ -2240,6 +2261,7 @@ def profile_delegate_status(
         "transport_alive": status.get("transport_alive"),
         "child_session_id": status.get("child_session_id"),
         "latest_activity": status.get("latest_activity"),
+        "event_metadata": _safe_event_metadata(status),
         "last_control": status.get("last_control"),
         "notification_status": status.get("notification_status"),
         "result": result,
@@ -2438,6 +2460,65 @@ def profile_delegate_list(
     }
 
 
+def _locked_prune_candidate(run_dir: Path, cutoff: datetime, *, dry_run: bool) -> Optional[Path]:
+    """Reread and claim one old terminal run while holding its status lock."""
+    if fcntl is None:
+        return None
+    try:
+        before = os.lstat(run_dir)
+        if not stat.S_ISDIR(before.st_mode) or before.st_uid != os.getuid():
+            return None
+        status_path = run_dir / "status.json"
+        status_info = os.lstat(status_path)
+        if not stat.S_ISREG(status_info.st_mode) or status_info.st_uid != os.getuid():
+            return None
+
+        lock_path = run_dir / "status.lock"
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(lock_path, flags, 0o600)
+    except (FileNotFoundError, OSError):
+        return None
+
+    tombstone: Optional[Path] = None
+    try:
+        lock_info = os.fstat(fd)
+        if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid():
+            return None
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            after = os.lstat(run_dir)
+            if (
+                not stat.S_ISDIR(after.st_mode)
+                or after.st_uid != os.getuid()
+                or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+            ):
+                return None
+            status_info = os.lstat(status_path)
+            if not stat.S_ISREG(status_info.st_mode) or status_info.st_uid != os.getuid():
+                return None
+            status = read_json_file(status_path)
+            lifecycle = ensure_text(status.get("status")).strip().lower()
+            if lifecycle not in TERMINAL_RUN_STATUSES:
+                return None
+            created = parse_iso(ensure_text(status.get("created_at")))
+            if created is None or created >= cutoff:
+                return None
+            if dry_run:
+                return run_dir
+            tombstone = run_dir.parent / f".tombstone-{run_dir.name}-{uuid.uuid4().hex}"
+            os.rename(run_dir, tombstone)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except (ProfileDelegateError, FileNotFoundError, OSError):
+        return None
+    finally:
+        os.close(fd)
+    return tombstone
+
+
 def profile_delegate_prune(max_age_days: Any = 14, dry_run: bool = True) -> Dict[str, Any]:
     try:
         days = int(max_age_days if max_age_days is not None else 14)
@@ -2447,31 +2528,26 @@ def profile_delegate_prune(max_age_days: Any = 14, dry_run: bool = True) -> Dict
         raise ProfileDelegateError("max_age_days must be >= 1", "validation_error")
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    candidates = []
+    matched: List[str] = []
+    tombstones: List[Path] = []
     for run_dir in iter_run_dirs():
-        created = None
-        status_path = run_dir / "status.json"
-        if status_path.exists():
-            try:
-                created = parse_iso(read_json_file(status_path).get("created_at", ""))
-            except ProfileDelegateError:
-                created = None
-        if created is None:
-            created = datetime.fromtimestamp(run_dir.stat().st_mtime, timezone.utc)
-        if created < cutoff:
-            candidates.append(str(run_dir))
+        claimed = _locked_prune_candidate(run_dir, cutoff, dry_run=bool(dry_run))
+        if claimed is None:
+            continue
+        matched.append(str(run_dir))
+        if not dry_run:
+            tombstones.append(claimed)
 
-    if not dry_run:
-        for item in candidates:
-            shutil.rmtree(item, ignore_errors=False)
+    for tombstone in tombstones:
+        shutil.rmtree(tombstone, ignore_errors=False)
     return {
         "success": True,
         "dry_run": bool(dry_run),
         "max_age_days": days,
         "runs_root": str(get_runs_root()),
-        "matched_count": len(candidates),
-        "removed_count": 0 if dry_run else len(candidates),
-        "runs": candidates,
+        "matched_count": len(matched),
+        "removed_count": 0 if dry_run else len(tombstones),
+        "runs": matched,
     }
 
 

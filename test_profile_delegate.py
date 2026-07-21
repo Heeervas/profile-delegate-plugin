@@ -187,12 +187,20 @@ def test_build_prompt_contains_task_context_contract():
 
 def test_plugin_registers_tools():
     calls = []
+    cli_calls = []
 
     class Ctx:
         def register_tool(self, **kwargs):
             calls.append(kwargs)
 
+        def register_cli_command(self, **kwargs):
+            cli_calls.append(kwargs)
+
     plugin.register(Ctx())
+    assert len(cli_calls) == 1
+    assert cli_calls[0]["name"] == "profile-delegate"
+    assert callable(cli_calls[0]["setup_fn"])
+    assert callable(cli_calls[0]["handler_fn"])
     names = {call["name"] for call in calls}
     assert {
         "profile_delegate", "profile_delegate_status", "profile_delegate_steer",
@@ -210,6 +218,13 @@ def test_plugin_registers_tools():
     assert "notify_on_complete" in props
     assert props["capability_preset"]["enum"] == ["review", "build"]
     assert props["child_approval_mode"]["enum"] == ["deny", "approve_yolo"]
+
+
+def test_spectator_watch_command_default_and_named_profile():
+    task_id = "pd_20260721_085059_dzk2o9"
+    assert core.spectator_watch_command(task_id) == f"hermes profile-delegate watch {task_id}"
+    assert core.spectator_watch_command(task_id, {"profile": "work"}) == f"hermes -p work profile-delegate watch {task_id}"
+    assert core.spectator_watch_command(task_id, {"profile": "bad profile"}) == f"hermes profile-delegate watch {task_id}"
 
 
 def test_handler_validation_error_json():
@@ -858,6 +873,131 @@ def test_status_list_and_prune(tmp_path, monkeypatch):
     real = core.profile_delegate_prune(max_age_days=1, dry_run=False)
     assert real["removed_count"] == 1
     assert not run_dir.exists()
+
+
+def test_status_surfaces_only_safe_event_metadata_and_legacy_missing_journal(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(runs))
+    run_dir = runs / "pd_20260101_010101_abc123"
+    run_dir.mkdir(parents=True)
+    core.json_safe_write(run_dir / "status.json", {
+        "task_id": run_dir.name, "status": "completed", "phase": "completed",
+        "event_schema_version": 1, "event_seq": 17, "event_stream_truncated": True,
+        "observability_degraded": True, "observability_error": "disk_full",
+        "turn_count": 2, "api_calls": 3, "tool_calls": 4,
+        "usage": {"input": 5, "output": 6, "total": 11, "calls": 3},
+        "message_text": "must not escape", "persisted_text": "also private",
+    })
+    core.json_safe_write(run_dir / "result.json", {"status": "ok", "summary": "canonical"})
+
+    inspected = core.profile_delegate_status(run_dir.name)
+    assert inspected["event_metadata"] == {
+        "schema_version": 1, "seq": 17, "truncated": True, "degraded": True,
+        "degradation_reason": "disk_full", "turn_count": 2, "api_calls": 3,
+        "tool_calls": 4, "usage": {"input": 5, "output": 6, "total": 11, "calls": 3},
+    }
+    assert inspected["result"]["summary"] == "canonical"
+    assert "must not escape" not in json.dumps(inspected)
+    assert not (run_dir / "events.jsonl").exists()
+
+
+@pytest.mark.parametrize("lifecycle", [None, "corrupt", "unknown", "running", "cancelling"])
+def test_prune_skips_every_nonterminal_or_unreadable_run(tmp_path, monkeypatch, lifecycle):
+    runs = tmp_path / "runs"
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(runs))
+    run_dir = runs / "pd_20200101_000000_abcdef"
+    run_dir.mkdir(parents=True)
+    if lifecycle is None:
+        pass
+    elif lifecycle == "corrupt":
+        (run_dir / "status.json").write_text("not json", encoding="utf-8")
+    else:
+        core.json_safe_write(run_dir / "status.json", {
+            "status": lifecycle, "created_at": "2020-01-01T00:00:00+00:00",
+        })
+
+    result = core.profile_delegate_prune(max_age_days=1, dry_run=False)
+    assert result["matched_count"] == result["removed_count"] == 0
+    assert run_dir.exists()
+
+
+def test_prune_rereads_under_shared_lock_and_skips_terminal_race(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(runs))
+    run_dir = runs / "pd_20200101_000000_abcdef"
+    run_dir.mkdir(parents=True)
+    core.json_safe_write(run_dir / "status.json", {
+        "status": "completed", "created_at": "2020-01-01T00:00:00+00:00",
+    })
+    real_open = core.os.open
+
+    def race_on_lock(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if str(path).endswith("status.lock"):
+            core.json_safe_write(run_dir / "status.json", {
+                "status": "cancelling", "created_at": "2020-01-01T00:00:00+00:00",
+            })
+        return fd
+
+    monkeypatch.setattr(core.os, "open", race_on_lock)
+    result = core.profile_delegate_prune(max_age_days=1, dry_run=False)
+    assert result["removed_count"] == 0 and run_dir.exists()
+
+
+def test_prune_renames_to_tombstone_before_deleting(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(runs))
+    run_dir = runs / "pd_20200101_000000_abcdef"
+    run_dir.mkdir(parents=True)
+    core.json_safe_write(run_dir / "status.json", {
+        "status": "completed", "created_at": "2020-01-01T00:00:00+00:00",
+    })
+    deleted = []
+    real_rmtree = core.shutil.rmtree
+
+    def record_delete(path, *args, **kwargs):
+        candidate = Path(path)
+        deleted.append(candidate)
+        assert candidate.parent == runs
+        assert candidate.name.startswith(".tombstone-")
+        assert not candidate.name.startswith("pd_")
+        assert not run_dir.exists()
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(core.shutil, "rmtree", record_delete)
+    result = core.profile_delegate_prune(max_age_days=1, dry_run=False)
+    assert result["removed_count"] == 1 and len(deleted) == 1
+
+
+def test_prune_rejects_symlink_run_and_wrong_uid(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(runs))
+    target = tmp_path / "target"
+    target.mkdir()
+    core.json_safe_write(target / "status.json", {
+        "status": "completed", "created_at": "2020-01-01T00:00:00+00:00",
+    })
+    runs.mkdir()
+    (runs / "pd_20200101_000000_symlink").symlink_to(target, target_is_directory=True)
+    wrong_uid = runs / "pd_20200101_000001_baduid"
+    wrong_uid.mkdir()
+    core.json_safe_write(wrong_uid / "status.json", {
+        "status": "completed", "created_at": "2020-01-01T00:00:00+00:00",
+    })
+    real_lstat = core.os.lstat
+
+    def foreign_lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if Path(path) == wrong_uid:
+            values = list(info)
+            values[4] = core.os.getuid() + 1
+            return os.stat_result(values)
+        return info
+
+    monkeypatch.setattr(core.os, "lstat", foreign_lstat)
+    result = core.profile_delegate_prune(max_age_days=1, dry_run=False)
+    assert result["removed_count"] == 0
+    assert target.exists() and wrong_uid.exists()
 
 
 def test_resolve_run_dir_rejects_bad_task_id(tmp_path, monkeypatch):

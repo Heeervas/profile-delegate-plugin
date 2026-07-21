@@ -1,6 +1,6 @@
 name: profile-delegate
-version: "1.7.0"
-description: "Profile Delegate 🤝: bounded cross-profile delegation with isolated TUI stdio workers, live status, native steer/cancel controls, strict origin authorization, deterministic child approvals, and async support."
+version: "1.8.0"
+description: "Profile Delegate 🤝: bounded cross-profile delegation with isolated TUI workers, read-only watch/inspect CLI, native steer/cancel controls, strict origin authorization, and async support."
 author: Adan
 requires_env: []
 provides_tools:

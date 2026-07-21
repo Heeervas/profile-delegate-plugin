@@ -35,6 +35,7 @@ Example uses:
 - Stable error codes for common failures.
 - Tool preview patch so users see the target profile and one-line task summary.
 - Inspection tools: status, list, prune.
+- Read-only terminal spectator: `hermes profile-delegate watch <task_id>` and bounded `inspect --json`.
 
 ## What this is not
 
@@ -80,6 +81,20 @@ Restart the CLI/gateway after enabling:
 hermes gateway restart
 # or start a fresh `hermes` CLI session
 ```
+
+## Watch delegated runs from a terminal
+
+A background `profile_delegate` response now includes a copyable `watch_command`. Run it in a local terminal:
+
+```bash
+hermes profile-delegate watch pd_20260721_085059_dzk2o9
+hermes profile-delegate watch pd_20260721_085059_dzk2o9 --jsonl
+hermes profile-delegate inspect pd_20260721_085059_dzk2o9 --json
+```
+
+For a named caller profile, use the emitted `hermes -p <profile> ...` command. `watch` and `inspect` only read bounded, sanitized artifacts under the exact caller runs root. They never attach to child stdin, the TUI transport, `control/`, or `state.db`. Pressing `q` or `Ctrl+C` detaches the spectator without stopping the delegated run.
+
+Assistant text is absent by default. Legacy runs without `events.jsonl` remain inspectable with clearly labeled limited observability. Use `hermes profile-delegate -h` for root resolution, output modes, and exit codes.
 
 ## Required security configuration
 
