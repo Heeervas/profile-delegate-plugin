@@ -93,6 +93,10 @@ MAX_ORIGIN_VALUE_CHARS = 500
 VALID_INSPECTION_SCOPES = {"current_session", "current_lane", "all"}
 VALID_RUN_STATUSES = {"running", "cancelling", "completed", "failed", "cancelled", "timed_out", "corrupt"}
 TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
+TERMINAL_OWNED_STATUS_FIELDS = {
+    "status", "phase", "ended_at", "error_code", "exit_code", "timed_out",
+    "child_session_id", "transport_alive", "transport_pid",
+}
 MAX_STEER_CHARS = 12_000
 
 TRANSIENT_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
@@ -328,8 +332,11 @@ def merge_run_status(run_dir: Path, updates: Dict[str, Any], *, terminal: bool =
                 current = {"task_id": run_dir.name}
             existing = ensure_text(current.get("status")).lower()
             requested = ensure_text(updates.get("status")).lower()
-            if existing in TERMINAL_RUN_STATUSES and requested and requested != existing:
-                updates = {key: value for key, value in updates.items() if key != "status"}
+            if existing in TERMINAL_RUN_STATUSES:
+                updates = {
+                    key: value for key, value in updates.items()
+                    if key not in TERMINAL_OWNED_STATUS_FIELDS
+                }
             if terminal and existing not in TERMINAL_RUN_STATUSES and requested not in TERMINAL_RUN_STATUSES:
                 raise ProfileDelegateError("terminal update requires terminal state", "invalid_terminal_status")
             current.update(updates)
@@ -339,6 +346,15 @@ def merge_run_status(run_dir: Path, updates: Dict[str, Any], *, terminal: bool =
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
+
+
+def merge_run_status_best_effort(run_dir: Path, updates: Dict[str, Any]) -> bool:
+    """Persist optional spectator enrichment without weakening lifecycle writes."""
+    try:
+        merge_run_status(run_dir, updates)
+        return True
+    except Exception:
+        return False
 
 
 def read_json_file(path: Path) -> Dict[str, Any]:
@@ -1544,9 +1560,9 @@ def _ack_control(run_dir: Path, command_path: Path, command: Dict[str, Any], sta
     if detail:
         ack["detail"] = detail[:500]
     json_safe_write(acks / command_path.name, ack)
-    status = read_json_file(run_dir / "status.json")
-    status["last_control"] = {"type": command.get("type"), "state": state, "at": ack["at"]}
-    json_safe_write(run_dir / "status.json", status)
+    merge_run_status(run_dir, {
+        "last_control": {"type": command.get("type"), "state": state, "at": ack["at"]}
+    })
     return ack
 
 
@@ -1670,16 +1686,13 @@ def _make_profile_delegate_summary(result: Dict[str, Any], paths: Dict[str, str]
 def _push_profile_delegate_completion(run_dir: Path, final: Dict[str, Any]) -> None:
     """Best-effort notify-on-complete via Hermes' native async-delegation queue."""
     try:
-        status = read_json_file(run_dir / "status.json")
         request = read_json_file(run_dir / "request.json")
         if not bool(request.get("notify_on_complete", True)):
-            status["notification_status"] = "disabled"
-            json_safe_write(run_dir / "status.json", status)
+            merge_run_status(run_dir, {"notification_status": "disabled"})
             return
         session_key = str(request.get("origin_session_key") or "").strip()
         if not session_key:
-            status["notification_status"] = "skipped_no_origin_session_key"
-            json_safe_write(run_dir / "status.json", status)
+            merge_run_status(run_dir, {"notification_status": "skipped_no_origin_session_key"})
             return
         result = final.get("result") if isinstance(final.get("result"), dict) else {}
         paths = final.get("paths") if isinstance(final.get("paths"), dict) else base_paths(run_dir)
@@ -1709,22 +1722,19 @@ def _push_profile_delegate_completion(run_dir: Path, final: Dict[str, Any]) -> N
             "exit_reason": final.get("status"),
         }
         process_registry.completion_queue.put(evt)
-        status["notified_at"] = now_iso()
-        status["notification_status"] = "queued"
-        json_safe_write(run_dir / "status.json", status)
+        merge_run_status(run_dir, {"notified_at": now_iso(), "notification_status": "queued"})
     except Exception as exc:
         try:
-            status = read_json_file(run_dir / "status.json")
-            status["notification_status"] = "failed"
-            status["notification_error"] = f"{type(exc).__name__}: {exc}"[:500]
-            json_safe_write(run_dir / "status.json", status)
+            merge_run_status(run_dir, {
+                "notification_status": "failed",
+                "notification_error": f"{type(exc).__name__}: {exc}"[:500],
+            })
         except Exception:
             pass
 
 
 def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     request = read_json_file(run_dir / "request.json")
-    status = read_json_file(run_dir / "status.json")
     profile = ensure_text(request.get("profile"))
     timeout = int(request.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
     cwd = Path(ensure_text(request.get("workdir"))).resolve()
@@ -1758,8 +1768,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     integrity_error = ""
 
     with acquire_concurrency_slot(max_concurrent) as slot:
-        status["concurrency_slot"] = slot.slot
-        json_safe_write(run_dir / "status.json", status)
+        merge_run_status(run_dir, {"concurrency_slot": slot.slot})
         for attempt_index in range(max_resumes + 1):
             attempt = attempt_index + 1
             remaining = int(deadline - time.monotonic())
@@ -1846,8 +1855,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
         result["session_id"] = child_session_id
     result.update({"requested_execution": request.get("requested_execution") or {}, "effective_execution": request.get("effective_execution") or {}, "effective_capabilities": request.get("effective_capabilities") or {}, "approval_policy": request.get("approval_policy") or {}, "recovery_history": history})
     json_safe_write(run_dir / "result.json", result)
-    status.update({"status": final_status, "ended_at": now_iso(), "exit_code": exit_code, "timed_out": timed_out, "error_code": error_code, "stdout_truncated": bool(run_meta.get("stdout_truncated")), "stderr_truncated": bool(run_meta.get("stderr_truncated")), "stdout_chars": run_meta.get("stdout_chars"), "stderr_chars": run_meta.get("stderr_chars"), "stdout_limit": run_meta.get("stdout_limit"), "stderr_limit": run_meta.get("stderr_limit"), "child_session_id": child_session_id, "recovery_history": history, **rename_meta})
-    json_safe_write(run_dir / "status.json", status)
+    merge_run_status(run_dir, {"status": final_status, "phase": final_status, "ended_at": now_iso(), "exit_code": exit_code, "timed_out": timed_out, "error_code": error_code, "stdout_truncated": bool(run_meta.get("stdout_truncated")), "stderr_truncated": bool(run_meta.get("stderr_truncated")), "stdout_chars": run_meta.get("stdout_chars"), "stderr_chars": run_meta.get("stderr_chars"), "stdout_limit": run_meta.get("stdout_limit"), "stderr_limit": run_meta.get("stderr_limit"), "child_session_id": child_session_id, "recovery_history": history, **rename_meta}, terminal=True)
     return {"success": final_status == "completed" and result.get("status") != "failed", "mode": "sync", "task_id": request.get("task_id", run_dir.name), "profile": profile, "status": final_status, "error_code": error_code, "session_title": title_text, "session_mode": mode, "requested_session_id": resume_id, "child_approval_mode": child_approval_mode, "requested_execution": request.get("requested_execution") or {}, "effective_execution": request.get("effective_execution") or {}, "effective_capabilities": request.get("effective_capabilities") or {}, "approval_policy": request.get("approval_policy") or {}, "child_session_id": child_session_id, "recovery_history": history, **rename_meta, "result": result, "paths": base_paths(run_dir), "exit_code": exit_code, "timed_out": timed_out, "stdout_truncated": run_meta.get("stdout_truncated"), "stderr_truncated": run_meta.get("stderr_truncated")}
 
 
@@ -1867,12 +1875,7 @@ def _mark_background_worker_failure(run_dir: Path, exc: Exception) -> Dict[str, 
         "error_code": code,
     }
     json_safe_write(run_dir / "result.json", result)
-    try:
-        status = read_json_file(run_dir / "status.json")
-    except Exception:
-        status = {"task_id": run_dir.name}
-    status.update({"status": "failed", "ended_at": now_iso(), "error_code": code})
-    json_safe_write(run_dir / "status.json", status)
+    merge_run_status(run_dir, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": code}, terminal=True)
     return {"success": False, "mode": "async", "task_id": run_dir.name, "status": "failed", "error_code": code, "result": result, "paths": base_paths(run_dir)}
 
 
@@ -1953,13 +1956,11 @@ def _start_detached_background_worker(run_dir: Path) -> None:
                 cmd, cwd=str(Path.cwd()), env=env, stdin=subprocess.DEVNULL,
                 stdout=out, stderr=err, close_fds=True, start_new_session=True,
             )
-        status = read_json_file(run_dir / "status.json")
-        status.update({
+        merge_run_status(run_dir, {
             "background_worker_mode": "detached", "worker_pid": proc.pid,
             "worker_started_at": now_iso(), "worker_stdout": str(stdout_path),
             "worker_stderr": str(stderr_path),
         })
-        json_safe_write(run_dir / "status.json", status)
 
     def _watch_for_notification() -> None:
         try:
@@ -2007,8 +2008,7 @@ def _background_worker_main(run_dir_arg: str) -> int:
         try:
             status = read_json_file(run_dir / "status.json")
             if bool(status.get("notify_on_complete", True)) and not status.get("notification_status"):
-                status["notification_status"] = "detached_worker_completed_no_live_queue"
-                json_safe_write(run_dir / "status.json", status)
+                merge_run_status(run_dir, {"notification_status": "detached_worker_completed_no_live_queue"})
         except Exception:
             pass
         return 0
@@ -2147,8 +2147,7 @@ def delegate_profile(
             try:
                 _start_background_run(run_dir)
             except ProfileDelegateError as exc:
-                status.update({"status": "failed", "ended_at": now_iso(), "error_code": exc.code})
-                json_safe_write(run_dir / "status.json", status)
+                merge_run_status(run_dir, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": exc.code}, terminal=True)
                 json_safe_write(run_dir / "result.json", {
                     "status": "failed", "summary": str(exc), "artifacts": [], "errors": [exc.code],
                     "next_steps": ["Wait for another background profile_delegate run to finish or raise max_async."],
@@ -2156,8 +2155,7 @@ def delegate_profile(
                 })
                 raise
             except Exception as exc:
-                status.update({"status": "failed", "ended_at": now_iso(), "error_code": "background_start_failed"})
-                json_safe_write(run_dir / "status.json", status)
+                merge_run_status(run_dir, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": "background_start_failed"}, terminal=True)
                 json_safe_write(run_dir / "result.json", {
                     "status": "failed", "summary": f"Failed to start background profile_delegate run: {type(exc).__name__}: {exc}",
                     "artifacts": [], "errors": ["background_start_failed"], "next_steps": [],

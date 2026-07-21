@@ -134,6 +134,7 @@ class EventJournal:
         self.pending_text = ""
         self.pending_started = 0.0
         self.message_had_delta: Set[str] = set()
+        self.deferred_events: List[Dict[str, Any]] = []
         self.pre_session: List[Dict[str, Any]] = []
         self.pre_session_bytes = 0
         self._open()
@@ -251,8 +252,16 @@ class EventJournal:
         projected = self.project(frame)
         if projected is None:
             return False
-        if projected["type"] != "message.delta":
-            self.flush()
+        if projected["type"] == "message.delta":
+            return False
+        if self.pending_text and projected["type"] != "message.complete":
+            self.deferred_events.append(projected)
+            return False
+        if projected["type"] == "message.complete":
+            self.flush(force=True)
+            for deferred in self.deferred_events:
+                self._append_projected(deferred)
+            self.deferred_events = []
         return self._append_projected(projected)
 
     def project(self, frame: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -264,10 +273,12 @@ class EventJournal:
         redacted = False
         phase = self.phase
         if kind == "message.start":
-            if payload.get("role") != "assistant":
+            if payload.get("role") not in (None, "", "assistant"):
                 return None
             message_id = _bounded(payload.get("message_id") or payload.get("id"))
-            allowed = {"message_id": message_id, "role": "assistant"}
+            allowed = {"role": "assistant"}
+            if message_id:
+                allowed["message_id"] = message_id
             self.turn_count += 1
             phase = "model_running"
         elif kind == "message.delta":
@@ -283,19 +294,25 @@ class EventJournal:
             self.pending_text = (self.pending_text + fragment)[:self.max_message_chars]
             self.pending_started = self.pending_started or time.monotonic()
             self.message_had_delta.add(message_id)
-            if len(self.pending_text) < self.coalesce_chars and time.monotonic() - self.pending_started < self.flush_interval_s:
-                return None
-            return self._pending_projection()
+            return None
         elif kind == "message.complete":
             message_id = _bounded(payload.get("message_id") or payload.get("id"))
             status_value = _bounded(payload.get("status") or "complete", 32).lower()
             if status_value not in MESSAGE_STATUSES:
                 status_value = "error"
-            allowed = {"message_id": message_id, "status": status_value}
+            allowed = {"status": status_value}
+            if message_id:
+                allowed["message_id"] = message_id
+            clean_usage = self._clean_usage(payload.get("usage"))
+            if clean_usage:
+                allowed["usage"] = clean_usage
+                self.usage = clean_usage
+                self.api_calls = clean_usage.get("calls", self.api_calls)
             if self.persist_message_text and message_id not in self.message_had_delta and payload.get("text"):
                 text, redacted = _redact(sanitize_text(payload.get("text"), self.max_message_chars))
                 if text:
                     allowed["text"] = text
+            dropped = [key for key in ("text", "reasoning", "rendered", "warning") if key in payload and key not in allowed]
             phase = "message_complete"
         elif kind in {"tool.start", "tool.complete"}:
             tool_id = _bounded(payload.get("tool_id") or payload.get("id"))
@@ -322,12 +339,12 @@ class EventJournal:
         elif kind == "session.info":
             allowed = {}
             for key in ("profile", "model", "provider"):
-                value = _bounded(payload.get(key), 200)
+                source_key = "profile_name" if key == "profile" else key
+                value = _bounded(payload.get(source_key), 200)
                 if value:
                     allowed[key] = value
                     setattr(self, key, value)
-            usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
-            clean_usage = {key: value for key, value in usage.items() if key in USAGE_KEYS and isinstance(value, int) and not isinstance(value, bool) and value >= 0}
+            clean_usage = self._clean_usage(payload.get("usage"))
             if clean_usage:
                 allowed["usage"] = clean_usage
                 self.usage = clean_usage
@@ -352,6 +369,14 @@ class EventJournal:
         self.phase = phase
         return {"type": kind, "phase": phase, "payload": allowed, "redacted": redacted, "dropped_fields": dropped}
 
+    @staticmethod
+    def _clean_usage(value: Any) -> Dict[str, int]:
+        usage = value if isinstance(value, dict) else {}
+        return {
+            key: item for key, item in usage.items()
+            if key in USAGE_KEYS and isinstance(item, int) and not isinstance(item, bool) and item >= 0
+        }
+
     def _pending_projection(self) -> Optional[Dict[str, Any]]:
         if not self.pending_text:
             return None
@@ -363,9 +388,12 @@ class EventJournal:
         return projected
 
     def flush(self, *, force: bool = False) -> None:
-        projected = self._pending_projection()
-        if projected is not None:
-            self._append_projected(projected)
+        # Redaction is only safe over the bounded aggregate. A timer flush must
+        # not expose a prefix whose secret marker/value arrives in a later delta.
+        if force:
+            projected = self._pending_projection()
+            if projected is not None:
+                self._append_projected(projected)
         if force and self.fd is not None and not self.disabled:
             try:
                 os.fsync(self.fd)
@@ -389,7 +417,7 @@ class EventJournal:
                 self._degrade("minimal_record_too_large")
                 return False
         ordinary_limit = self.max_bytes - self.terminal_reserve_bytes
-        exceeds = self.event_count >= self.max_events or self.bytes_written + len(encoded) > (self.max_bytes if terminal else ordinary_limit)
+        exceeds = (not terminal and self.event_count >= self.max_events) or self.bytes_written + len(encoded) > (self.max_bytes if terminal else ordinary_limit)
         if exceeds and not terminal:
             if internal:
                 self.truncated = True
@@ -400,22 +428,31 @@ class EventJournal:
             self._degrade("terminal_reserve_exhausted")
             return False
         try:
-            self._write_bytes(encoded)
-            self.seq += 1
-            self.event_count += 1
-            self.bytes_written += len(encoded)
+            self._write_bytes(encoded, terminal=terminal)
             return True
         except Exception as exc:
             self._degrade(f"write:{type(exc).__name__}")
             return False
 
-    def _write_bytes(self, data: bytes) -> None:
+    def _write_bytes(self, data: bytes, *, terminal: bool = False) -> None:
         assert self.fd is not None and self.lock_fd is not None and fcntl is not None
         fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
         try:
+            self._recover_locked()
+            projected = json.loads(data)
+            data = self._record_bytes(
+                {key: projected[key] for key in ("type", "phase", "payload", "redacted", "dropped_fields")},
+                self.seq + 1,
+            )
+            ordinary_limit = self.max_bytes - self.terminal_reserve_bytes
+            if (not terminal and self.event_count >= self.max_events) or self.bytes_written + len(data) > (self.max_bytes if terminal else ordinary_limit):
+                raise OverflowError("journal limit reached")
             written = os.write(self.fd, data)
             if written != len(data):
                 raise OSError("short journal write")
+            self.seq += 1
+            self.event_count += 0 if terminal else 1
+            self.bytes_written += len(data)
         finally:
             fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
 
@@ -432,7 +469,7 @@ class EventJournal:
         self.truncated = True
 
     def finalize(self, status: str, *, error_code: Any = "", child_session_id: Any = "") -> bool:
-        self.flush()
+        self.flush(force=True)
         clean_status = _bounded(status, 32).lower()
         if clean_status not in TERMINAL_STATUSES:
             clean_status = "failed"

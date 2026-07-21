@@ -66,7 +66,6 @@ def _gateway_command(request: Dict[str, Any], run_dir: Path) -> list[str]:
 
 def execute(run_dir: Path) -> Dict[str, Any]:
     request = core.read_json_file(run_dir / "request.json")
-    status = core.read_json_file(run_dir / "status.json")
     timeout = int(request.get("timeout_seconds") or core.DEFAULT_TIMEOUT_SECONDS)
     deadline = time.monotonic() + timeout
     cwd = Path(core.ensure_text(request.get("workdir"))).resolve()
@@ -97,11 +96,11 @@ def execute(run_dir: Path) -> Dict[str, Any]:
         now = time.monotonic()
         if not force and now - last_snapshot < 0.5:
             return
-        try:
-            core.merge_run_status(run_dir, updates, terminal=terminal)
+        if terminal:
+            core.merge_run_status(run_dir, updates, terminal=True)
             last_snapshot = now
-        except Exception:
-            pass
+        elif core.merge_run_status_best_effort(run_dir, updates):
+            last_snapshot = now
 
     def persist_event(frame: Dict[str, Any]) -> None:
         nonlocal final_text, message_status, terminal_event
@@ -147,9 +146,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                     tui_rpc.interrupt(client, ui_session_id, on_event=persist_event)
                     cancelled = True
                     cancel_deadline = time.monotonic() + 5.0
-                    current = core.read_json_file(run_dir / "status.json")
-                    current.update({"status": "cancelling", "phase": "interrupting"})
-                    core.json_safe_write(run_dir / "status.json", current)
+                    core.merge_run_status(run_dir, {"status": "cancelling", "phase": "interrupting"})
                     core._ack_control(run_dir, command_path, command, "accepted")
                 else:
                     core._ack_control(
@@ -165,15 +162,12 @@ def execute(run_dir: Path) -> Dict[str, Any]:
         policy_limits = ((request.get("effective_policy") or {}).get("limits") or {})
         max_concurrent = int(policy_limits.get("max_concurrent", core.DEFAULT_MAX_CONCURRENT))
         with core.acquire_concurrency_slot(max_concurrent) as slot:
-            status.update(
-                {
-                    "concurrency_slot": slot.slot,
-                    "transport": "tui_stdio",
-                    "phase": "transport_starting",
-                    "transport_alive": False,
-                }
-            )
-            core.json_safe_write(run_dir / "status.json", status)
+            core.merge_run_status(run_dir, {
+                "concurrency_slot": slot.slot,
+                "transport": "tui_stdio",
+                "phase": "transport_starting",
+                "transport_alive": False,
+            })
             env = _environment(request, run_dir)
             client = tui_rpc.launch_gateway(
                 python=core.sys.executable,
@@ -181,9 +175,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                 env=env,
                 command=_gateway_command(request, run_dir),
             )
-            status = core.read_json_file(run_dir / "status.json")
-            status.update({"transport_pid": client.process.pid, "transport_alive": True})
-            core.json_safe_write(run_dir / "status.json", status)
+            core.merge_run_status(run_dir, {"transport_pid": client.process.pid, "transport_alive": True})
             client.wait_ready(
                 timeout=min(30.0, max(0.1, deadline - time.monotonic())),
                 on_event=persist_event,
@@ -204,20 +196,14 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             ui_session_id = identities["ui_session_id"]
             child_session_id = identities["child_session_id"]
             journal.set_session(ui_session_id)
-            status = core.read_json_file(run_dir / "status.json")
-            status.update(
-                {
-                    "ui_child_session_id": ui_session_id,
-                    "child_session_id": child_session_id,
-                    "phase": "session_ready",
-                }
-            )
-            core.json_safe_write(run_dir / "status.json", status)
+            core.merge_run_status(run_dir, {
+                "ui_child_session_id": ui_session_id,
+                "child_session_id": child_session_id,
+                "phase": "session_ready",
+            })
             prompt = (run_dir / "prompt.txt").read_text(encoding="utf-8")
             tui_rpc.submit(client, ui_session_id, prompt, on_event=persist_event)
-            status = core.read_json_file(run_dir / "status.json")
-            status["phase"] = "model_running"
-            core.json_safe_write(run_dir / "status.json", status)
+            core.merge_run_status(run_dir, {"phase": "model_running"})
 
             while not terminal_event:
                 process_controls()
@@ -271,9 +257,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
         if client is not None:
             client.close()
             exit_code = client.process.poll()
-        current = core.read_json_file(run_dir / "status.json")
-        current["transport_alive"] = False
-        core.json_safe_write(run_dir / "status.json", current)
+        core.merge_run_status(run_dir, {"transport_alive": False})
 
     core.text_safe_write(run_dir / "stdout.txt", final_text)
     if client and not core.tail_text(run_dir / "stderr.txt", 1):
