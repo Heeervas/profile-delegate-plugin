@@ -1740,3 +1740,67 @@ def test_identical_concurrent_sync_requests_create_one_run(tmp_path, monkeypatch
     assert len(results) == 2
     assert len({item["task_id"] for item in results}) == 1
     assert len(list((tmp_path / "runs").iterdir())) == 1
+
+
+def test_terminal_owned_fields_resist_stale_snapshot_but_notification_merges(tmp_path):
+    run_dir = tmp_path / "pd_20260721_120000_aaaaaa"
+    run_dir.mkdir()
+    core.json_safe_write(run_dir / "status.json", {"task_id": run_dir.name, "status": "running"})
+    core.merge_run_status(run_dir, {
+        "status": "completed", "phase": "completed", "ended_at": "terminal",
+        "error_code": None, "exit_code": 0, "timed_out": False,
+        "child_session_id": "terminal-child", "transport_alive": False,
+        "transport_pid": 99,
+    }, terminal=True)
+    stale = core.merge_run_status(run_dir, {
+        "status": "cancelling", "phase": "interrupting", "ended_at": "stale",
+        "error_code": "stale", "exit_code": 9, "timed_out": True,
+        "child_session_id": "stale-child", "transport_alive": True,
+        "transport_pid": 100, "event_seq": 8, "notification_status": "queued",
+    })
+    assert stale["status"] == "completed"
+    assert stale["phase"] == "completed" and stale["ended_at"] == "terminal"
+    assert stale["error_code"] is None and stale["exit_code"] == 0 and stale["timed_out"] is False
+    assert stale["child_session_id"] == "terminal-child"
+    assert stale["transport_alive"] is False and stale["transport_pid"] == 99
+    assert stale["event_seq"] == 8 and stale["notification_status"] == "queued"
+
+
+def test_locked_field_merges_prevent_deterministic_lost_update(tmp_path):
+    run_dir = tmp_path / "pd_20260721_120001_bbbbbb"
+    run_dir.mkdir()
+    core.json_safe_write(run_dir / "status.json", {"task_id": run_dir.name, "status": "running"})
+    stale_parent = core.read_json_file(run_dir / "status.json")
+    core.merge_run_status(run_dir, {"phase": "model_running", "event_seq": 5, "tool_calls": 2})
+    stale_parent.update({"worker_pid": 123, "notification_status": "pending"})
+    core.merge_run_status(run_dir, {"worker_pid": stale_parent["worker_pid"], "notification_status": stale_parent["notification_status"]})
+    core.merge_run_status(run_dir, {"last_control": {"state": "accepted"}})
+    core.merge_run_status(run_dir, {"status": "completed", "phase": "completed", "ended_at": "now"}, terminal=True)
+    core.merge_run_status(run_dir, {"notification_status": "queued", "notified_at": "later"})
+    final = core.read_json_file(run_dir / "status.json")
+    assert final["worker_pid"] == 123 and final["event_seq"] == 5 and final["tool_calls"] == 2
+    assert final["last_control"]["state"] == "accepted"
+    assert final["status"] == "completed" and final["notification_status"] == "queued"
+
+
+def test_required_status_merge_lock_failure_propagates_optional_enrichment_is_best_effort(tmp_path, monkeypatch):
+    run_dir = tmp_path / "pd_20260721_120002_cccccc"
+    run_dir.mkdir()
+    core.json_safe_write(run_dir / "status.json", {"task_id": run_dir.name, "status": "running"})
+    real_open = core.os.open
+    def fail_lock(path, *args, **kwargs):
+        if str(path).endswith("status.lock"):
+            raise OSError("lock unavailable")
+        return real_open(path, *args, **kwargs)
+    monkeypatch.setattr(core.os, "open", fail_lock)
+    with pytest.raises(OSError, match="lock unavailable"):
+        core.merge_run_status(run_dir, {"status": "failed", "ended_at": "now"}, terminal=True)
+    assert core.merge_run_status_best_effort(run_dir, {"event_seq": 3}) is False
+    assert core.read_json_file(run_dir / "status.json")["status"] == "running"
+
+
+def test_no_post_creation_direct_status_writes_remain():
+    core_source = Path(core.__file__).read_text(encoding="utf-8")
+    runner_source = Path(core.__file__).with_name("tui_runner.py").read_text(encoding="utf-8")
+    assert core_source.count('json_safe_write(run_dir / "status.json"') == 2
+    assert 'json_safe_write(run_dir / "status.json"' not in runner_source

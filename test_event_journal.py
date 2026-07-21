@@ -5,6 +5,9 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
+import event_journal
 from event_journal import EventJournal, sanitize_text
 
 
@@ -150,3 +153,113 @@ def test_terminal_flush_fsync_and_private_permissions(tmp_path, monkeypatch):
     assert [item["type"] for item in records(tmp_path / "events.jsonl")] == ["message.delta", "terminal"] and calls
     assert (tmp_path.stat().st_mode & 0o777) == 0o700
     assert ((tmp_path / "events.jsonl").stat().st_mode & 0o777) == ((tmp_path / "events.lock").stat().st_mode & 0o777) == 0o600
+
+
+def test_gateway_shaped_sequence_reconciles_identity_turn_and_final_usage(tmp_path):
+    journal = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1")
+    journal.ingest(frame("message.start", {}))
+    journal.ingest(frame("session.info", {
+        "profile_name": "reviewer", "model": "model-x", "provider": "provider-y",
+        "usage": {"input": 1, "output": 2, "total": 3, "calls": 1},
+    }))
+    journal.ingest(frame("message.complete", {
+        "text": "private by default", "status": "complete", "rendered": ["private"],
+        "reasoning": "hidden", "usage": {"input": 10, "output": 5, "reasoning": 2, "total": 17, "calls": 3},
+    }))
+    snapshot = journal.snapshot_fields()
+    journal.close()
+    saved = records(tmp_path / "events.jsonl")
+    assert snapshot["turn_count"] == 1
+    assert snapshot["delegated_profile"] == "reviewer"
+    assert snapshot["model"] == "model-x" and snapshot["provider"] == "provider-y"
+    assert snapshot["usage"] == {"input": 10, "output": 5, "reasoning": 2, "total": 17, "calls": 3}
+    assert snapshot["api_calls"] == 3
+    assert saved[0]["payload"] == {"role": "assistant"}
+    assert saved[-1]["payload"] == {"status": "complete", "usage": snapshot["usage"]}
+    assert set(saved[-1]["dropped_fields"]) == {"text", "reasoning", "rendered"}
+
+
+def test_terminal_record_is_allowed_after_exact_ordinary_event_cap(tmp_path):
+    journal = EventJournal(
+        tmp_path, task_id="pd_test", ui_session_id="ui-1",
+        max_events=2, max_bytes=4096, terminal_reserve_bytes=1024,
+    )
+    assert journal.ingest(frame("tool.start", {"tool_id": "one", "name": "terminal"}))
+    assert journal.ingest(frame("tool.start", {"tool_id": "two", "name": "terminal"}))
+    assert not journal.ingest(frame("tool.start", {"tool_id": "three", "name": "terminal"}))
+    assert journal.finalize("completed", child_session_id="child")
+    saved = records(tmp_path / "events.jsonl")
+    assert sum(item["type"] not in {"terminal", "journal.truncated"} for item in saved) == 2
+    assert saved[-1]["type"] == "terminal"
+    assert (tmp_path / "events.jsonl").stat().st_size <= 4096
+
+
+def _persisted_text(path):
+    return "".join(
+        item["payload"].get("text", "")
+        for item in records(path)
+        if item["type"] == "message.delta"
+    )
+
+
+@pytest.mark.parametrize("boundary", ["size", "timer", "intervening"])
+def test_split_secret_is_not_emitted_raw_across_flush_boundaries(tmp_path, monkeypatch, boundary):
+    clock = [0.0]
+    monkeypatch.setattr(event_journal.time, "monotonic", lambda: clock[0])
+    kwargs = {"coalesce_chars": 7} if boundary == "size" else {"flush_interval_s": 0.1}
+    journal = EventJournal(
+        tmp_path, task_id="pd_test", ui_session_id="ui-1",
+        persist_message_text=True, **kwargs,
+    )
+    journal.ingest(frame("message.delta", {"text": "tok"}))
+    if boundary == "timer":
+        clock[0] = 1.0
+        journal.flush()
+    elif boundary == "intervening":
+        journal.ingest(frame("tool.start", {"tool_id": "t", "name": "terminal"}))
+    journal.ingest(frame("message.delta", {"text": "en=obvious-secret"}))
+    journal.ingest(frame("message.complete", {"status": "complete"}))
+    journal.close()
+    persisted = _persisted_text(tmp_path / "events.jsonl")
+    assert "obvious-secret" not in persisted
+    assert "[REDACTED]" in persisted
+
+
+def test_positive_short_write_degrades_and_reopen_recovers_partial_tail(tmp_path, monkeypatch):
+    journal = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1")
+    real_write = event_journal.os.write
+    monkeypatch.setattr(event_journal.os, "write", lambda fd, data: real_write(fd, data[: max(1, len(data) // 2)]))
+    assert journal.ingest(frame("tool.start", {"tool_id": "partial", "name": "terminal"})) is False
+    assert journal.degraded
+    journal.close()
+    monkeypatch.setattr(event_journal.os, "write", real_write)
+    reopened = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1")
+    assert reopened.ingest(frame("tool.start", {"tool_id": "whole", "name": "terminal"}))
+    reopened.close()
+    assert [item["seq"] for item in records(tmp_path / "events.jsonl")] == [1]
+
+
+def test_second_writer_refreshes_sequence_and_cap_state_under_lock(tmp_path):
+    first = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1", max_events=2)
+    second = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1", max_events=2)
+    assert first.ingest(frame("tool.start", {"tool_id": "one", "name": "terminal"}))
+    assert second.ingest(frame("tool.start", {"tool_id": "two", "name": "terminal"}))
+    assert not first.ingest(frame("tool.start", {"tool_id": "three", "name": "terminal"}))
+    first.close()
+    second.close()
+    saved = records(tmp_path / "events.jsonl")
+    assert [item["seq"] for item in saved] == [1, 2]
+
+
+def test_recovery_reads_only_bounded_tail_for_last_record(tmp_path, monkeypatch):
+    journal = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1")
+    for index in range(100):
+        journal.ingest(frame("tool.start", {"tool_id": str(index), "name": "terminal"}))
+    journal.close()
+    read_sizes = []
+    real_read = event_journal.os.read
+    monkeypatch.setattr(event_journal.os, "read", lambda fd, size: (read_sizes.append(size), real_read(fd, size))[1])
+    reopened = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1")
+    assert reopened.seq == 100
+    assert max(read_sizes, default=0) <= 65536
+    reopened.close()
