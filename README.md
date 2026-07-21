@@ -1,6 +1,6 @@
 # Profile Delegate 🤝
 
-Version: `1.7.0`
+Version: `1.8.0`
 
 > Stable local-power-user Hermes Agent plugin. It is **not a sandbox** and should be configured deliberately before broad use.
 
