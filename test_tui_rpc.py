@@ -6,6 +6,7 @@ import json
 import os
 import queue
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -181,3 +182,116 @@ def test_close_reaps_process_and_is_idempotent():
     client.close()
     client.close()
     assert proc.returncode == 0
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_runner_poll_flushes_pending_journal_text_after_active_and_idle_reads(timeout):
+    frame = {"method": "event", "params": {"type": "status.update"}}
+
+    class Client:
+        def read_frame(self, poll_timeout):
+            if timeout:
+                raise tui_rpc.TuiTransportError("TUI RPC response timed out")
+            return frame
+
+    class RecordingJournal:
+        def __init__(self):
+            self.flushes = 0
+
+        def flush(self):
+            self.flushes += 1
+
+    journal = RecordingJournal()
+    assert tui_runner._poll_event(Client(), 0.15, journal) == (None if timeout else frame)
+    assert journal.flushes == 1
+
+
+def test_runner_poll_flushes_before_propagating_transport_error():
+    class Client:
+        def read_frame(self, _timeout):
+            raise tui_rpc.TuiTransportError("TUI RPC EOF")
+
+    class RecordingJournal:
+        def __init__(self):
+            self.flushes = 0
+
+        def flush(self):
+            self.flushes += 1
+
+    journal = RecordingJournal()
+    with pytest.raises(tui_rpc.TuiTransportError, match="EOF"):
+        tui_runner._poll_event(Client(), 0.15, journal)
+    assert journal.flushes == 1
+
+
+def test_runner_publishes_ready_status_transitions_after_success(tmp_path, monkeypatch):
+    run = tmp_path / "pd_20260721_120001_bbbbbb"
+    run.mkdir()
+    request = {
+        "task_id": run.name, "timeout_seconds": 10, "workdir": str(tmp_path),
+        "profile": "reviewer", "session_mode": "new", "requested_session_id": "",
+        "session_title": "test", "profile_home": str(tmp_path), "hermes_bin": sys.executable,
+        "child_approval_mode": "deny", "effective_execution": {}, "effective_capabilities": {},
+        "effective_policy": {"limits": {"max_concurrent": 8}},
+    }
+    (run / "request.json").write_text(json.dumps(request), encoding="utf-8")
+    (run / "prompt.txt").write_text("prompt", encoding="utf-8")
+    (run / "status.json").write_text(
+        json.dumps({"task_id": run.name, "status": "running"}), encoding="utf-8",
+    )
+    transitions = []
+    real_merge = tui_runner.core.merge_run_status
+
+    def capture_merge(run_dir, updates, **kwargs):
+        if "phase" in updates:
+            transitions.append(updates["phase"])
+        return real_merge(run_dir, updates, **kwargs)
+
+    monkeypatch.setattr(tui_runner.core, "merge_run_status", capture_merge)
+    monkeypatch.setattr(
+        tui_runner.core, "merge_run_status_best_effort",
+        lambda run_dir, updates: bool(capture_merge(run_dir, updates)),
+    )
+    monkeypatch.setattr(tui_runner, "_environment", lambda request, run_dir: {})
+
+    @contextmanager
+    def slot(_limit):
+        yield type("Slot", (), {"slot": 0})()
+
+    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", slot)
+
+    complete = {
+        "method": "event", "params": {
+            "type": "message.complete", "session_id": "ui-1",
+            "payload": {"status": "complete", "text": '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}'},
+        },
+    }
+
+    class Client:
+        stderr_tail = ""
+
+        def __init__(self):
+            self.process = type("Process", (), {"pid": os.getpid(), "poll": lambda self: 0})()
+
+        def wait_ready(self, **kwargs):
+            return None
+
+        def read_frame(self, timeout):
+            return complete
+
+        def call(self, *args, **kwargs):
+            return {}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", lambda **kwargs: Client())
+    monkeypatch.setattr(
+        tui_runner.tui_rpc, "start_session",
+        lambda *args, **kwargs: {"ui_session_id": "ui-1", "child_session_id": "child-1"},
+    )
+    monkeypatch.setattr(tui_runner.tui_rpc, "submit", lambda *args, **kwargs: {})
+    result = tui_runner.execute(run)
+    assert result["success"] is True
+    assert transitions.index("transport_ready") < transitions.index("session_creating")
+    assert transitions.index("session_ready") < transitions.index("agent_initializing")

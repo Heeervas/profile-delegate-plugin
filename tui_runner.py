@@ -73,6 +73,20 @@ def _gateway_command(request: Dict[str, Any], run_dir: Path) -> list[str]:
     ]
 
 
+def _poll_event(
+    client: tui_rpc.TuiRpcClient, timeout: float, journal: EventJournal,
+) -> Optional[Dict[str, Any]]:
+    """Read one frame and drive timer-based journal flushing on idle polls."""
+    try:
+        return client.read_frame(timeout)
+    except tui_rpc.TuiTransportError as exc:
+        if "timed out" not in str(exc):
+            raise
+        return None
+    finally:
+        journal.flush()
+
+
 def execute(run_dir: Path) -> Dict[str, Any]:
     request = core.read_json_file(run_dir / "request.json")
     timeout = int(request.get("timeout_seconds") or core.DEFAULT_TIMEOUT_SECONDS)
@@ -196,6 +210,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                 timeout=gateway_timeout,
                 on_event=persist_event,
             )
+            core.merge_run_status(run_dir, {"phase": "transport_ready"})
             core.merge_run_status(run_dir, {"phase": "session_creating"})
             execution = request.get("effective_execution") or {}
             agent_init_timeout = min(
@@ -221,6 +236,11 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             core.merge_run_status(run_dir, {
                 "ui_child_session_id": ui_session_id,
                 "child_session_id": child_session_id,
+                "phase": "session_ready",
+            })
+            core.merge_run_status(run_dir, {
+                "ui_child_session_id": ui_session_id,
+                "child_session_id": child_session_id,
                 "phase": "agent_initializing",
             })
             prompt = (run_dir / "prompt.txt").read_text(encoding="utf-8")
@@ -242,12 +262,9 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                     except Exception:
                         pass
                     break
-                try:
-                    frame = client.read_frame(min(0.15, remaining))
-                except tui_rpc.TuiTransportError as exc:
-                    if "timed out" in str(exc):
-                        continue
-                    raise
+                frame = _poll_event(client, min(0.15, remaining), journal)
+                if frame is None:
+                    continue
                 if frame.get("method") != "event":
                     raise tui_rpc.TuiProtocolError(
                         f"unexpected idle response id {frame.get('id')!r}"

@@ -16,6 +16,7 @@ if str(PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(PLUGIN_DIR))
 
 import cli
+import event_journal
 import spectator
 
 TASK_ID = "pd_20260721_085059_dzk2o9"
@@ -184,6 +185,83 @@ def test_inspect_frozen_opt_in_exposes_bounded_assistant_result_fields(tmp_path)
     assert result["artifacts"] == ["/private/artifact"]
     assert result["errors"] == ["assistant error"]
     assert result["next_steps"] == ["assistant next step"]
+
+
+@pytest.mark.parametrize(
+    ("artifact", "field", "bad_value"),
+    [
+        *(
+            ("status.json", field, bad_value)
+            for field, bad_value in {
+                "task_id": [TASK_ID], "status": ["completed"], "phase": {"name": "completed"},
+                "created_at": [], "started_at": {}, "ended_at": [], "delegated_profile": {},
+                "profile": ["reviewer"], "model": {}, "provider": [], "turn_count": "1",
+                "api_calls": {}, "tool_calls": [], "usage": {"input": "one"},
+                "event_seq": "1", "event_schema_version": [], "event_stream_truncated": 1,
+                "observability_degraded": "false", "error_code": {"secret": "nested"},
+                "child_session_id": [], "worker_pid": "123",
+            }.items()
+        ),
+        *(
+            ("result.json", field, bad_value)
+            for field, bad_value in {
+                "status": ["ok"], "error_code": {"secret": "nested"},
+                "session_id": ["child"], "summary": {},
+                "artifacts": ["ok", {"secret": "nested"}], "errors": {},
+                "next_steps": [1],
+            }.items()
+        ),
+    ],
+)
+def test_inspect_rejects_wrong_typed_surfaced_status_and_result_fields(
+    tmp_path, artifact, field, bad_value,
+):
+    run = _write_fixture(tmp_path, events=[], persist_message_text=True)
+    path = run / artifact
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value[field] = bad_value
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(spectator.SpectatorError) as exc:
+        spectator.inspect_run(run)
+    assert exc.value.exit_code == 4
+
+
+@pytest.mark.parametrize("artifact", ["status.json", "events.jsonl"])
+def test_inspect_rejects_artifact_task_identity_mismatch(tmp_path, artifact):
+    run = _write_fixture(tmp_path, events=[_event(1)])
+    path = run / artifact
+    if artifact == "status.json":
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["task_id"] = "pd_20260721_085059_other1"
+        path.write_text(json.dumps(value), encoding="utf-8")
+    else:
+        item = _event(1)
+        item["task_id"] = "pd_20260721_085059_other1"
+        path.write_text(json.dumps(item) + "\n", encoding="utf-8")
+    with pytest.raises(spectator.SpectatorError) as exc:
+        spectator.inspect_run(run)
+    assert exc.value.exit_code == 4
+
+
+@pytest.mark.parametrize("size", [8192, 8193, 32768])
+def test_event_journal_message_text_boundaries_roundtrip_through_spectator(tmp_path, size):
+    run = tmp_path / TASK_ID
+    journal = event_journal.EventJournal(
+        run, task_id=TASK_ID, ui_session_id="ui-1", persist_message_text=True,
+        max_record_bytes=65536,
+    )
+    assert journal.ingest({
+        "method": "event",
+        "params": {
+            "type": "message.complete", "session_id": "ui-1",
+            "payload": {"message_id": "m1", "status": "complete", "text": "x" * size},
+        },
+    })
+    journal.close()
+    events = list(spectator.iter_events(
+        run / "events.jsonl", allow_message_text=True, expected_task_id=TASK_ID,
+    ))
+    assert len(events[0]["payload"]["text"]) == size
 
 
 def test_inspect_legacy_run_is_clearly_limited(tmp_path):

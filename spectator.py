@@ -15,13 +15,24 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, TextIO
 
+try:
+    from .event_schema import (
+        EVENT_IDENTIFIER_MAX_CHARS, EVENT_JOURNAL_MAX_BYTES, EVENT_MESSAGE_MAX_CHARS,
+        EVENT_METADATA_MAX_CHARS, EVENT_SCHEMA_VERSION, EVENT_TIMESTAMP_MAX_CHARS,
+    )
+except ImportError:
+    from event_schema import (  # type: ignore[no-redef]
+        EVENT_IDENTIFIER_MAX_CHARS, EVENT_JOURNAL_MAX_BYTES, EVENT_MESSAGE_MAX_CHARS,
+        EVENT_METADATA_MAX_CHARS, EVENT_SCHEMA_VERSION, EVENT_TIMESTAMP_MAX_CHARS,
+    )
+
 TASK_ID_RE = re.compile(r"pd_\d{8}_\d{6}_[a-z0-9]{6,12}\Z")
 TERMINAL = {"completed", "failed", "cancelled", "timed_out"}
 FAILED = {"failed", "cancelled", "timed_out"}
 READABLE_ARTIFACTS = {"status.json", "events.jsonl", "result.json", "request.json"}
 MAX_JSON_BYTES = 262_144
 MAX_INSPECT_EVENTS = 100
-MAX_TEXT_CHARS = 8_192
+MAX_TEXT_CHARS = EVENT_MESSAGE_MAX_CHARS
 TTY_EVENT_RING = 20
 VALID_STATUSES = {"running", "cancelling"} | TERMINAL
 VALID_PHASES = {
@@ -177,14 +188,20 @@ def _valid_usage(value: Any) -> bool:
     )
 
 
-def _validate_event(item: Any, *, allow_message_text: bool) -> Dict[str, Any]:
+def _validate_event(
+    item: Any, *, allow_message_text: bool, expected_task_id: str = "",
+) -> Dict[str, Any]:
     if not isinstance(item, dict) or set(item) != COMMON_EVENT_KEYS:
         raise SpectatorError("corrupt events.jsonl record schema", 4)
-    if item.get("schema_version") != 1 or not isinstance(item.get("seq"), int) or item["seq"] < 1:
+    if item.get("schema_version") != EVENT_SCHEMA_VERSION or not isinstance(item.get("seq"), int) or item["seq"] < 1:
         raise SpectatorError("corrupt events.jsonl common fields", 4)
-    if not isinstance(item.get("task_id"), str) or len(item["task_id"]) > 128:
+    if (
+        not isinstance(item.get("task_id"), str)
+        or len(item["task_id"]) > EVENT_IDENTIFIER_MAX_CHARS
+        or (expected_task_id and item["task_id"] != expected_task_id)
+    ):
         raise SpectatorError("corrupt events.jsonl task identity", 4)
-    if not isinstance(item.get("at"), str) or len(item["at"]) > 64:
+    if not isinstance(item.get("at"), str) or len(item["at"]) > EVENT_TIMESTAMP_MAX_CHARS:
         raise SpectatorError("corrupt events.jsonl timestamp", 4)
     if item.get("phase") not in VALID_PHASES or not isinstance(item.get("redacted"), bool):
         raise SpectatorError("corrupt events.jsonl phase/redaction metadata", 4)
@@ -210,7 +227,9 @@ def _validate_event(item: Any, *, allow_message_text: bool) -> Dict[str, Any]:
         elif key == "dropped_after_seq":
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise SpectatorError("corrupt events.jsonl truncation sequence", 4)
-        elif not isinstance(value, str) or len(value) > MAX_TEXT_CHARS:
+        elif not isinstance(value, str) or len(value) > (
+            EVENT_MESSAGE_MAX_CHARS if key == "text" else EVENT_METADATA_MAX_CHARS
+        ):
             raise SpectatorError("corrupt events.jsonl bounded string", 4)
     if "role" in payload and payload["role"] != "assistant":
         raise SpectatorError("corrupt events.jsonl message role", 4)
@@ -231,14 +250,15 @@ def _validate_event(item: Any, *, allow_message_text: bool) -> Dict[str, Any]:
 
 def iter_events(
     path: Path, *, after_seq: int = 0, allow_message_text: bool = False,
+    expected_task_id: str = "",
 ) -> Iterator[Dict[str, Any]]:
     """Yield complete, exactly validated JSONL records newer than ``after_seq``."""
     try:
         with path.open("rb") as handle:
-            raw = handle.read(1_048_577)
+            raw = handle.read(EVENT_JOURNAL_MAX_BYTES + 1)
     except OSError as exc:
         raise SpectatorError(f"cannot read events.jsonl: {exc}", 4) from None
-    if len(raw) > 1_048_576:
+    if len(raw) > EVENT_JOURNAL_MAX_BYTES:
         raise SpectatorError("events.jsonl exceeds spectator bound", 4)
     complete = raw if raw.endswith(b"\n") else raw.rsplit(b"\n", 1)[0] + (b"\n" if b"\n" in raw else b"")
     for line in complete.splitlines():
@@ -248,18 +268,87 @@ def iter_events(
             item = json.loads(line.decode("utf-8"))
         except (UnicodeError, json.JSONDecodeError) as exc:
             raise SpectatorError(f"corrupt complete events.jsonl record: {exc}", 4) from None
-        validated = _validate_event(item, allow_message_text=allow_message_text)
+        validated = _validate_event(
+            item, allow_message_text=allow_message_text, expected_task_id=expected_task_id,
+        )
         if validated["seq"] > after_seq:
             yield validated
 
 
-def _validate_status(status: Dict[str, Any]) -> Dict[str, Any]:
-    if status.get("status") not in VALID_STATUSES:
+def _bounded_string(value: Any, limit: int, *, nullable: bool = False) -> bool:
+    return (nullable and value is None) or (isinstance(value, str) and len(value) <= limit)
+
+
+def _bounded_counter(value: Any, *, nullable: bool = False) -> bool:
+    return (nullable and value is None) or (
+        isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    )
+
+
+def _validate_status(status: Dict[str, Any], *, expected_task_id: str = "") -> Dict[str, Any]:
+    status_name = status.get("status")
+    if not isinstance(status_name, str) or status_name not in VALID_STATUSES:
         raise SpectatorError("corrupt status.json: missing or unknown status", 4)
     phase = status.get("phase")
-    if phase is not None and phase not in VALID_PHASES:
+    if phase is not None and (not isinstance(phase, str) or phase not in VALID_PHASES):
         raise SpectatorError("corrupt status.json: unknown phase", 4)
+    task_id = status.get("task_id")
+    if not _bounded_string(task_id, EVENT_IDENTIFIER_MAX_CHARS) or (
+        expected_task_id and task_id != expected_task_id
+    ):
+        raise SpectatorError("corrupt status.json: task identity mismatch", 4)
+    string_fields = {
+        "created_at": EVENT_TIMESTAMP_MAX_CHARS, "started_at": EVENT_TIMESTAMP_MAX_CHARS,
+        "ended_at": EVENT_TIMESTAMP_MAX_CHARS, "delegated_profile": EVENT_METADATA_MAX_CHARS,
+        "profile": EVENT_METADATA_MAX_CHARS, "model": EVENT_METADATA_MAX_CHARS,
+        "provider": EVENT_METADATA_MAX_CHARS, "error_code": EVENT_IDENTIFIER_MAX_CHARS,
+        "child_session_id": EVENT_IDENTIFIER_MAX_CHARS,
+    }
+    nullable_strings = {"ended_at", "error_code", "child_session_id"}
+    for key, limit in string_fields.items():
+        if key in status and not _bounded_string(
+            status[key], limit, nullable=key in nullable_strings,
+        ):
+            raise SpectatorError(f"corrupt status.json: invalid {key}", 4)
+    for key in ("turn_count", "api_calls", "tool_calls", "event_seq", "event_schema_version", "worker_pid"):
+        if key in status and not _bounded_counter(
+            status[key], nullable=key in {"api_calls", "worker_pid"},
+        ):
+            raise SpectatorError(f"corrupt status.json: invalid {key}", 4)
+    for key in ("event_stream_truncated", "observability_degraded"):
+        if key in status and not isinstance(status[key], bool):
+            raise SpectatorError(f"corrupt status.json: invalid {key}", 4)
+    if "usage" in status and not _valid_usage(status["usage"]):
+        raise SpectatorError("corrupt status.json: invalid usage", 4)
     return status
+
+
+def _validate_result(result: Dict[str, Any], *, expected_task_id: str = "") -> Dict[str, Any]:
+    if "task_id" in result and (
+        not _bounded_string(result["task_id"], EVENT_IDENTIFIER_MAX_CHARS)
+        or result["task_id"] != expected_task_id
+    ):
+        raise SpectatorError("corrupt result.json: task identity mismatch", 4)
+    if "status" in result and (
+        not _bounded_string(result["status"], 32)
+        or result["status"] not in {"ok", "blocked", "failed", "completed", "cancelled", "timed_out"}
+    ):
+        raise SpectatorError("corrupt result.json: invalid status", 4)
+    for key in ("error_code", "session_id"):
+        if key in result and not _bounded_string(
+            result[key], EVENT_IDENTIFIER_MAX_CHARS, nullable=key == "error_code",
+        ):
+            raise SpectatorError(f"corrupt result.json: invalid {key}", 4)
+    if "summary" in result and not _bounded_string(result["summary"], EVENT_MESSAGE_MAX_CHARS):
+        raise SpectatorError("corrupt result.json: invalid summary", 4)
+    for key in ("artifacts", "errors", "next_steps"):
+        if key in result:
+            value = result[key]
+            if not isinstance(value, list) or len(value) > 100 or any(
+                not _bounded_string(item, EVENT_MESSAGE_MAX_CHARS) for item in value
+            ):
+                raise SpectatorError(f"corrupt result.json: invalid {key}", 4)
+    return result
 
 
 def _message_text_opt_in(run_dir: Path) -> bool:
@@ -277,12 +366,16 @@ def inspect_run(run_dir: Path) -> Dict[str, Any]:
     """Return one bounded, machine-readable snapshot from allowed artifacts."""
     status_path = _artifact(run_dir, "status.json", required=True)
     assert status_path is not None
-    status = _validate_status(_read_json(status_path))
+    status = _validate_status(_read_json(status_path), expected_task_id=run_dir.name)
     allow_message_text = _message_text_opt_in(run_dir)
     events_path = _artifact(run_dir, "events.jsonl")
     result_path = _artifact(run_dir, "result.json")
-    events = list(iter_events(events_path, allow_message_text=allow_message_text))[-MAX_INSPECT_EVENTS:] if events_path else []
-    result = _read_json(result_path) if result_path else None
+    events = list(iter_events(
+        events_path, allow_message_text=allow_message_text, expected_task_id=run_dir.name,
+    ))[-MAX_INSPECT_EVENTS:] if events_path else []
+    result = _validate_result(
+        _read_json(result_path), expected_task_id=run_dir.name,
+    ) if result_path else None
     allowed_status = {
         "task_id", "status", "phase", "created_at", "started_at", "ended_at",
         "delegated_profile", "profile", "model", "provider", "turn_count", "api_calls",
@@ -290,7 +383,7 @@ def inspect_run(run_dir: Path) -> Dict[str, Any]:
         "observability_degraded", "error_code", "child_session_id", "worker_pid",
     }
     snapshot: Dict[str, Any] = {key: status[key] for key in allowed_status if key in status}
-    snapshot["task_id"] = str(snapshot.get("task_id") or run_dir.name)
+    snapshot["task_id"] = status["task_id"]
     snapshot["limited_observability"] = events_path is None
     if events_path is None:
         snapshot["observation_note"] = "limited observability: legacy run has no events.jsonl"
@@ -306,7 +399,7 @@ def inspect_run(run_dir: Path) -> Dict[str, Any]:
 def _status(run_dir: Path) -> Dict[str, Any]:
     path = _artifact(run_dir, "status.json", required=True)
     assert path is not None
-    return _validate_status(_read_json(path))
+    return _validate_status(_read_json(path), expected_task_id=run_dir.name)
 
 
 def _pid_alive(pid: Any) -> bool:
@@ -399,6 +492,7 @@ def watch_run(
             if events_path is not None:
                 for event in iter_events(
                     events_path, after_seq=last_seq, allow_message_text=allow_message_text,
+                    expected_task_id=run_dir.name,
                 ):
                     last_seq = max(last_seq, int(event["seq"]))
                     event_ring.append(event)

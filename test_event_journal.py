@@ -280,7 +280,42 @@ def test_second_writer_refreshes_sequence_and_cap_state_under_lock(tmp_path):
     first.close()
     second.close()
     saved = records(tmp_path / "events.jsonl")
-    assert [item["seq"] for item in saved] == [1, 2]
+    assert [item["seq"] for item in saved] == [1, 2, 3]
+    assert sum(item["type"] == "journal.truncated" for item in saved) == 1
+
+
+def test_two_writers_exact_cap_emit_one_marker_and_keep_terminal_reserve(tmp_path):
+    kwargs = {
+        "task_id": "pd_test", "ui_session_id": "ui-1", "max_events": 2,
+        "max_bytes": 4096, "terminal_reserve_bytes": 1024,
+    }
+    first = EventJournal(tmp_path, **kwargs)
+    second = EventJournal(tmp_path, **kwargs)
+    assert first.ingest(frame("tool.start", {"tool_id": "one", "name": "terminal"}))
+    assert second.ingest(frame("tool.start", {"tool_id": "two", "name": "terminal"}))
+    assert not first.ingest(frame("tool.start", {"tool_id": "three", "name": "terminal"}))
+    assert not second.ingest(frame("tool.start", {"tool_id": "four", "name": "terminal"}))
+    assert first.finalize("completed", child_session_id="child")
+    second.close()
+    saved = records(tmp_path / "events.jsonl")
+    assert [item["type"] for item in saved] == [
+        "tool.start", "tool.start", "journal.truncated", "terminal",
+    ]
+    assert [item["seq"] for item in saved] == [1, 2, 3, 4]
+
+
+def test_message_id_transition_force_flushes_identity_order_and_split_secret(tmp_path):
+    journal = EventJournal(
+        tmp_path, task_id="pd_test", ui_session_id="ui-1", persist_message_text=True,
+        flush_interval_s=60, coalesce_chars=4096,
+    )
+    journal.ingest(frame("message.delta", {"message_id": "m1", "text": "tok"}))
+    journal.ingest(frame("message.delta", {"message_id": "m2", "text": "en=obvious-secret"}))
+    journal.close()
+    saved = [item for item in records(tmp_path / "events.jsonl") if item["type"] == "message.delta"]
+    assert [item["payload"]["message_id"] for item in saved] == ["m1", "m2"]
+    assert "".join(item["payload"]["text"] for item in saved).find("obvious-secret") == -1
+    assert "[REDACTED]" in saved[1]["payload"]["text"]
 
 
 def test_recovery_reads_only_bounded_tail_for_last_record(tmp_path, monkeypatch):

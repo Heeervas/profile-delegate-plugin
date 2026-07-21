@@ -15,7 +15,18 @@ try:
 except Exception:  # pragma: no cover - fail closed on unsupported platforms
     fcntl = None  # type: ignore[assignment]
 
-SCHEMA_VERSION = 1
+try:
+    from .event_schema import (
+        EVENT_JOURNAL_MAX_BYTES, EVENT_MESSAGE_MAX_CHARS, EVENT_METADATA_MAX_CHARS,
+        EVENT_RECORD_MAX_BYTES, EVENT_SCHEMA_VERSION, EVENT_TEXT_FRAGMENT_MAX_CHARS,
+    )
+except ImportError:
+    from event_schema import (  # type: ignore[no-redef]
+        EVENT_JOURNAL_MAX_BYTES, EVENT_MESSAGE_MAX_CHARS, EVENT_METADATA_MAX_CHARS,
+        EVENT_RECORD_MAX_BYTES, EVENT_SCHEMA_VERSION, EVENT_TEXT_FRAGMENT_MAX_CHARS,
+    )
+
+SCHEMA_VERSION = EVENT_SCHEMA_VERSION
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
 LIFECYCLE_STATUSES = TERMINAL_STATUSES | {"running", "cancelling"}
 KNOWN_PHASES = {
@@ -90,10 +101,11 @@ class EventJournal:
 
     def __init__(
         self, run_dir: Path, *, task_id: str = "", ui_session_id: str = "",
-        persist_message_text: bool = False, max_bytes: int = 1_048_576,
+        persist_message_text: bool = False, max_bytes: int = EVENT_JOURNAL_MAX_BYTES,
         terminal_reserve_bytes: int = 4_096, max_events: int = 10_000,
-        max_record_bytes: int = 16_384, max_text_fragment_chars: int = 2_048,
-        max_message_chars: int = 32_768, flush_interval_s: float = 0.1,
+        max_record_bytes: int = EVENT_RECORD_MAX_BYTES,
+        max_text_fragment_chars: int = EVENT_TEXT_FRAGMENT_MAX_CHARS,
+        max_message_chars: int = EVENT_MESSAGE_MAX_CHARS, flush_interval_s: float = 0.1,
         coalesce_chars: int = 4_096, max_pre_session_events: int = 32,
         max_pre_session_bytes: int = 65_536,
     ) -> None:
@@ -183,6 +195,11 @@ class EventJournal:
 
     def _recover_locked(self) -> None:
         assert self.fd is not None
+        self.seq = 0
+        self.event_count = 0
+        self.bytes_written = 0
+        self.truncated = False
+        self.truncation_marker_written = False
         size = os.fstat(self.fd).st_size
         self.bytes_written = size
         if size == 0:
@@ -212,7 +229,9 @@ class EventJournal:
             if seqs != list(range(1, len(seqs) + 1)):
                 raise ValueError("invalid sequence")
             self.seq = seqs[-1]
-            self.event_count = len(parsed)
+            self.event_count = sum(
+                item["type"] not in {"journal.truncated", "terminal"} for item in parsed
+            )
             self.truncation_marker_written = any(item["type"] == "journal.truncated" for item in parsed)
             self.truncated = self.truncation_marker_written
         except Exception:
@@ -288,7 +307,7 @@ class EventJournal:
             if not fragment:
                 return None
             if self.pending_message_id and self.pending_message_id != message_id:
-                self.flush()
+                self.flush(force=True)
             self.pending_message_id = message_id
             self.pending_text = (self.pending_text + fragment)[:self.max_message_chars]
             self.pending_started = self.pending_started or time.monotonic()
@@ -341,7 +360,7 @@ class EventJournal:
             allowed = {}
             for key in ("profile", "model", "provider"):
                 source_key = "profile_name" if key == "profile" else key
-                value = _bounded(payload.get(source_key), 200)
+                value = _bounded(payload.get(source_key), EVENT_METADATA_MAX_CHARS)
                 if value:
                     allowed[key] = value
                     setattr(self, key, value)
@@ -429,66 +448,84 @@ class EventJournal:
     def _append_projected(self, projected: Dict[str, Any], *, terminal: bool = False, internal: bool = False) -> bool:
         if self.disabled or self.fd is None or self.lock_fd is None:
             return False
-        if self.truncated and not terminal:
-            return False
-        encoded = self._record_bytes(projected, self.seq + 1)
-        if len(encoded) > self.max_record_bytes:
-            projected = {"type": "event.dropped", "phase": self.phase, "payload": {"reason": "record_too_large"}, "redacted": False, "dropped_fields": []}
-            encoded = self._record_bytes(projected, self.seq + 1)
-            if len(encoded) > self.max_record_bytes:
-                self._degrade("minimal_record_too_large")
-                return False
-        ordinary_limit = self.max_bytes - self.terminal_reserve_bytes
-        counted = not terminal and projected["type"] != "journal.truncated"
-        exceeds = (counted and self.event_count >= self.max_events) or self.bytes_written + len(encoded) > (self.max_bytes if terminal else ordinary_limit)
-        if exceeds and not terminal:
-            if internal:
-                self.truncated = True
-                return False
-            self._truncate("limit")
-            return False
-        if exceeds:
-            self._degrade("terminal_reserve_exhausted")
-            return False
+        assert fcntl is not None
         try:
-            self._write_bytes(encoded, terminal=terminal)
-            return True
+            fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
+            try:
+                self._recover_locked()
+                if self.disabled or (self.truncated and not terminal):
+                    return False
+                encoded = self._record_bytes(projected, self.seq + 1)
+                if len(encoded) > self.max_record_bytes:
+                    projected = {
+                        "type": "event.dropped", "phase": self.phase,
+                        "payload": {"reason": "record_too_large"}, "redacted": False,
+                        "dropped_fields": [],
+                    }
+                    encoded = self._record_bytes(projected, self.seq + 1)
+                    if len(encoded) > self.max_record_bytes:
+                        self._degrade("minimal_record_too_large")
+                        return False
+                counted = not terminal and projected["type"] != "journal.truncated"
+                ordinary_limit = self.max_bytes - self.terminal_reserve_bytes
+                exceeds = (
+                    (counted and self.event_count >= self.max_events)
+                    or self.bytes_written + len(encoded) > (
+                        self.max_bytes if terminal else ordinary_limit
+                    )
+                )
+                if exceeds and not terminal:
+                    self._truncate_locked("limit")
+                    return False
+                if exceeds:
+                    self._degrade("terminal_reserve_exhausted")
+                    return False
+                self._write_bytes(encoded)
+                self.seq += 1
+                self.event_count += 1 if counted else 0
+                self.bytes_written += len(encoded)
+                return True
+            finally:
+                fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
         except Exception as exc:
             self._degrade(f"write:{type(exc).__name__}")
             return False
 
-    def _write_bytes(self, data: bytes, *, terminal: bool = False) -> None:
-        assert self.fd is not None and self.lock_fd is not None and fcntl is not None
-        fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
-        try:
-            self._recover_locked()
-            projected = json.loads(data)
-            data = self._record_bytes(
-                {key: projected[key] for key in ("type", "phase", "payload", "redacted", "dropped_fields")},
-                self.seq + 1,
-            )
-            ordinary_limit = self.max_bytes - self.terminal_reserve_bytes
-            counted = not terminal and projected["type"] != "journal.truncated"
-            if (counted and self.event_count >= self.max_events) or self.bytes_written + len(data) > (self.max_bytes if terminal else ordinary_limit):
-                raise OverflowError("journal limit reached")
-            written = os.write(self.fd, data)
-            if written != len(data):
-                raise OSError("short journal write")
-            self.seq += 1
-            self.event_count += 1 if counted else 0
-            self.bytes_written += len(data)
-        finally:
-            fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+    def _write_bytes(self, data: bytes) -> None:
+        """Write one record while the caller holds ``events.lock``."""
+        assert self.fd is not None
+        written = os.write(self.fd, data)
+        if written != len(data):
+            raise OSError("short journal write")
 
     def _truncate(self, reason: str) -> None:
-        if self.truncated:
+        if self.disabled or self.fd is None or self.lock_fd is None or fcntl is None:
             return
-        self.truncated = True
+        try:
+            fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
+            try:
+                self._recover_locked()
+                self._truncate_locked(reason)
+            finally:
+                fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+        except Exception as exc:
+            self._degrade(f"truncate:{type(exc).__name__}")
+
+    def _truncate_locked(self, reason: str) -> None:
+        """Append the unique marker while the caller holds ``events.lock``."""
         if self.truncation_marker_written:
+            self.truncated = True
             return
-        marker = {"type": "journal.truncated", "phase": self.phase, "payload": {"reason": _bounded(reason, 64), "dropped_after_seq": self.seq}, "redacted": False, "dropped_fields": []}
-        self.truncated = False
-        if self._append_projected(marker, internal=True):
+        marker = {
+            "type": "journal.truncated", "phase": self.phase,
+            "payload": {"reason": _bounded(reason, 64), "dropped_after_seq": self.seq},
+            "redacted": False, "dropped_fields": [],
+        }
+        encoded = self._record_bytes(marker, self.seq + 1)
+        if len(encoded) <= self.max_record_bytes and self.bytes_written + len(encoded) <= self.max_bytes:
+            self._write_bytes(encoded)
+            self.seq += 1
+            self.bytes_written += len(encoded)
             self.truncation_marker_written = True
         self.truncated = True
 
