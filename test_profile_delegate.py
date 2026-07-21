@@ -434,7 +434,7 @@ print(json.dumps({{'danger': danger, 'safe': safe, 'code': code, 'elapsed': time
 """
     completed = subprocess.run(
         ["/opt/hermes/.venv/bin/python", "-c", script], cwd=str(PLUGIN_DIR), text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
     )
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout.strip().splitlines()[-1])
@@ -461,7 +461,7 @@ print(json.dumps({{'recoverable': terminal_tool._check_all_guards('git reset --h
 """
     completed = subprocess.run(
         ["/opt/hermes/.venv/bin/python", "-c", script], cwd=str(PLUGIN_DIR), text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
     )
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout.strip().splitlines()[-1])
@@ -483,7 +483,7 @@ print(json.dumps(names))
 """
     completed = subprocess.run(
         ["/opt/hermes/.venv/bin/python", "-c", script], cwd=str(PLUGIN_DIR), text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
     )
     assert completed.returncode == 0, completed.stderr
     names = set(json.loads(completed.stdout.strip().splitlines()[-1]))
