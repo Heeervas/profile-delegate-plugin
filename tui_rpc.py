@@ -260,27 +260,6 @@ def interrupt(client: Any, session_id: str, *, on_event: Optional[Callable[[dict
     return client.call("session.interrupt", {"session_id": session_id}, timeout=15, on_event=on_event)
 
 
-def reduce_event(frame: dict[str, Any]) -> dict[str, Any]:
-    params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
-    event_type = str(params.get("type") or "unknown")
-    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-    phase_by_type = {
-        "gateway.ready": "transport_ready", "message.start": "model_running",
-        "message.delta": "model_running", "tool.start": "tool_running",
-        "tool.complete": "model_running", "approval.request": "approval_waiting",
-        "message.complete": "message_complete", "error": "error",
-        "session.info": "session_ready",
-    }
-    latest: dict[str, Any] = {"kind": event_type, "at": utc_now()}
-    if event_type in {"tool.start", "tool.complete"}:
-        tool = payload.get("name") or payload.get("tool") or payload.get("tool_name")
-        if tool:
-            latest["tool"] = str(tool)[:120]
-    if event_type == "message.complete" and payload.get("status"):
-        latest["status"] = str(payload.get("status"))[:40]
-    return {"phase": phase_by_type.get(event_type, "running"), "latest_activity": latest}
-
-
 def wait_for_completion(events: queue.Queue[dict], session_id: str, *, timeout: float,
                         poll: Optional[Callable[[], None]] = None) -> dict[str, Any]:
     deadline = time.monotonic() + timeout

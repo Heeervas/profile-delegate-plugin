@@ -8,9 +8,11 @@ from typing import Any, Dict, Optional
 try:
     from . import tui_rpc
     from . import core
+    from .event_journal import EventJournal
 except ImportError:
     import tui_rpc  # type: ignore[no-redef]
     import core  # type: ignore[no-redef]
+    from event_journal import EventJournal  # type: ignore[no-redef]
 
 
 def _environment(request: Dict[str, Any], run_dir: Path) -> Dict[str, str]:
@@ -84,6 +86,22 @@ def execute(run_dir: Path) -> Dict[str, Any]:
     final_status = "failed"
     error_code: Optional[str] = None
     exit_code: Optional[int] = None
+    journal = EventJournal(
+        run_dir, task_id=core.ensure_text(request.get("task_id") or run_dir.name),
+        persist_message_text=bool(request.get("persist_message_text", False)),
+    )
+    last_snapshot = 0.0
+
+    def merge_status(updates: Dict[str, Any], *, force: bool = False, terminal: bool = False) -> None:
+        nonlocal last_snapshot
+        now = time.monotonic()
+        if not force and now - last_snapshot < 0.5:
+            return
+        try:
+            core.merge_run_status(run_dir, updates, terminal=terminal)
+            last_snapshot = now
+        except Exception:
+            pass
 
     def persist_event(frame: Dict[str, Any]) -> None:
         nonlocal final_text, message_status, terminal_event
@@ -91,11 +109,11 @@ def execute(run_dir: Path) -> Dict[str, Any]:
         event_sid = params.get("session_id")
         if event_sid and ui_session_id and event_sid != ui_session_id:
             return
-        reduced = tui_rpc.reduce_event(frame)
-        current = core.read_json_file(run_dir / "status.json")
-        if core.ensure_text(current.get("status")).lower() not in core.TERMINAL_RUN_STATUSES:
-            current.update(reduced)
-            core.json_safe_write(run_dir / "status.json", current)
+        try:
+            journal.ingest(frame)
+            merge_status(journal.snapshot_fields())
+        except Exception:
+            merge_status({"observability_degraded": True}, force=True)
         if params.get("type") == "message.complete" and event_sid == ui_session_id:
             payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
             final_text = core.ensure_text(payload.get("text"))
@@ -185,6 +203,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             )
             ui_session_id = identities["ui_session_id"]
             child_session_id = identities["child_session_id"]
+            journal.set_session(ui_session_id)
             status = core.read_json_file(run_dir / "status.json")
             status.update(
                 {
@@ -291,21 +310,22 @@ def execute(run_dir: Path) -> Dict[str, Any]:
         }
     )
     core.json_safe_write(run_dir / "result.json", result)
-    status = core.read_json_file(run_dir / "status.json")
-    if core.ensure_text(status.get("status")).lower() not in core.TERMINAL_RUN_STATUSES:
-        status.update(
-            {
-                "status": final_status,
-                "phase": final_status,
-                "ended_at": core.now_iso(),
-                "exit_code": exit_code,
-                "timed_out": timed_out,
-                "error_code": error_code,
-                "child_session_id": child_session_id,
-                "transport_alive": False,
-            }
-        )
-        core.json_safe_write(run_dir / "status.json", status)
+    terminal_updates = {
+        "status": final_status,
+        "phase": final_status,
+        "ended_at": core.now_iso(),
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "error_code": error_code,
+        "child_session_id": child_session_id,
+        "transport_alive": False,
+    }
+    merge_status({**terminal_updates, **journal.snapshot_fields()}, force=True, terminal=True)
+    try:
+        journal.finalize(final_status, error_code=error_code, child_session_id=child_session_id)
+        merge_status(journal.snapshot_fields(), force=True)
+    except Exception:
+        merge_status({"observability_degraded": True}, force=True)
     return {
         "success": final_status == "completed" and result.get("status") != "failed",
         "mode": "async",

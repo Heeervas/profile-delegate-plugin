@@ -10,6 +10,7 @@ import shutil
 import string
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -303,6 +304,41 @@ def json_safe_write(path: Path, data: Any) -> None:
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     chmod_best_effort(tmp, 0o600)
     tmp.replace(path)
+
+
+def merge_run_status(run_dir: Path, updates: Dict[str, Any], *, terminal: bool = False) -> Dict[str, Any]:
+    """Merge status under a per-run lock while keeping terminal state immutable."""
+    if fcntl is None:
+        raise ProfileDelegateError("status locking is unavailable", "status_lock_unavailable")
+    lock_path = run_dir / "status.lock"
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ProfileDelegateError("unsafe status lock", "status_lock_unsafe")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            try:
+                current = read_json_file(run_dir / "status.json")
+            except ProfileDelegateError:
+                current = {"task_id": run_dir.name}
+            existing = ensure_text(current.get("status")).lower()
+            requested = ensure_text(updates.get("status")).lower()
+            if existing in TERMINAL_RUN_STATUSES and requested and requested != existing:
+                updates = {key: value for key, value in updates.items() if key != "status"}
+            if terminal and existing not in TERMINAL_RUN_STATUSES and requested not in TERMINAL_RUN_STATUSES:
+                raise ProfileDelegateError("terminal update requires terminal state", "invalid_terminal_status")
+            current.update(updates)
+            json_safe_write(run_dir / "status.json", current)
+            return current
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def read_json_file(path: Path) -> Dict[str, Any]:
@@ -1417,6 +1453,7 @@ def base_paths(run_dir: Path) -> Dict[str, str]:
         "run_dir": str(run_dir),
         "request": str(run_dir / "request.json"),
         "status": str(run_dir / "status.json"),
+        "events": str(run_dir / "events.jsonl"),
         "prompt": str(run_dir / "prompt.txt"),
         "stdout": str(run_dir / "stdout.txt"),
         "stderr": str(run_dir / "stderr.txt"),
@@ -2085,6 +2122,7 @@ def delegate_profile(
             "capability_preset": effective_capabilities["preset"], "effective_capabilities": effective_capabilities,
             "requested_execution": requested_execution, "effective_execution": effective_execution,
             "reasoning_mode": reasoning_mode_value, "background": bool(background),
+            "persist_message_text": ensure_text(os.getenv("PROFILE_DELEGATE_PERSIST_MESSAGE_TEXT", "")).strip().lower() in TRUTHY,
             "notify_on_complete": bool(notify_on_complete), "origin": normalized_origin,
             "origin_session_key": normalized_origin_session_key, "request_fingerprint": fingerprint,
             "owner_pid": os.getpid(), "effective_policy": profile_delegate_policy(policy),

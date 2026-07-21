@@ -101,19 +101,10 @@ def test_rpc_reports_eof_and_caps_diagnostics():
     assert client.stderr_tail == "x" * 12
 
 
-def test_reduce_event_omits_sensitive_payload():
-    reduced = tui_rpc.reduce_event({
-        "jsonrpc": "2.0", "method": "event",
-        "params": {
-            "type": "tool.start", "session_id": "ui-1",
-            "payload": {"name": "terminal", "arguments": {"command": "secret"}, "text": "secret"},
-        },
-    })
-    assert reduced["phase"] == "tool_running"
-    assert reduced["latest_activity"]["kind"] == "tool.start"
-    assert reduced["latest_activity"]["tool"] == "terminal"
-    assert "arguments" not in json.dumps(reduced)
-    assert "secret" not in json.dumps(reduced)
+def test_rpc_transport_has_no_projection_or_sanitization_policy():
+    source = Path(tui_rpc.__file__).read_text(encoding="utf-8")
+    assert "def reduce_event" not in source
+    assert "EventJournal" not in source
 
 
 def test_session_flow_uses_create_resume_submit_and_native_controls():

@@ -1506,6 +1506,35 @@ def test_status_enriches_origin_ownership_worker_and_notification_without_mutati
     assert (run_dir / "status.json").read_bytes() == before
 
 
+def test_status_lock_merge_preserves_fields_and_terminal_is_immutable(tmp_path):
+    run_dir = tmp_path / "pd_20260717_100001_aaaaaa"
+    run_dir.mkdir()
+    core.json_safe_write(run_dir / "status.json", {"task_id": run_dir.name, "status": "running", "worker_pid": 12})
+    core.merge_run_status(run_dir, {"phase": "model_running", "event_seq": 3})
+    completed = core.merge_run_status(run_dir, {"status": "completed", "ended_at": "now"}, terminal=True)
+    assert completed["worker_pid"] == 12 and completed["event_seq"] == 3
+    after = core.merge_run_status(run_dir, {"status": "cancelling", "notification_status": "queued"})
+    assert after["status"] == "completed" and after["notification_status"] == "queued"
+    assert (run_dir / "status.lock").stat().st_mode & 0o777 == 0o600
+
+
+def test_base_paths_and_launch_freeze_event_contract(tmp_path, monkeypatch):
+    assert core.base_paths(tmp_path)["events"] == str(tmp_path / "events.jsonl")
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setenv("PROFILE_DELEGATE_BACKGROUND_MODE", "thread")
+    monkeypatch.setenv("PROFILE_DELEGATE_PERSIST_MESSAGE_TEXT", "true")
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
+    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+    monkeypatch.setattr(core, "_start_background_run", lambda run_dir: None)
+    result = core.delegate_profile("reviewer", "task", session_title="journal", background=True)
+    request = json.loads((Path(result["paths"]["run_dir"]) / "request.json").read_text())
+    assert request["persist_message_text"] is True
+
+
 def test_legacy_status_remains_readable_and_matches_by_lane(tmp_path, monkeypatch):
     runs = tmp_path / "runs"
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(runs))
