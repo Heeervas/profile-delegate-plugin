@@ -31,11 +31,26 @@ jobs:
         run: python scripts/validate_release.py
       - name: Run tests
         run: |
-          python -m pytest . -q -o 'addopts=' || {
-            code=$?
-            echo "pytest_exit=$code"
-            exit "$code"
-          }
+          python -m pytest . -q -o 'addopts=' \
+            --junitxml=pytest-results.xml 2>&1 | tee pytest-output.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            {
+              echo '## Pytest failure output'
+              echo '```text'
+              cat pytest-output.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$code"
+      - name: Upload pytest diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-${{ matrix.python-version }}
+          path: |
+            pytest-output.log
+            pytest-results.xml
       - name: Secret pattern scan
         run: |
           python - <<'PY'
