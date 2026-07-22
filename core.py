@@ -458,7 +458,13 @@ def parse_csv_env(name: str) -> List[str]:
 def _plugin_entry() -> Dict[str, Any]:
     try:
         from hermes_cli.config import load_config
-
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"hermes_cli", "hermes_cli.config"}:
+            raise ProfileDelegateError(
+                f"failed to load Hermes plugin configuration: {exc}", "configuration_error"
+            ) from exc
+        return {}
+    try:
         cfg = load_config() or {}
     except Exception as exc:
         raise ProfileDelegateError(f"failed to load Hermes plugin configuration: {exc}", "configuration_error") from exc
