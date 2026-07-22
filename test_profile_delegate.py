@@ -19,6 +19,10 @@ import core
 import __init__ as plugin
 
 
+HERMES_TEST_PYTHON = Path("/opt/hermes/.venv/bin/python")
+HAS_HERMES_RUNTIME = HERMES_TEST_PYTHON.is_file()
+
+
 
 def setup_function(_function):
     core._async_running = 0
@@ -476,7 +480,8 @@ def test_child_command_uses_plugin_bootstrap_before_hermes(tmp_path):
         "session_mode": "new",
     }
     cmd = core.build_child_command(request, tmp_path)
-    assert cmd[0] == "/opt/hermes/.venv/bin/python"
+    expected_python = Path("/opt/hermes/.venv/bin/python")
+    assert cmd[0] == str(expected_python if expected_python.is_file() else Path(sys.executable))
     assert Path(cmd[1]).name == "child_bootstrap.py"
     assert cmd[cmd.index("--approval-mode") + 1] == "deny"
     assert cmd[cmd.index("--events-path") + 1] == str(tmp_path / "approval_events.jsonl")
@@ -484,6 +489,7 @@ def test_child_command_uses_plugin_bootstrap_before_hermes(tmp_path):
     assert cmd[separator + 1] == "/opt/hermes/.venv/bin/hermes"
 
 
+@pytest.mark.skipif(not HAS_HERMES_RUNTIME, reason="requires an installed Hermes runtime")
 def test_bootstrap_real_subprocess_deny_is_immediate_and_observable(tmp_path):
     events = tmp_path / "approval_events.jsonl"
     script = f"""
@@ -499,7 +505,7 @@ code=approval.check_execute_code_guard('print(1)', 'local')
 print(json.dumps({{'danger': danger, 'safe': safe, 'code': code, 'elapsed': time.monotonic()-started}}))
 """
     completed = subprocess.run(
-        ["/opt/hermes/.venv/bin/python", "-c", script], cwd=str(PLUGIN_DIR), text=True,
+        [str(HERMES_TEST_PYTHON), "-c", script], cwd=str(PLUGIN_DIR), text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
     )
     assert completed.returncode == 0, completed.stderr
@@ -515,6 +521,7 @@ print(json.dumps({{'danger': danger, 'safe': safe, 'code': code, 'elapsed': time
     assert any(row.get("detector") == "execute_code" for row in event_rows)
 
 
+@pytest.mark.skipif(not HAS_HERMES_RUNTIME, reason="requires an installed Hermes runtime")
 def test_bootstrap_real_subprocess_yolo_keeps_hardline_floor(tmp_path):
     events = tmp_path / "approval_events.jsonl"
     script = f"""
@@ -526,7 +533,7 @@ from tools import terminal_tool
 print(json.dumps({{'recoverable': terminal_tool._check_all_guards('git reset --hard HEAD', 'local'), 'hardline': terminal_tool._check_all_guards('rm -rf /', 'local')}}))
 """
     completed = subprocess.run(
-        ["/opt/hermes/.venv/bin/python", "-c", script], cwd=str(PLUGIN_DIR), text=True,
+        [str(HERMES_TEST_PYTHON), "-c", script], cwd=str(PLUGIN_DIR), text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
     )
     assert completed.returncode == 0, completed.stderr
@@ -535,6 +542,7 @@ print(json.dumps({{'recoverable': terminal_tool._check_all_guards('git reset --h
     assert result["hardline"]["approved"] is False
 
 
+@pytest.mark.skipif(not HAS_HERMES_RUNTIME, reason="requires an installed Hermes runtime")
 def test_bootstrap_review_filter_removes_mutators_from_real_schema(tmp_path):
     events = tmp_path / "approval_events.jsonl"
     blocked = ["write_file", "patch", "execute_code", "terminal", "process"]
@@ -548,7 +556,7 @@ names=[item['function']['name'] for item in defs]
 print(json.dumps(names))
 """
     completed = subprocess.run(
-        ["/opt/hermes/.venv/bin/python", "-c", script], cwd=str(PLUGIN_DIR), text=True,
+        [str(HERMES_TEST_PYTHON), "-c", script], cwd=str(PLUGIN_DIR), text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
     )
     assert completed.returncode == 0, completed.stderr
@@ -601,10 +609,14 @@ def test_timeout_defaults_and_caps(monkeypatch):
     else:
         raise AssertionError("expected validation_error")
 
-    monkeypatch.setattr(core, "MAX_TIMEOUT_SECONDS", 86_400)
-    assert core.coerce_timeout(86_400) == 86_400
-    monkeypatch.setattr(core, "MAX_TIMEOUT_SECONDS", 0)
-    assert core.coerce_timeout(604_800) == 604_800
+    expanded_values = core.load_effective_policy().values.copy()
+    expanded_values["max_timeout_seconds"] = 86_400
+    expanded = core.EffectivePolicy(expanded_values, {})
+    assert core.coerce_timeout(86_400, expanded) == 86_400
+    uncapped_values = expanded_values.copy()
+    uncapped_values["max_timeout_seconds"] = 0
+    uncapped = core.EffectivePolicy(uncapped_values, {})
+    assert core.coerce_timeout(604_800, uncapped) == 604_800
 
 
 def test_schema_uses_runtime_timeout_defaults(monkeypatch):
