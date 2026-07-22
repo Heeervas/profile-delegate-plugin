@@ -30,7 +30,7 @@ jobs:
       - name: Validate plugin registration and release metadata
         run: python scripts/validate_release.py
       - name: Run tests
-        run: python -m pytest . -q
+        run: python -m pytest . -q -o 'addopts='
       - name: Secret pattern scan
         run: |
           python - <<'PY'
