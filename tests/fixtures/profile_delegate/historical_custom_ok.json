@@ -1,0 +1,8 @@
+{
+  "status": "ok",
+  "summary": "Sanitized historical workspace corrections were applied.",
+  "artifacts_changed": ["/workspace/example.md"],
+  "verification": ["Fixture re-read passed."],
+  "errors": [],
+  "residual_risks": ["Sample scope remains narrow."]
+}

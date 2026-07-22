@@ -302,6 +302,16 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             exit_code = client.process.poll()
         core.merge_run_status(run_dir, {"transport_alive": False})
 
+    # The transport process is authoritative. A complete message followed by a
+    # nonzero gateway exit is an execution failure, never completed+ok.
+    if (
+        not timed_out
+        and not cancelled
+        and exit_code not in (None, 0)
+    ):
+        final_status = "failed"
+        error_code = error_code or "tui_nonzero_exit"
+
     core.text_safe_write(run_dir / "stdout.txt", final_text)
     if client and not core.tail_text(run_dir / "stderr.txt", 1):
         core.text_safe_write(run_dir / "stderr.txt", client.stderr_tail)
@@ -309,22 +319,43 @@ def execute(run_dir: Path) -> Dict[str, Any]:
         result = {
             "status": "failed", "summary": f"Delegated profile timed out after {timeout} seconds.",
             "artifacts": [], "errors": ["timeout"], "next_steps": [], "structured": True,
+            "execution_status": "timed_out", "contract_status": "not_evaluated",
             "error_code": "timeout",
         }
     elif cancelled:
         result = {
             "status": "failed", "summary": "Delegated profile was cancelled.",
             "artifacts": [], "errors": ["cancelled"], "next_steps": [], "structured": True,
+            "execution_status": "cancelled", "contract_status": "not_evaluated",
             "error_code": "cancelled",
         }
+    elif final_status == "failed" and not final_text.strip():
+        transport_error = error_code or "tui_transport_error"
+        result = {
+            "status": "failed",
+            "summary": "Delegated profile transport failed before producing a result.",
+            "artifacts": [],
+            "errors": [transport_error],
+            "next_steps": [],
+            "structured": True,
+            "execution_status": "failed",
+            "contract_status": "not_evaluated",
+            "error_code": transport_error,
+        }
     else:
+        parsed_result, parse_meta = core.parse_json_result(final_text)
         result = core.normalize_result(
-            core.extract_json_object(final_text), str(run_dir / "stdout.txt"), raw_output=final_text
+            parsed_result,
+            str(run_dir / "stdout.txt"),
+            raw_output=final_text,
+            parse_meta=parse_meta,
+            output_mode=core.ensure_text(request.get("resolved_output_mode") or "json"),
         )
         if final_status != "completed" or message_status == "error":
             result["status"] = "failed"
             result["error_code"] = error_code or "tui_turn_error"
             result["errors"] = core.coerce_list(result.get("errors")) + [result["error_code"]]
+        core.apply_execution_status(result, final_status)
     if child_session_id:
         result["session_id"] = child_session_id
     result.update(
@@ -354,7 +385,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
     except Exception:
         merge_status({"observability_degraded": True}, force=True)
     return {
-        "success": final_status == "completed" and result.get("status") != "failed",
+        "success": core.wrapper_success(final_status, result),
         "mode": "async",
         "task_id": request.get("task_id", run_dir.name),
         "profile": profile,

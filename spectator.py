@@ -338,7 +338,7 @@ def _validate_result(
         raise SpectatorError("corrupt result.json: task identity mismatch", 4)
     if (
         not _bounded_string(result.get("status"), 32)
-        or result.get("status") not in {"ok", "blocked", "failed", "completed", "cancelled", "timed_out"}
+        or result.get("status") not in {"ok", "blocked", "failed", "unknown", "completed", "cancelled", "timed_out"}
     ):
         raise SpectatorError("corrupt result.json: invalid status", 4)
     for key in ("error_code", "session_id"):
@@ -396,7 +396,9 @@ def inspect_run(run_dir: Path) -> Dict[str, Any]:
         snapshot["observation_note"] = "limited observability: legacy run has no events.jsonl"
     snapshot["events"] = events
     if result is not None:
-        result_keys = ["status", "error_code", "session_id"]
+        result_keys = [
+            "status", "execution_status", "contract_status", "error_code", "session_id",
+        ]
         if allow_message_text:
             result_keys.extend(["summary", "artifacts", "errors", "next_steps"])
         snapshot["result"] = {key: result[key] for key in result_keys if key in result}

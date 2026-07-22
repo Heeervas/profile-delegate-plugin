@@ -1,0 +1,1 @@
+{"status":"blocked","summary":"Sanitized historical visual review remained blocked after structural verification.","modified_files":[],"visual_findings":["Browser evidence still rejected the opening composition."],"checks":{"canonical_tests":"passed"},"errors":[],"next_steps":["Complete visual QA."]}

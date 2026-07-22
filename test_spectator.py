@@ -41,7 +41,9 @@ def _write_fixture(
     if status in {"completed", "failed", "cancelled", "timed_out"}:
         (run / "result.json").write_text(json.dumps({
             "result_schema_version": 1, "task_id": TASK_ID,
-            "status": status, "summary": "assistant summary", "error_code": "terminal-code",
+            "status": "ok" if status == "completed" else "failed",
+            "execution_status": status, "contract_status": "valid",
+            "summary": "assistant summary", "error_code": "terminal-code",
             "session_id": "child-session", "artifacts": ["/private/artifact"],
             "errors": ["assistant error"], "next_steps": ["assistant next step"],
         }), encoding="utf-8")
@@ -173,10 +175,22 @@ def test_inspect_default_exposes_only_terminal_result_metadata(tmp_path):
     snapshot = spectator.inspect_run(run)
     encoded = json.dumps(snapshot)
     assert snapshot["result"] == {
-        "status": "completed", "error_code": "terminal-code", "session_id": "child-session",
+        "status": "ok", "execution_status": "completed", "contract_status": "valid",
+        "error_code": "terminal-code", "session_id": "child-session",
     }
     for private in ("assistant summary", "/private/artifact", "assistant error", "assistant next step"):
         assert private not in encoded
+
+
+def test_inspect_preserves_result_schema_v1_compatibility_without_new_orthogonal_fields(tmp_path):
+    run = _write_fixture(tmp_path, events=[])
+    result_path = run / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["status"] = "completed"
+    result.pop("execution_status")
+    result.pop("contract_status")
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    assert spectator.inspect_run(run)["result"]["status"] == "completed"
 
 
 def test_inspect_frozen_opt_in_exposes_bounded_assistant_result_fields(tmp_path):
@@ -220,7 +234,7 @@ def test_inspect_accepts_only_explicit_bounded_legacy_result_compatibility(tmp_p
     value.pop("result_schema_version")
     value.pop("task_id")
     path.write_text(json.dumps(value), encoding="utf-8")
-    assert spectator.inspect_run(run)["result"]["status"] == "completed"
+    assert spectator.inspect_run(run)["result"]["status"] == "ok"
 
 
 @pytest.mark.parametrize(

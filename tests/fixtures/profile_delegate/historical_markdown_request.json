@@ -1,0 +1,7 @@
+{
+  "artifact_schema_version": 3,
+  "task_id": "pd_fixture_markdown",
+  "requested_output_mode": "auto",
+  "resolved_output_mode": "markdown",
+  "output_contract": "Return full Markdown plan only, with title, goal, approach decision, acceptance criteria, and final release gate."
+}

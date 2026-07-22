@@ -81,6 +81,21 @@ def test_extract_json_multiple_objects_prefers_stronger_final_envelope():
     assert obj["summary"] == "final"
 
 
+def test_parse_json_result_rejects_equal_terminal_ambiguity():
+    text = '{"status":"ok","summary":"one"}\n{"status":"blocked","summary":"two"}'
+    parsed, meta = core.parse_json_result(text)
+    assert parsed is None
+    assert meta["parse_error"] == "ambiguous_json_candidates"
+    assert meta["candidate_count"] == 2
+
+
+def test_parse_json_result_ignores_nested_terminal_object():
+    text = 'noise {"status":"ok","summary":"outer","data":{"status":"blocked","summary":"nested"}}'
+    parsed, meta = core.parse_json_result(text)
+    assert parsed["summary"] == "outer"
+    assert meta["candidate_count"] == 1
+
+
 def test_extract_json_ignores_non_envelope_nested_object():
     text = 'noise {"1":"placeholder","2":"placeholder"}'
     assert core.extract_json_object(text) is None
@@ -156,12 +171,31 @@ def test_delegate_reads_session_footer_from_stderr(tmp_path, monkeypatch):
 
 def test_normalize_result_parse_failure_coerces_plain_text():
     result = core.normalize_result(None, "/tmp/stdout.txt", raw_output="The file is a profile_delegate smoke-test prompt.\n\nPath: /tmp/prompt.txt")
-    assert result["status"] == "ok"
+    assert result["status"] == "unknown"
+    assert result["execution_status"] == "completed"
+    assert result["contract_status"] == "drifted"
     assert result["structured"] is False
     assert result["error_code"] == "unstructured_output"
     assert result["raw_output_path"] == "/tmp/stdout.txt"
     assert result["summary"] == "The file is a profile_delegate smoke-test prompt."
     assert result["errors"] == []
+
+
+def test_normalize_result_recovers_blocked_markdown_without_false_success():
+    raw = "scanner warning\n\n## `BLOCKED_NEEDS_FIXES`\n\nUseful review body."
+    result = core.normalize_result(None, "/tmp/stdout.txt", raw_output=raw, output_mode="json")
+    assert result["status"] == "blocked"
+    assert result["contract_status"] == "recovered"
+    assert result["structured"] is False
+
+
+def test_normalize_result_statusless_custom_json_is_unknown_and_preserves_keys():
+    parsed = {"verdict": "PASS", "findings": [], "summary": "useful"}
+    result = core.normalize_result(parsed, "/tmp/stdout.txt")
+    assert result["status"] == "unknown"
+    assert result["contract_status"] == "valid"
+    assert result["verdict"] == "PASS"
+    assert result["findings"] == []
 
 
 def test_normalize_result_empty_parse_failure_stays_failed():
@@ -180,13 +214,18 @@ def test_normalize_result_invalid_shape():
 def test_result_artifact_writer_adds_current_schema_identity_and_requires_status(tmp_path):
     run_dir = tmp_path / "pd_20260721_120001_abcdef"
     run_dir.mkdir()
-    core.write_result_artifact(run_dir, {"status": "ok", "summary": "done"})
+    core.write_result_artifact(run_dir, {
+        "status": "ok", "execution_status": "completed",
+        "contract_status": "valid", "summary": "done",
+    })
     saved = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
     assert saved["result_schema_version"] == 1
     assert saved["task_id"] == run_dir.name
     assert saved["status"] == "ok"
     with pytest.raises(core.ProfileDelegateError):
         core.write_result_artifact(run_dir, {"summary": "missing status"})
+    with pytest.raises(core.ProfileDelegateError):
+        core.write_result_artifact(run_dir, {"status": "ok", "summary": "missing lifecycle"})
 
 
 def test_build_prompt_contains_task_context_contract():
@@ -194,7 +233,21 @@ def test_build_prompt_contains_task_context_contract():
     assert "Do the task" in prompt
     assert "ctx" in prompt
     assert "contract" in prompt
-    assert "Return ONLY valid JSON" in prompt
+    assert "Final serialization mode: JSON object" in prompt
+
+
+def test_output_mode_auto_preserves_historical_markdown_contract():
+    requested, resolved = core.resolve_output_mode("auto", "Return full Markdown plan only")
+    assert (requested, resolved) == ("auto", "markdown")
+    prompt = core.build_prompt("task", output_contract="Return full Markdown plan only")
+    assert "Resolved output mode: markdown" in prompt
+    assert "Final serialization mode: Markdown" in prompt
+
+
+def test_explicit_output_mode_conflicts_fail_before_launch():
+    with pytest.raises(core.ProfileDelegateError) as caught:
+        core.resolve_output_mode("json", "Return full Markdown plan only")
+    assert caught.value.code == "contract_conflict"
 
 
 def test_plugin_registers_tools():
@@ -254,9 +307,10 @@ def test_handler_tool_args_win_over_internal_kwargs(monkeypatch):
         return {"success": True}
 
     monkeypatch.setattr(plugin, "delegate_profile", fake_delegate)
-    data = json.loads(plugin._handler({"profile": "reviewer", "task": "x", "session_title": "smoke", "session_mode": "new", "session_id": ""}, session_id="caller-session"))
+    data = json.loads(plugin._handler({"profile": "reviewer", "task": "x", "session_title": "smoke", "session_mode": "new", "session_id": "", "output_mode": "markdown"}, session_id="caller-session"))
     assert data["success"] is True
     assert seen["session_id"] == ""
+    assert seen["output_mode"] == "markdown"
 
 
 def test_status_handler_tool_task_id_wins_over_internal_kwargs(tmp_path, monkeypatch):
@@ -495,7 +549,7 @@ print(json.dumps(names))
 """
     completed = subprocess.run(
         ["/opt/hermes/.venv/bin/python", "-c", script], cwd=str(PLUGIN_DIR), text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
     )
     assert completed.returncode == 0, completed.stderr
     names = set(json.loads(completed.stdout.strip().splitlines()[-1]))
@@ -521,6 +575,8 @@ def test_approval_timeout_marker_becomes_structured_failure(tmp_path, monkeypatc
     assert result["success"] is False
     assert result["error_code"] == "approval_timeout"
     assert result["result"]["errors"] == ["approval_timeout_marker"]
+    assert result["result"]["execution_status"] == "failed"
+    assert result["result"]["contract_status"] == "not_evaluated"
 
 
 def test_plugin_config_child_approval_mode_reads_yaml(monkeypatch):
@@ -652,6 +708,8 @@ def test_delegate_uses_prompt_file_not_raw_prompt_in_argv(tmp_path, monkeypatch)
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     result = core.delegate_profile("reviewer", "PRIVATE TASK TEXT", session_title="private task")
     assert result["success"] is True
+    assert result["result"]["execution_status"] == "completed"
+    assert result["result"]["contract_status"] == "valid"
     separator = seen["cmd"].index("--")
     child = seen["cmd"][separator + 1:]
     assert child[:5] == ["/usr/bin/hermes", "-p", "reviewer", "chat", "-q"]
@@ -791,8 +849,10 @@ def test_detached_background_worker_finalizes_completed_run(tmp_path, monkeypatc
     assert status["background_worker_mode"] == "detached"
     assert status["ended_at"]
     saved = json.loads((run_dir / "result.json").read_text())
-    assert saved["status"] == "ok"
+    assert saved["status"] == "unknown"
+    assert saved["execution_status"] == "completed"
     assert saved["structured"] is False
+    assert saved["contract_status"] == "drifted"
     assert (run_dir / "result.json").exists()
 
 
@@ -819,6 +879,8 @@ def test_delegate_background_start_failure_marks_run_failed(tmp_path, monkeypatc
     assert status["status"] == "failed"
     assert status["error_code"] == "async_concurrency_limit"
     assert result["error_code"] == "async_concurrency_limit"
+    assert result["execution_status"] == "failed"
+    assert result["contract_status"] == "not_evaluated"
 
 
 def test_push_profile_delegate_completion_queues_async_event(tmp_path, monkeypatch):
@@ -1134,6 +1196,7 @@ def test_transient_failure_without_session_id_fails_closed(tmp_path, monkeypatch
     result = core.delegate_profile("reviewer", "task", session_title="safe failure")
     assert len(calls) == 1
     assert result["error_code"] == "transient_resume_session_missing"
+    assert result["result"]["execution_status"] == "failed"
 
 
 def test_delegate_resume_uses_resume_flag_and_skips_rename(tmp_path, monkeypatch):
@@ -1755,7 +1818,9 @@ def test_list_and_status_handlers_capture_origin_and_schema_contract(monkeypatch
     list_props = plugin._list_schema()["parameters"]["properties"]
     assert list_props["scope"]["default"] == "current_session"
     assert list_props["scope"]["enum"] == ["current_session", "current_lane", "all"]
-    assert list_props["status"]["items"]["enum"] == ["running", "completed", "failed", "corrupt"]
+    assert list_props["status"]["items"]["enum"] == [
+        "running", "cancelling", "completed", "failed", "cancelled", "timed_out", "corrupt",
+    ]
     assert "profile" in list_props
 
 

@@ -1,12 +1,12 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
+.venv/
 .DS_Store
 .env
+.env.*
+!.env.example
 *.log
-AGENTS.md
-STATE.md
-TODO.md
-todo.md
-.agents/
-.hermes/
+
+# Project operating contracts under `.agents/` and `.hermes/` are tracked.

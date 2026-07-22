@@ -17,6 +17,7 @@ if str(PLUGIN_DIR) not in sys.path:
 
 import tui_rpc
 import tui_runner
+import core
 
 
 class FakeProcess:
@@ -295,3 +296,116 @@ def test_runner_publishes_ready_status_transitions_after_success(tmp_path, monke
     assert result["success"] is True
     assert transitions.index("transport_ready") < transitions.index("session_creating")
     assert transitions.index("session_ready") < transitions.index("agent_initializing")
+
+
+def test_runner_nonzero_transport_exit_overrides_complete_ok(tmp_path, monkeypatch):
+    run = tmp_path / "pd_20260721_120001_cccccc"
+    run.mkdir()
+    request = {
+        "task_id": run.name, "timeout_seconds": 10, "workdir": str(tmp_path),
+        "profile": "reviewer", "session_mode": "new", "requested_session_id": "",
+        "session_title": "test", "profile_home": str(tmp_path), "hermes_bin": sys.executable,
+        "child_approval_mode": "deny", "effective_execution": {}, "effective_capabilities": {},
+        "effective_policy": {"limits": {"max_concurrent": 8}},
+    }
+    (run / "request.json").write_text(json.dumps(request), encoding="utf-8")
+    (run / "prompt.txt").write_text("prompt", encoding="utf-8")
+    (run / "status.json").write_text(
+        json.dumps({"task_id": run.name, "status": "running"}), encoding="utf-8",
+    )
+    monkeypatch.setattr(tui_runner, "_environment", lambda request, run_dir: {})
+
+    @contextmanager
+    def slot(_limit):
+        yield type("Slot", (), {"slot": 0})()
+
+    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", slot)
+    complete = {
+        "method": "event", "params": {
+            "type": "message.complete", "session_id": "ui-1",
+            "payload": {"status": "complete", "text": '{"status":"ok","summary":"done"}'},
+        },
+    }
+
+    class Client:
+        stderr_tail = ""
+
+        def __init__(self):
+            self.process = type("Process", (), {"pid": os.getpid(), "poll": lambda self: 17})()
+
+        def wait_ready(self, **kwargs):
+            return None
+
+        def read_frame(self, timeout):
+            return complete
+
+        def call(self, *args, **kwargs):
+            return {}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", lambda **kwargs: Client())
+    monkeypatch.setattr(
+        tui_runner.tui_rpc, "start_session",
+        lambda *args, **kwargs: {"ui_session_id": "ui-1", "child_session_id": "child-1"},
+    )
+    monkeypatch.setattr(tui_runner.tui_rpc, "submit", lambda *args, **kwargs: {})
+    result = tui_runner.execute(run)
+    assert result["success"] is False
+    assert result["status"] == "failed"
+    assert result["error_code"] == "tui_nonzero_exit"
+    assert result["result"]["status"] == "failed"
+    assert result["result"]["execution_status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("text", "message_status", "expected_task_status", "expected_contract", "success"),
+    [
+        ('{"status":"ok","summary":"done"}', "complete", "ok", "valid", True),
+        ('{"status":"blocked","summary":"wait"}', "complete", "blocked", "valid", False),
+        ("plain useful output", "complete", "unknown", "drifted", False),
+        ("OK\n{\"status\":\"ok\"}\n{\"status\":\"blocked\"}", "complete", "unknown", "drifted", False),
+    ],
+)
+def test_tui_and_legacy_normalization_wrapper_parity(
+    text, message_status, expected_task_status, expected_contract, success,
+):
+    parsed, meta = core.parse_json_result(text)
+    legacy = core.normalize_result(
+        parsed, "/tmp/stdout.txt", raw_output=text, parse_meta=meta,
+    )
+    tui = core.normalize_result(
+        parsed, "/tmp/stdout.txt", raw_output=text, parse_meta=meta,
+    )
+    if message_status != "complete":
+        tui["status"] = "failed"
+    core.apply_execution_status(tui, "completed")
+    assert (tui["status"], tui["contract_status"]) == (
+        legacy["status"], legacy["contract_status"],
+    )
+    assert core.wrapper_success("completed", tui) is success
+
+
+@pytest.mark.parametrize(
+    ("lifecycle", "contract_status"),
+    [
+        ("failed", "not_evaluated"),
+        ("cancelled", "not_evaluated"),
+        ("timed_out", "not_evaluated"),
+    ],
+)
+def test_manual_terminal_failure_results_have_complete_orthogonal_schema(
+    tmp_path, lifecycle, contract_status,
+):
+    run = tmp_path / f"pd_{lifecycle}"
+    run.mkdir()
+    result = {
+        "status": "failed", "execution_status": lifecycle,
+        "contract_status": contract_status, "summary": lifecycle,
+    }
+    core.write_result_artifact(run, result)
+    saved = json.loads((run / "result.json").read_text(encoding="utf-8"))
+    assert saved["status"] == "failed"
+    assert saved["execution_status"] == lifecycle
+    assert saved["contract_status"] == contract_status

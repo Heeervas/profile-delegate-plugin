@@ -1,6 +1,6 @@
 # Profile Delegate 🤝
 
-Version: `1.8.0`
+Version: `1.9.0`
 
 > Stable local-power-user Hermes Agent plugin. It is **not a sandbox** and should be configured deliberately before broad use.
 
@@ -28,7 +28,9 @@ Example uses:
 - Optional working-directory allowlist via `PROFILE_DELEGATE_ALLOWED_WORKDIRS`.
 - Absolute/configurable Hermes binary path resolution.
 - Defensive JSON extraction and schema normalization, including warning-prefixed stdout and nested JSON objects.
-- Cheap local fallback for useful non-JSON child output; no automatic profile retry on parse failure.
+- Explicit `auto|json|markdown|text` serialization modes with deterministic conflict detection before launch.
+- Independent execution, task, and contract outcomes; blocked, unknown, malformed, ambiguous, cancelled, timed-out, and transport-failed runs never become false success.
+- Conservative local fallback for useful non-JSON child output; no automatic profile retry on parse failure.
 - Strict automatic recovery for recognized terminal transport failures: resume the same child session up to twice, wait 10 seconds between attempts, and share one total timeout budget. Never restart in a fresh session.
 - Private local run artifacts: request, prompt, status, stdout, stderr, result, and redacted/hash-only approval events.
 - Async background mode with best-effort notify-on-complete through Hermes' native async-delegation completion queue.
@@ -200,6 +202,7 @@ Input:
   "session_id": "",
   "context": "Optional compact context, paths, artifacts, or summary.",
   "timeout_seconds": 1200,
+  "output_mode": "auto",
   "output_contract": "Optional extra output instructions.",
   "workdir": "",
   "background": false,
@@ -226,6 +229,7 @@ Notes:
 - `workdir` defaults to the current process working directory.
 - Explicit `workdir` values require `PROFILE_DELEGATE_ALLOWED_WORKDIRS`.
 - `timeout_seconds` is synchronous and bounded from 10 to `PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS` seconds; default local config is 1200 seconds and max is 1800 seconds.
+- `output_mode` is `auto`, `json`, `markdown`, or `text`. `auto` preserves exact legacy phrases such as `Full Markdown`, `Markdown only`, `JSON only`, and `Plain text only`; otherwise it defaults to JSON. Explicit modes are accepted only when compatible. Conflicting serialization instructions fail before a child is launched.
 - Execution precedence is per-call override > target profile default; blank/omitted `model`, `provider`, and `reasoning_effort` inherit. These are requested controls: Hermes/provider still validates model/provider compatibility.
 - `toolsets` and `skills` are capability-bearing and fail closed unless every requested item is present in the corresponding plugin allowlist.
 - Call `profile_delegate_policy` before using optional overrides. Deterministic preflight failures report all `unsupported_fields` together with a one-shot `retry_patch` and `run_created:false`.
@@ -242,7 +246,7 @@ Default result requested from the target profile:
 
 ```json
 {
-  "status": "ok|blocked|failed",
+  "status": "ok|blocked|failed|unknown",
   "summary": "concise summary string",
   "artifacts": ["paths or URLs"],
   "errors": ["concise error strings"],
@@ -250,7 +254,17 @@ Default result requested from the target profile:
 }
 ```
 
-The plugin normalizes non-list fields into arrays where appropriate and converts invalid statuses into a structured failure. Child prompts are passed through `@file:<prompt.txt>` and results are parsed from captured stdout/stderr; this is not stdin transport.
+The plugin normalizes non-list fields into arrays where appropriate and converts invalid statuses into a structured failure. `unknown` is a real non-success task result used for useful output that has no safe explicit verdict; it is never promoted to wrapper success.
+
+Final results carry three orthogonal fields:
+
+- `execution_status`: authoritative terminal run lifecycle: `completed`, `failed`, `cancelled`, or `timed_out`.
+- `status`: target task outcome: `ok`, `blocked`, `failed`, or `unknown`.
+- `contract_status`: output-contract state: `valid`, `recovered`, `drifted`, `empty`, or `not_evaluated` for manual transport/lifecycle failures.
+
+A whole-document JSON object is `valid`; when it omits an explicit task status its task outcome is `unknown`, not success. A uniquely selected fenced or prose-embedded JSON object is `recovered` and retains `raw_output_path`. Narrow recovery from one explicit Markdown/text verdict is also `recovered`; ambiguous JSON, negated verdicts, and multiple/conflicting textual statuses are `drifted` and cannot become successful. Wrapper `success:true` requires a completed execution, task `status:"ok"`, contract `valid` or `recovered`, and no parse error. `blocked`, `failed`, `unknown`, cancellation, timeout, transport failure, and parsing ambiguity always produce `success:false`.
+
+Child prompts are passed through `@file:<prompt.txt>` and results are parsed from captured stdout/stderr; this is not stdin transport.
 
 ### `profile_delegate_status`
 
@@ -319,7 +333,8 @@ the same gateway lane across session rotations, or `all` for global inspection.
 is unavailable, current scope returns an empty result with
 `scope_effective: "unresolved"`; it never silently widens to global scope. Run
 summaries include `session_title`, normalized `origin`, `worker_alive`, and
-`activity`.
+`activity`. Lifecycle filters accept the complete runtime set: `running`,
+`cancelling`, `completed`, `failed`, `cancelled`, `timed_out`, and `corrupt`.
 
 Liveness is advisory and read-only: terminal runs are `finished`; a running
 detached worker with a live/dead PID is `active`/`stale`; legacy or uncheckable

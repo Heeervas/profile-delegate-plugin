@@ -100,8 +100,14 @@ def _schema() -> Dict[str, Any]:
                 },
                 "output_contract": {
                     "type": "string",
-                    "description": "Optional extra output instructions. Default asks target profile to return JSON with status, summary, artifacts, errors, next_steps. If files are created, require paths in artifacts.",
+                    "description": "Optional content/schema guidance. Extra JSON keys are allowed. With output_mode=auto, exact legacy phrases such as 'Markdown only' or 'plain text' select that format.",
                     "default": "",
+                },
+                "output_mode": {
+                    "type": "string",
+                    "enum": ["auto", "json", "markdown", "text"],
+                    "description": "Serialization mode. auto (default) preserves legacy contracts; explicit json/markdown/text wins and contradictory contracts fail before launch.",
+                    "default": "auto",
                 },
                 "workdir": {
                     "type": "string",
@@ -243,7 +249,13 @@ def _list_schema() -> Dict[str, Any]:
                 },
                 "status": {
                     "type": "array",
-                    "items": {"type": "string", "enum": ["running", "completed", "failed", "corrupt"]},
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "running", "cancelling", "completed", "failed",
+                            "cancelled", "timed_out", "corrupt",
+                        ],
+                    },
                     "description": "Optional lifecycle status filters.",
                 },
                 "profile": {"type": "string", "description": "Optional exact canonical target-profile filter."},
@@ -328,6 +340,7 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
             context=payload.get("context", ""),
             timeout_seconds=payload.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
             output_contract=payload.get("output_contract", ""),
+            output_mode=payload.get("output_mode", "auto"),
             workdir=payload.get("workdir", ""),
             session_title=payload.get("session_title", ""),
             session_mode=payload.get("session_mode", "new"),

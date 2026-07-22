@@ -1,0 +1,2 @@
+warning: optional scanner unavailable
+COACH_V2_CONTRACT_OK owner=example target=4 primary=3 writer=example.py

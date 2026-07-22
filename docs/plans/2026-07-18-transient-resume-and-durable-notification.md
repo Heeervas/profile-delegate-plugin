@@ -1,6 +1,8 @@
 # Profile Delegate Transient Resume and Durable Parent Notification Spec
 
-> **For Hermes:** Implement with strict TDD. This document is the recovery source after context compaction. Do not modify unrelated dirty files or redesign the runner beyond this contract.
+> **PARTIALLY SUPERSEDED (2026-07-22).** The same-session transient-resume behavior remains historical context, but the plugin-owned SQLite outbox, durable message bus, gateway daemon/hook, and guaranteed-delivery portions are rejected. Do not implement those portions. Current reliability work is plugin-only and follows `2026-07-22-plugin-only-reliability-reset-p0-p4.md`.
+
+> **Historical instruction only:** the original implementation instruction below no longer authorizes durable/outbox work.
 
 **Goal:** Recover a delegated profile from recognized transient provider/stream failures by resuming the same Hermes session up to two times, while guaranteeing one durable final completion event back to the parent agent for background runs.
 

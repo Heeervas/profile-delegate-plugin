@@ -1,0 +1,2 @@
+warning: optional scanner unavailable
+{"verdict":"PASS","mandatory_fixes":[],"residual_risks":["Runtime activation was not verified."],"evidence":["Sanitized source inspection passed."]}
