@@ -59,9 +59,7 @@ def main() -> int:
         assert "input_schema" not in schema
 
     validation_error = json.loads(
-        ctx.tools["profile_delegate"]["handler"](
-            {"profile": "", "task": "smoke", "session_title": "release smoke"}
-        )
+        ctx.tools["profile_delegate_status"]["handler"]({"task_id": "bad/task-id"})
     )
     assert validation_error["success"] is False
     assert validation_error["error_code"] == "validation_error"
