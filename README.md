@@ -21,6 +21,7 @@ Example uses:
 - Runs the target profile with its normal Hermes context, memory, rules, tools, and model defaults unless a temporary per-call override is requested.
 - Supports requested per-call `model`, `provider`, `reasoning_effort`, `max_turns`, `toolsets`, preloaded `skills`, and `review`/`build` capability presets; omitted values inherit profile defaults.
 - Launches Hermes in-process through a plugin-owned bootstrap before agent construction. The bootstrap installs deterministic child approvals and optional schema filtering, then runs quiet single-query mode with a prompt file reference. `--yolo` is added only when `child_approval_mode: approve_yolo` is explicit.
+- Foreground mode waits synchronously and keeps the originating turn occupied. Short bounded specialist work can remain foreground. Prefer background mode for long, multi-stage, or independently monitorable work when the conversation should remain responsive. This is advisory only; the plugin does not auto-select, reject, or impose a new duration cap on either mode.
 - Explicit target-profile allowlist by default.
 - Recursion/depth guard via `PROFILE_DELEGATE_MAX_DEPTH`.
 - Direct nested-delegation lineage and result surfacing: a child run created through `profile_delegate` is linked to its parent and returned under `result.nested_delegations`, so the controller can reuse a builder's reviewer result instead of paying for the same review twice.

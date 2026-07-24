@@ -4,6 +4,22 @@ All notable changes to Profile Delegate are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Foreground lifecycle heartbeats through Hermes' thread-local activity callback.
+- Exact-origin foreground cancellation through private control markers consumed by the synchronous process owner.
+- Bounded foreground lifecycle status including owned worker identity, liveness, deadline, activity, and terminal reason.
+
+### Fixed
+
+- Parent interruption and foreground cancellation now terminate and reap the owned process group with TERM-then-KILL escalation and finalize as `cancelled`.
+- Plugin deadline remains authoritative and finalizes as `timed_out`; cancellation, interruption, and timeout cannot enter transient recovery.
+- Terminal lifecycle metadata is immutable, and synchronous selectors/streams are closed on every exit path.
+
+### Verification
+
+- Focused synchronous lifecycle suite covers heartbeat stop conditions, exact-origin authorization, descendant cleanup, timeout/cancel distinction, atomic private status, retry-delay interruption, and advisory execution-mode guidance.
+
 ### Deferred
 
 - P2 honest best-effort notification semantics.

@@ -1,7 +1,7 @@
 # Profile Delegate project state
 
 Last updated: 2026-07-24 by Adán
-Status: nested-delegation visibility implemented locally; release validation pending
+Status: synchronous lifecycle repair independently approved; commit pending
 
 ## Active objective
 
@@ -9,8 +9,8 @@ Ship the plugin-only reliability reset and minimal agent-managed project operati
 
 ## Implementation status
 
-- Current phase: release preparation
-- Active plan: `docs/plans/2026-07-22-plugin-only-reliability-reset-p0-p4.md`
+- Current phase: lifecycle repair validation
+- Active plan: `docs/plans/2026-07-24-sync-lifecycle-heartbeat-cancellation.md`
 - Branch: `main`
 - P0/P1: implemented and independently approved
 - P2–P4: intentionally deferred in `TODO.md`
@@ -25,12 +25,13 @@ Ship the plugin-only reliability reset and minimal agent-managed project operati
 - Portable sanitized historical regression fixtures.
 - Public lifecycle/schema parity and updated operator documentation.
 - Direct nested `profile_delegate` runs are linked to their parent and surfaced under `result.nested_delegations`, allowing controllers to reuse child-performed reviews instead of repeating them.
+- Foreground subprocesses propagate bounded parent activity, consume Hermes interruption state and exact-origin cancellation markers, terminate/reap their complete owned process group, and publish truthful bounded lifecycle status.
 - Historical durable-delivery/outbox plans marked rejected or superseded.
 - Minimal tracked agent-managed project contracts.
 
 ## Blockers
 
-- No release blockers remain.
+- No code/test review blockers remain.
 - Loaded gateway processes require restart/reload after push before the new code/schema is live.
 
 ## Skill route
@@ -48,13 +49,13 @@ Ship the plugin-only reliability reset and minimal agent-managed project operati
 
 ## Latest validation result
 
-- Full pytest: 306 passed after nested-delegation lineage/result surfacing.
+- Full pytest: 324 passed after synchronous lifecycle repair.
 - Ruff, Python compilation, `git diff --check`, and release registration/handler smoke: passed.
 - Live gateway processes still require restart/reload before this code and schema guidance become active.
 
 ## Next action
 
-Inspect the staged diff, commit, push `main`, verify remote/CI, then publish the prepared Discord update message.
+Resolve final review findings, rerun the release gate, commit the lifecycle repair, then request operator approval before any activation restart or live acceptance smoke.
 
 ## Known limitations
 

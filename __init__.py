@@ -44,6 +44,9 @@ except ImportError:  # direct import / pytest from plugin directory
 TOOL_DESCRIPTION = (
     "Delegate a bounded task to another Hermes profile using that profile's normal context, memory, rules, and tool defaults. "
     "Use this instead of Kanban for small specialist jobs like review, inspection, drafting, or verification. "
+    "Foreground mode waits synchronously and keeps the originating turn occupied; short bounded specialist work can remain foreground. "
+    "Prefer background mode for long, multi-stage, or independently monitorable work so the conversation remains responsive. "
+    "This is advisory guidance only: the caller/Hermes selects the mode, and the plugin does not auto-select or reject either mode. "
     "Supports fresh one-shot runs or explicit target-profile session resume; no parent approval brokering. "
     "Caller chooses what context to pass; prefer compact summaries and artifact paths over giant transcript dumps. "
     "The target profile's policy/tool permissions apply. Requires PROFILE_DELEGATE_ALLOWED_PROFILES unless explicitly configured to allow all. "
@@ -118,7 +121,7 @@ def _schema() -> Dict[str, Any]:
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Run the target profile asynchronously and return a task_id immediately. Use this for long-running profile work that should outlive the current turn.",
+                    "description": "Run asynchronously, return a task_id immediately, and keep the originating conversation responsive. Prefer background for long, multi-stage, or independently monitorable work; short bounded specialist work may remain foreground. Advisory only: no automatic mode selection or rejection.",
                     "default": False,
                 },
                 "notify_on_complete": {
@@ -223,7 +226,7 @@ def _steer_schema() -> Dict[str, Any]:
 def _cancel_schema() -> Dict[str, Any]:
     return {
         "name": "profile_delegate_cancel",
-        "description": "Cancel an active background TUI-backed Profile Delegate run through native session.interrupt.",
+        "description": "Cancel an active Profile Delegate run from its exact originating session. Background TUI runs use native session.interrupt; foreground CLI runs use an owned control marker consumed by the synchronous process owner.",
         "parameters": {
             "type": "object",
             "properties": {
