@@ -101,6 +101,8 @@ TERMINAL_OWNED_STATUS_FIELDS = {
     "child_session_id", "transport_alive", "transport_pid",
 }
 MAX_STEER_CHARS = 12_000
+MAX_NESTED_DELEGATIONS = 8
+MAX_NESTED_SUMMARY_CHARS = 4_000
 
 TRANSIENT_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     ("incomplete_chunked_read", re.compile(r"^(?:[\w.]+\.)?RemoteProtocolError:\s*(?:peer closed connection without sending complete message body|incomplete chunked read).*$", re.I)),
@@ -1905,10 +1907,18 @@ def rename_session(hermes_bin: str, profile: str, session_id: str, title: str, c
     }
 
 
-def child_environment(parent_depth: int, child_approval_mode: str = DEFAULT_CHILD_APPROVAL_MODE) -> Dict[str, str]:
+def child_environment(
+    parent_depth: int,
+    child_approval_mode: str = DEFAULT_CHILD_APPROVAL_MODE,
+    parent_task_id: str = "",
+) -> Dict[str, str]:
     mode = coerce_child_approval_mode(child_approval_mode)
     env = os.environ.copy()
     env["PROFILE_DELEGATE_DEPTH"] = str(parent_depth + 1)
+    if parent_task_id:
+        env["PROFILE_DELEGATE_PARENT_TASK_ID"] = ensure_text(parent_task_id)[:MAX_SESSION_ID_CHARS]
+    else:
+        env.pop("PROFILE_DELEGATE_PARENT_TASK_ID", None)
 
     # The delegated Hermes subprocess is intentionally non-interactive: there
     # is no approval callback wired for the child process, and inheriting the
@@ -1933,6 +1943,63 @@ def child_environment(parent_depth: int, child_approval_mode: str = DEFAULT_CHIL
     # cron run: quiet chat may re-enable interactivity, and cron state is not an
     # approval contract for delegated subprocesses.
     return env
+
+
+def collect_nested_delegations(run_dir: Path, request: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return bounded direct-child delegation results created by this delegated run."""
+    parent_task_id = run_dir.name
+    profile_home = Path(ensure_text(request.get("profile_home"))).expanduser()
+    runs_root = profile_home / "profile_delegate" / "runs"
+    if not runs_root.is_dir():
+        return []
+    collected: List[Dict[str, Any]] = []
+    try:
+        candidates = sorted(
+            (path for path in runs_root.iterdir() if path.is_dir()),
+            key=lambda path: path.name,
+        )
+    except OSError:
+        return []
+    for nested_dir in candidates:
+        if len(collected) >= MAX_NESTED_DELEGATIONS:
+            break
+        try:
+            nested_request = read_json_file(nested_dir / "request.json")
+        except ProfileDelegateError:
+            continue
+        if ensure_text(nested_request.get("parent_task_id")) != parent_task_id:
+            continue
+        try:
+            nested_status = read_json_file(nested_dir / "status.json")
+        except ProfileDelegateError:
+            nested_status = {}
+        nested_result: Optional[Dict[str, Any]] = None
+        result_path = nested_dir / "result.json"
+        if result_path.is_file():
+            try:
+                raw_result = read_json_file(result_path)
+                nested_result = {
+                    key: value for key, value in raw_result.items()
+                    if key in {
+                        "status", "execution_status", "contract_status", "summary",
+                        "artifacts", "errors", "next_steps", "error_code", "session_id",
+                    }
+                }
+                if "summary" in nested_result:
+                    nested_result["summary"] = ensure_text(
+                        nested_result["summary"]
+                    )[:MAX_NESTED_SUMMARY_CHARS]
+            except ProfileDelegateError:
+                nested_result = None
+        collected.append({
+            "task_id": ensure_text(nested_request.get("task_id") or nested_dir.name),
+            "profile": ensure_text(nested_request.get("profile")),
+            "session_title": ensure_text(nested_request.get("session_title")),
+            "status": ensure_text(nested_status.get("status") or "unknown"),
+            "result": nested_result,
+            "result_path": str(result_path) if result_path.is_file() else "",
+        })
+    return collected
 
 
 def _make_profile_delegate_summary(result: Dict[str, Any], paths: Dict[str, str]) -> str:
@@ -2011,7 +2078,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     title_text = ensure_text(request.get("session_title") or "")
     depth = int(request.get("delegate_depth") or 0)
     child_approval_mode = coerce_child_approval_mode(request.get("child_approval_mode", DEFAULT_CHILD_APPROVAL_MODE))
-    env = child_environment(depth, child_approval_mode)
+    env = child_environment(depth, child_approval_mode, run_dir.name)
     requested_execution = request.get("effective_execution") or request.get("requested_execution") or {}
     reasoning_effort = requested_execution.get("reasoning_effort")
     if reasoning_effort:
@@ -2126,6 +2193,9 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
                 rename_meta = {"session_renamed": False, "rename_error": f"{type(exc).__name__}: {exc}"}
         else:
             rename_meta["rename_skipped"] = "deadline_exhausted"
+    nested_delegations = collect_nested_delegations(run_dir, request)
+    if nested_delegations:
+        result["nested_delegations"] = nested_delegations
     if child_session_id:
         result["session_id"] = child_session_id
     result.update({"requested_execution": request.get("requested_execution") or {}, "effective_execution": request.get("effective_execution") or {}, "effective_capabilities": request.get("effective_capabilities") or {}, "approval_policy": request.get("approval_policy") or {}, "recovery_history": history})
@@ -2400,6 +2470,7 @@ def delegate_profile(
             "requested_output_mode": requested_output_mode, "resolved_output_mode": resolved_output_mode,
             "session_title": title_text, "session_mode": mode, "requested_session_id": resume_id,
             "runs_root": str(get_runs_root()), "hermes_bin": hermes_bin, "delegate_depth": depth,
+            "parent_task_id": ensure_text(os.getenv("PROFILE_DELEGATE_PARENT_TASK_ID", ""))[:MAX_SESSION_ID_CHARS],
             "delegate_max_depth": max_depth, "child_approval_mode": resolved_child_approval_mode,
             "approval_policy": {"requested": ensure_text(child_approval_mode) or "config/default", "effective": resolved_child_approval_mode, "owner": "profile-delegate-child-bootstrap", "interactive": False},
             "capability_preset": effective_capabilities["preset"], "effective_capabilities": effective_capabilities,

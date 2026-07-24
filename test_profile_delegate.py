@@ -407,8 +407,9 @@ def test_child_environment_default_denies_without_parent_prompt(monkeypatch):
     monkeypatch.setenv("HERMES_YOLO_MODE", "1")
     monkeypatch.setenv("HERMES_ACCEPT_HOOKS", "1")
 
-    env = core.child_environment(0)
+    env = core.child_environment(0, parent_task_id="pd_20260724_120000_parent")
     assert env["PROFILE_DELEGATE_DEPTH"] == "1"
+    assert env["PROFILE_DELEGATE_PARENT_TASK_ID"] == "pd_20260724_120000_parent"
     assert "HERMES_CRON_SESSION" not in env
     assert "HERMES_YOLO_MODE" not in env
     assert "HERMES_ACCEPT_HOOKS" not in env
@@ -427,6 +428,111 @@ def test_child_environment_approve_yolo_is_explicit(monkeypatch):
     assert env["HERMES_ACCEPT_HOOKS"] == "1"
     assert "HERMES_SESSION_PLATFORM" not in env
     assert "HERMES_CRON_SESSION" not in env
+
+
+def test_collect_nested_delegations_returns_direct_child_results(tmp_path):
+    parent = tmp_path / "parent" / "pd_20260724_120000_parent"
+    parent.mkdir(parents=True)
+    profile_home = tmp_path / "builder"
+    nested = profile_home / "profile_delegate" / "runs" / "pd_20260724_120100_nested"
+    nested.mkdir(parents=True)
+    (nested / "request.json").write_text(json.dumps({
+        "task_id": nested.name,
+        "profile": "reviewer",
+        "parent_task_id": parent.name,
+        "session_title": "review builder output",
+    }), encoding="utf-8")
+    (nested / "status.json").write_text(json.dumps({
+        "task_id": nested.name, "profile": "reviewer", "status": "completed",
+        "parent_task_id": parent.name,
+    }), encoding="utf-8")
+    (nested / "result.json").write_text(json.dumps({
+        "status": "ok", "execution_status": "completed", "contract_status": "valid",
+        "summary": "review passed", "artifacts": ["/tmp/review.md"],
+        "errors": [], "next_steps": [],
+    }), encoding="utf-8")
+
+    found = core.collect_nested_delegations(parent, {"profile_home": str(profile_home)})
+
+    assert found == [{
+        "task_id": nested.name,
+        "profile": "reviewer",
+        "session_title": "review builder output",
+        "status": "completed",
+        "result": {
+            "status": "ok", "execution_status": "completed", "contract_status": "valid",
+            "summary": "review passed", "artifacts": ["/tmp/review.md"],
+            "errors": [], "next_steps": [],
+        },
+        "result_path": str(nested / "result.json"),
+    }]
+
+
+def test_collect_nested_delegations_ignores_unrelated_and_bounds_results(tmp_path):
+    parent = tmp_path / "parent" / "pd_20260724_120000_parent"
+    parent.mkdir(parents=True)
+    profile_home = tmp_path / "builder"
+    runs = profile_home / "profile_delegate" / "runs"
+    for index in range(core.MAX_NESTED_DELEGATIONS + 3):
+        nested = runs / f"pd_20260724_12{index:04d}_nested{index:02d}"
+        nested.mkdir(parents=True)
+        (nested / "request.json").write_text(json.dumps({
+            "task_id": nested.name, "profile": "reviewer",
+            "parent_task_id": parent.name if index else "someone_else",
+        }), encoding="utf-8")
+        (nested / "status.json").write_text(json.dumps({"status": "running"}), encoding="utf-8")
+
+    found = core.collect_nested_delegations(parent, {"profile_home": str(profile_home)})
+
+    assert len(found) == core.MAX_NESTED_DELEGATIONS
+    assert all(item["task_id"] != "pd_20260724_120000_nested00" for item in found)
+
+
+def test_sync_delegate_surfaces_nested_delegation_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "caller-runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setenv("PROFILE_DELEGATE_MAX_DEPTH", "2")
+    profile_home = tmp_path / "builder"
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
+    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    monkeypatch.setattr(
+        core, "validate_profile",
+        lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(profile_home)),
+    )
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+
+    def fake_run_capped(cmd, **kwargs):
+        parent_task_id = kwargs["env"]["PROFILE_DELEGATE_PARENT_TASK_ID"]
+        nested = profile_home / "profile_delegate" / "runs" / "pd_20260724_120100_nested"
+        nested.mkdir(parents=True)
+        (nested / "request.json").write_text(json.dumps({
+            "task_id": nested.name, "profile": "reviewer",
+            "session_title": "review builder output", "parent_task_id": parent_task_id,
+        }), encoding="utf-8")
+        (nested / "status.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+        (nested / "result.json").write_text(json.dumps({
+            "status": "ok", "execution_status": "completed", "contract_status": "valid",
+            "summary": "review passed", "artifacts": [], "errors": [], "next_steps": [],
+        }), encoding="utf-8")
+        stdout = '{"status":"ok","summary":"built","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: child_sid'
+        core.text_safe_write(kwargs["stdout_path"], stdout)
+        core.text_safe_write(kwargs["stderr_path"], "")
+        return {
+            "exit_code": 0, "timed_out": False, "stdout_truncated": False,
+            "stderr_truncated": False, "stdout_chars": len(stdout), "stderr_chars": 0,
+            "stdout_limit": 200000, "stderr_limit": 100000,
+        }
+
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
+    monkeypatch.setattr(core, "rename_session", lambda *args, **kwargs: {"session_renamed": True})
+
+    final = core.delegate_profile("builder", "build it", session_title="build with review")
+
+    assert final["result"]["nested_delegations"][0]["profile"] == "reviewer"
+    assert final["result"]["nested_delegations"][0]["result"]["summary"] == "review passed"
+    saved = json.loads(Path(final["paths"]["result"]).read_text(encoding="utf-8"))
+    assert saved["nested_delegations"] == final["result"]["nested_delegations"]
 
 
 def test_child_environment_strip_only_strips_without_policy_flags(monkeypatch):

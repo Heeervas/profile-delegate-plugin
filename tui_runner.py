@@ -28,7 +28,10 @@ def _environment(request: Dict[str, Any], run_dir: Path) -> Dict[str, str]:
     mode = core.coerce_child_approval_mode(
         request.get("child_approval_mode", core.DEFAULT_CHILD_APPROVAL_MODE)
     )
-    env = core.child_environment(int(request.get("delegate_depth") or 0), mode)
+    env = core.child_environment(
+        int(request.get("delegate_depth") or 0), mode,
+        core.ensure_text(request.get("task_id") or run_dir.name),
+    )
     env["HERMES_HOME"] = core.ensure_text(request.get("profile_home"))
     execution = request.get("effective_execution") or {}
     if execution.get("toolsets"):
@@ -356,6 +359,9 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             result["error_code"] = error_code or "tui_turn_error"
             result["errors"] = core.coerce_list(result.get("errors")) + [result["error_code"]]
         core.apply_execution_status(result, final_status)
+    nested_delegations = core.collect_nested_delegations(run_dir, request)
+    if nested_delegations:
+        result["nested_delegations"] = nested_delegations
     if child_session_id:
         result["session_id"] = child_session_id
     result.update(
