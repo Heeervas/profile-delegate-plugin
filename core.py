@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -98,11 +99,15 @@ VALID_RUN_STATUSES = {"running", "cancelling", "completed", "failed", "cancelled
 TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
 TERMINAL_OWNED_STATUS_FIELDS = {
     "status", "phase", "ended_at", "error_code", "exit_code", "timed_out",
-    "child_session_id", "transport_alive", "transport_pid",
+    "child_session_id", "transport_alive", "transport_pid", "terminal_reason",
+    "worker_alive", "cancellation_requested", "interrupted",
 }
 MAX_STEER_CHARS = 12_000
 MAX_NESTED_DELEGATIONS = 8
 MAX_NESTED_SUMMARY_CHARS = 4_000
+SYNC_ACTIVITY_INTERVAL_SECONDS = 10.0
+SYNC_STATUS_INTERVAL_SECONDS = 2.0
+SYNC_TERMINATION_GRACE_SECONDS = 2.0
 
 TRANSIENT_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     ("incomplete_chunked_read", re.compile(r"^(?:[\w.]+\.)?RemoteProtocolError:\s*(?:peer closed connection without sending complete message body|incomplete chunked read).*$", re.I)),
@@ -259,6 +264,16 @@ def derive_activity(status: Any) -> Dict[str, Any]:
     lifecycle = ensure_text(data.get("status")).strip().lower()
     if lifecycle in TERMINAL_RUN_STATUSES:
         return {"activity": "finished", "worker_alive": None}
+    if (
+        lifecycle in {"running", "cancelling"}
+        and data.get("transport") == "cli"
+        and data.get("process_identity")
+        and isinstance(data.get("worker_alive"), bool)
+    ):
+        return {
+            "activity": "active" if data["worker_alive"] else "stale",
+            "worker_alive": data["worker_alive"],
+        }
     if lifecycle not in {"running", "cancelling"} or data.get("background_worker_mode") != "detached":
         return {"activity": "unknown", "worker_alive": None}
     alive = probe_worker_alive(data.get("worker_pid"))
@@ -313,6 +328,48 @@ def json_safe_write(path: Path, data: Any) -> None:
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     chmod_best_effort(tmp, 0o600)
     tmp.replace(path)
+
+
+def _runtime_activity_touch() -> Optional[Any]:
+    """Resolve Hermes' thread-local activity helper without requiring Hermes in direct tests."""
+    try:
+        from tools.environments.base import touch_activity_if_due
+        return touch_activity_if_due
+    except Exception:
+        return None
+
+
+def _runtime_interrupt_check() -> Any:
+    """Resolve Hermes' per-tool-thread interrupt predicate defensively."""
+    try:
+        from tools.interrupt import is_interrupted
+        return is_interrupted
+    except Exception:
+        return lambda: False
+
+
+def _process_identity(pid: int) -> str:
+    """Return a bounded process-start identity token for status evidence."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
+        return f"linux-proc:{pid}:{fields[21]}"
+    except Exception:
+        return f"owned-popen:{pid}"
+
+
+def _leader_exited_without_reap(pid: int) -> bool:
+    """Observe direct-child exit without reaping it, preserving PID/PGID ownership."""
+    waitid = getattr(os, "waitid", None)
+    wnowait = getattr(os, "WNOWAIT", None)
+    if waitid is None or wnowait is None:
+        return False
+    try:
+        info = waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | wnowait)
+        return info is not None
+    except ChildProcessError:
+        return True
+    except Exception:
+        return False
 
 
 def write_result_artifact(run_dir: Path, result: Dict[str, Any]) -> None:
@@ -1217,86 +1274,166 @@ def append_capped(path: Path, chunk: str, written: int, limit: int) -> Tuple[int
     return written + len(kept), len(chunk) > remaining
 
 
-def run_capped_subprocess(cmd: List[str], cwd: Path, env: Dict[str, str], timeout: int, stdout_path: Path, stderr_path: Path) -> Dict[str, Any]:
-    """Run child process while streaming stdout/stderr to capped files."""
+def _terminate_owned_process_group(proc: subprocess.Popen, grace: float) -> Tuple[Optional[int], bool]:
+    """TERM, then KILL if needed, and always reap the directly owned child."""
+    escalated = False
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    grace_deadline = time.monotonic() + max(0.0, grace)
+    while time.monotonic() < grace_deadline:
+        try:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(min(0.05, max(0.0, grace_deadline - time.monotonic())))
+    else:
+        escalated = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        return proc.wait(timeout=5), escalated
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return proc.wait(timeout=5), True
+
+
+def _foreground_cancel_command(run_dir: Optional[Path]) -> Optional[Tuple[Path, Dict[str, Any]]]:
+    if run_dir is None:
+        return None
+    for command_path, command in _pending_control_commands(run_dir):
+        if ensure_text(command.get("type")) == "cancel":
+            return command_path, command
+    return None
+
+
+def run_capped_subprocess(
+    cmd: List[str], cwd: Path, env: Dict[str, str], timeout: int,
+    stdout_path: Path, stderr_path: Path, *, run_dir: Optional[Path] = None,
+    activity_touch: Optional[Any] = None, interrupt_check: Optional[Any] = None,
+    activity_interval: float = SYNC_ACTIVITY_INTERVAL_SECONDS,
+    status_interval: float = SYNC_STATUS_INTERVAL_SECONDS,
+    termination_grace: float = SYNC_TERMINATION_GRACE_SECONDS,
+) -> Dict[str, Any]:
+    """Run a bounded child while propagating parent activity and interruption."""
     stdout_limit, stderr_limit = output_limits()
     text_safe_write(stdout_path, "")
     text_safe_write(stderr_path, "")
-    stdout_written = 0
-    stderr_written = 0
-    stdout_truncated = False
-    stderr_truncated = False
-    timed_out = False
+    stdout_written = stderr_written = 0
+    stdout_truncated = stderr_truncated = False
+    timed_out = cancelled = interrupted = False
+    stop_reason = "exited"
     exit_code: Optional[int] = None
     diagnostic_tails = {"stdout": "", "stderr": ""}
+    touch = activity_touch if activity_touch is not None else _runtime_activity_touch()
+    interrupted_now = interrupt_check if interrupt_check is not None else _runtime_interrupt_check()
+    started = time.monotonic()
+    activity_state = {"last_touch": started, "start": started, "interval": activity_interval}
+    last_status = 0.0
+    termination_escalated = False
 
     with subprocess.Popen(
-        cmd,
-        cwd=str(cwd),
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        cmd, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         start_new_session=True,
     ) as proc:
-        assert proc.stdout is not None
-        assert proc.stderr is not None
+        assert proc.stdout is not None and proc.stderr is not None
         sel = selectors.DefaultSelector()
         sel.register(proc.stdout, selectors.EVENT_READ, "stdout")
         sel.register(proc.stderr, selectors.EVENT_READ, "stderr")
         deadline = time.monotonic() + timeout
-
-        while sel.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                break
-            events = sel.select(timeout=min(0.2, remaining))
-            if not events:
-                if proc.poll() is not None:
+        identity = _process_identity(proc.pid)
+        if run_dir is not None:
+            merge_run_status_best_effort(run_dir, {
+                "phase": "child_running", "worker_pid": proc.pid,
+                "process_identity": identity, "worker_alive": True,
+                "latest_activity": now_iso(), "timeout_seconds": timeout,
+                "timeout_deadline": (datetime.now(timezone.utc) + timedelta(seconds=timeout)).isoformat(),
+                "cancellation_requested": False, "interrupted": False,
+            })
+        try:
+            while True:
+                now = time.monotonic()
+                cancel_command = _foreground_cancel_command(run_dir)
+                child_exited = _leader_exited_without_reap(proc.pid)
+                if not child_exited and bool(interrupted_now()):
+                    interrupted, stop_reason = True, "interrupted"
+                    break
+                if not child_exited and cancel_command is not None:
+                    cancelled, stop_reason = True, "cancelled"
+                    break
+                remaining = deadline - now
+                if remaining <= 0:
+                    timed_out, stop_reason = True, "timed_out"
+                    break
+                if not child_exited:
+                    if touch is not None:
+                        touch(activity_state, "profile_delegate child running")
+                    if run_dir is not None and now - last_status >= max(0.01, status_interval):
+                        merge_run_status_best_effort(run_dir, {
+                            "phase": "child_running", "worker_alive": True,
+                            "latest_activity": now_iso(),
+                        })
+                        last_status = now
+                if child_exited and not sel.get_map():
+                    break
+                poll_slice = min(0.2, remaining)
+                if touch is not None:
+                    poll_slice = min(poll_slice, max(0.01, activity_interval))
+                events = sel.select(timeout=poll_slice) if sel.get_map() else []
+                if not events:
+                    if not sel.get_map():
+                        time.sleep(poll_slice)
                     continue
-                continue
-            for key, _mask in events:
-                stream = key.fileobj
-                chunk_bytes = os.read(stream.fileno(), 8192)
-                if not chunk_bytes:
-                    try:
-                        sel.unregister(stream)
-                    except Exception:
-                        pass
-                    continue
-                chunk = chunk_bytes.decode("utf-8", "replace")
-                diagnostic_tails[key.data] = (diagnostic_tails[key.data] + chunk)[-DIAGNOSTIC_TAIL_CHARS:]
-                if key.data == "stdout":
-                    stdout_written, truncated = append_capped(stdout_path, chunk, stdout_written, stdout_limit)
-                    stdout_truncated = stdout_truncated or truncated
-                else:
-                    stderr_written, truncated = append_capped(stderr_path, chunk, stderr_written, stderr_limit)
-                    stderr_truncated = stderr_truncated or truncated
+                for key, _mask in events:
+                    stream = key.fileobj
+                    chunk_bytes = os.read(stream.fileno(), 8192)
+                    if not chunk_bytes:
+                        try:
+                            sel.unregister(stream)
+                        except Exception:
+                            pass
+                        continue
+                    chunk = chunk_bytes.decode("utf-8", "replace")
+                    diagnostic_tails[key.data] = (diagnostic_tails[key.data] + chunk)[-DIAGNOSTIC_TAIL_CHARS:]
+                    if key.data == "stdout":
+                        stdout_written, truncated = append_capped(stdout_path, chunk, stdout_written, stdout_limit)
+                        stdout_truncated = stdout_truncated or truncated
+                    else:
+                        stderr_written, truncated = append_capped(stderr_path, chunk, stderr_written, stderr_limit)
+                        stderr_truncated = stderr_truncated or truncated
+        except BaseException:
+            _terminate_owned_process_group(proc, termination_grace)
+            raise
+        finally:
+            sel.close()
 
-        if timed_out:
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
+        if stop_reason != "exited":
+            exit_code, termination_escalated = _terminate_owned_process_group(proc, termination_grace)
         else:
             exit_code = proc.wait(timeout=max(1, int(deadline - time.monotonic()) + 1))
+        if run_dir is not None:
+            merge_run_status(run_dir, {
+                "phase": "child_stopped", "worker_alive": False,
+                "latest_activity": now_iso(), "cancellation_requested": cancelled,
+                "interrupted": interrupted,
+            })
+            cancel_command = _foreground_cancel_command(run_dir)
+            if cancel_command is not None and cancelled:
+                _ack_control(run_dir, cancel_command[0], cancel_command[1], "accepted")
 
     chmod_best_effort(stdout_path, 0o600)
     chmod_best_effort(stderr_path, 0o600)
     return {
-        "exit_code": exit_code,
-        "timed_out": timed_out,
-        "stdout_truncated": stdout_truncated,
-        "stderr_truncated": stderr_truncated,
-        "stdout_chars": stdout_written,
-        "stderr_chars": stderr_written,
-        "stdout_limit": stdout_limit,
-        "stderr_limit": stderr_limit,
+        "exit_code": exit_code, "timed_out": timed_out, "cancelled": cancelled,
+        "interrupted": interrupted, "stop_reason": stop_reason,
+        "worker_pid": proc.pid, "process_identity": identity,
+        "termination_escalated": termination_escalated,
+        "stdout_truncated": stdout_truncated, "stderr_truncated": stderr_truncated,
+        "stdout_chars": stdout_written, "stderr_chars": stderr_written,
+        "stdout_limit": stdout_limit, "stderr_limit": stderr_limit,
         "stdout_diagnostic_tail": diagnostic_tails["stdout"],
         "stderr_diagnostic_tail": diagnostic_tails["stderr"],
     }
@@ -1765,12 +1902,14 @@ def _control_filename(seq: int, command_id: str) -> str:
 
 
 def _write_control_command(run_dir: Path, command_type: str, payload: Dict[str, Any],
-                           caller_origin: Optional[Dict[str, Any]]) -> Tuple[Path, Dict[str, Any]]:
+                           caller_origin: Optional[Dict[str, Any]], *,
+                           lock_held: bool = False) -> Tuple[Path, Dict[str, Any]]:
     status = read_json_file(run_dir / "status.json")
     lifecycle = ensure_text(status.get("status")).lower()
     if lifecycle in TERMINAL_RUN_STATUSES:
         raise ProfileDelegateError(f"run is already terminal: {lifecycle}", "run_terminal", status=lifecycle)
-    if not status.get("background") or status.get("transport") != "tui_stdio":
+    foreground_cancel = command_type == "cancel" and not status.get("background") and status.get("transport") == "cli"
+    if not foreground_cancel and (not status.get("background") or status.get("transport") != "tui_stdio"):
         raise ProfileDelegateError("live controls require an active background TUI run", "control_unavailable")
     allowed, matched_by = origin_match(
         normalize_persisted_origin(status), normalize_origin(caller_origin), "current_session"
@@ -1778,7 +1917,8 @@ def _write_control_command(run_dir: Path, command_type: str, payload: Dict[str, 
     if not allowed or not matched_by:
         raise ProfileDelegateError("control denied: caller is not the exact originating session", "origin_mismatch")
     root, commands, _ = _control_dirs(run_dir)
-    with FingerprintLock(f"control-{run_dir.name}"):
+    lock_context = nullcontext() if lock_held else FingerprintLock(f"control-{run_dir.name}")
+    with lock_context:
         seq_path = root / "next_seq.json"
         try:
             seq = int(read_json_file(seq_path).get("next_seq") or 1)
@@ -1864,9 +2004,9 @@ def _bounded_diagnostic_lines(text: str) -> List[str]:
 def classify_transient_failure(
     *, exit_code: Optional[int], timed_out: bool, stdout: str, stderr: str,
     parsed_result: Optional[Dict[str, Any]], stdout_truncated: bool = False,
-    stderr_truncated: bool = False,
+    stderr_truncated: bool = False, interrupted: bool = False,
 ) -> Optional[str]:
-    if timed_out or exit_code in {None, 0, -9, 137}:
+    if interrupted or timed_out or exit_code in {None, 0, -9, -15, 137, 143}:
         return None
     if isinstance(parsed_result, dict) and ensure_text(parsed_result.get("status")).lower() in VALID_RESULT_STATUSES:
         return None
@@ -1893,6 +2033,19 @@ def build_recovery_prompt(attempt_number: int) -> str:
     if attempt_number >= 3:
         prompt += "This is the final automatic recovery attempt.\n"
     return prompt
+
+
+def _wait_for_transient_resume(run_dir: Path, deadline: float) -> str:
+    """Wait for the retry delay while remaining responsive to parent cancellation."""
+    interrupted_now = _runtime_interrupt_check()
+    wake_at = min(deadline, time.monotonic() + TRANSIENT_RESUME_DELAY_SECONDS)
+    while time.monotonic() < wake_at:
+        if bool(interrupted_now()):
+            return "interrupted"
+        if _foreground_cancel_command(run_dir) is not None:
+            return "cancelled"
+        time.sleep(min(0.2, max(0.0, wake_at - time.monotonic())))
+    return "timed_out" if time.monotonic() >= deadline else "ready"
 
 
 def rename_session(hermes_bin: str, profile: str, session_id: str, title: str, cwd: Path, env: Dict[str, str], timeout: int = 30) -> Dict[str, Any]:
@@ -2116,9 +2269,13 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
             stderr_path = run_dir / ("stderr.txt" if attempt == 1 else f"attempt_{attempt}_stderr.txt")
             cmd = build_child_command(request, run_dir, prompt_path=prompt_path, resume_session_id=stable_session_id if attempt > 1 else None)
             started = time.monotonic()
-            run_meta = run_capped_subprocess(cmd, cwd=cwd, env=env, timeout=remaining, stdout_path=stdout_path, stderr_path=stderr_path)
+            run_meta = run_capped_subprocess(
+                cmd, cwd=cwd, env=env, timeout=remaining,
+                stdout_path=stdout_path, stderr_path=stderr_path, run_dir=run_dir,
+            )
             exit_code = run_meta["exit_code"]
             timed_out = bool(run_meta["timed_out"])
+            stop_reason = ensure_text(run_meta.get("stop_reason") or "exited")
             stdout_attempt = tail_text(stdout_path, run_meta["stdout_limit"])
             stderr_attempt = tail_text(stderr_path, run_meta["stderr_limit"])
             footer_id = extract_session_id_footer(stdout_attempt) or extract_session_id_footer(stderr_attempt)
@@ -2135,9 +2292,10 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
                 parsed_result=parsed_attempt,
                 stdout_truncated=bool(run_meta.get("stdout_truncated")),
                 stderr_truncated=bool(run_meta.get("stderr_truncated")),
+                interrupted=stop_reason in {"cancelled", "interrupted"},
             )
             history.append({"attempt": attempt, "exit_code": exit_code, "timed_out": timed_out, "transient_reason": transient, "session_id": stable_session_id, "duration_seconds": round(time.monotonic() - started, 3), "stdout": str(stdout_path), "stderr": str(stderr_path)})
-            if integrity_error or not transient or attempt_index >= max_resumes:
+            if stop_reason in {"cancelled", "interrupted", "timed_out"} or integrity_error or not transient or attempt_index >= max_resumes:
                 break
             if not stable_session_id:
                 integrity_error = "transient_resume_session_missing"
@@ -2145,7 +2303,16 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
             if deadline - time.monotonic() < TRANSIENT_RESUME_DELAY_SECONDS + 10:
                 integrity_error = "transient_resume_budget_exhausted"
                 break
-            time.sleep(TRANSIENT_RESUME_DELAY_SECONDS)
+            resume_wait = _wait_for_transient_resume(run_dir, deadline)
+            if resume_wait != "ready":
+                run_meta.update({
+                    "stop_reason": resume_wait,
+                    "interrupted": resume_wait == "interrupted",
+                    "cancelled": resume_wait == "cancelled",
+                    "timed_out": resume_wait == "timed_out",
+                })
+                timed_out = resume_wait == "timed_out"
+                break
 
     if history and history[-1]["attempt"] > 1:
         shutil.copyfile(history[-1]["stdout"], run_dir / "stdout.txt")
@@ -2155,7 +2322,12 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     parse_stdout = strip_session_id_footer(stdout)
     approval_timeout_marker = next((marker for marker in APPROVAL_TIMEOUT_MARKERS if marker in stdout or marker in stderr), None)
 
-    if timed_out:
+    stop_reason = ensure_text(run_meta.get("stop_reason") or ("timed_out" if timed_out else "exited"))
+    if stop_reason in {"cancelled", "interrupted"}:
+        error_code, final_status = "cancelled", "cancelled"
+        summary = "Delegated profile was interrupted by its parent." if stop_reason == "interrupted" else "Delegated profile was cancelled."
+        result = {"status": "failed", "execution_status": final_status, "contract_status": "not_evaluated", "summary": summary, "artifacts": [], "errors": ["cancelled"], "next_steps": [], "structured": True, "error_code": error_code}
+    elif timed_out:
         error_code, final_status = "timeout", "timed_out"
         result = {"status": "failed", "execution_status": final_status, "contract_status": "not_evaluated", "summary": f"Delegated profile timed out after {timeout} seconds.", "artifacts": [], "errors": ["timeout"], "next_steps": [], "structured": True, "error_code": error_code}
     elif integrity_error:
@@ -2200,7 +2372,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
         result["session_id"] = child_session_id
     result.update({"requested_execution": request.get("requested_execution") or {}, "effective_execution": request.get("effective_execution") or {}, "effective_capabilities": request.get("effective_capabilities") or {}, "approval_policy": request.get("approval_policy") or {}, "recovery_history": history})
     write_result_artifact(run_dir, result)
-    merge_run_status(run_dir, {"status": final_status, "phase": final_status, "ended_at": now_iso(), "exit_code": exit_code, "timed_out": timed_out, "error_code": error_code, "stdout_truncated": bool(run_meta.get("stdout_truncated")), "stderr_truncated": bool(run_meta.get("stderr_truncated")), "stdout_chars": run_meta.get("stdout_chars"), "stderr_chars": run_meta.get("stderr_chars"), "stdout_limit": run_meta.get("stdout_limit"), "stderr_limit": run_meta.get("stderr_limit"), "child_session_id": child_session_id, "recovery_history": history, **rename_meta}, terminal=True)
+    merge_run_status(run_dir, {"status": final_status, "phase": final_status, "ended_at": now_iso(), "exit_code": exit_code, "timed_out": timed_out, "error_code": error_code, "terminal_reason": stop_reason, "worker_alive": False, "cancellation_requested": stop_reason == "cancelled", "interrupted": stop_reason == "interrupted", "stdout_truncated": bool(run_meta.get("stdout_truncated")), "stderr_truncated": bool(run_meta.get("stderr_truncated")), "stdout_chars": run_meta.get("stdout_chars"), "stderr_chars": run_meta.get("stderr_chars"), "stdout_limit": run_meta.get("stdout_limit"), "stderr_limit": run_meta.get("stderr_limit"), "child_session_id": child_session_id, "recovery_history": history, **rename_meta}, terminal=True)
     return {"success": wrapper_success(final_status, result), "mode": "sync", "task_id": request.get("task_id", run_dir.name), "profile": profile, "status": final_status, "error_code": error_code, "session_title": title_text, "session_mode": mode, "requested_session_id": resume_id, "child_approval_mode": child_approval_mode, "requested_execution": request.get("requested_execution") or {}, "effective_execution": request.get("effective_execution") or {}, "effective_capabilities": request.get("effective_capabilities") or {}, "approval_policy": request.get("approval_policy") or {}, "child_session_id": child_session_id, "recovery_history": history, **rename_meta, "result": result, "paths": base_paths(run_dir), "exit_code": exit_code, "timed_out": timed_out, "stdout_truncated": run_meta.get("stdout_truncated"), "stderr_truncated": run_meta.get("stderr_truncated")}
 
 
@@ -2489,7 +2661,10 @@ def delegate_profile(
             ),
         }
         status = {**request, "status": "running", "started_at": now_iso(), "ended_at": None,
-                  "exit_code": None, "error_code": None, "concurrency_slot": None,
+                  "phase": "starting", "exit_code": None, "error_code": None, "concurrency_slot": None,
+                  "worker_pid": None, "worker_alive": None, "process_identity": None,
+                  "latest_activity": None, "terminal_reason": None,
+                  "cancellation_requested": False, "interrupted": False,
                   "notified_at": None, "notification_status": None}
         json_safe_write(run_dir / "request.json", {**request, "task": task_text, "context": context_text, "output_contract": contract_text})
         text_safe_write(run_dir / "prompt.txt", prompt)
@@ -2603,11 +2778,17 @@ def profile_delegate_status(
         "worker_pid": status.get("worker_pid"),
         "worker_alive": activity["worker_alive"],
         "activity": activity["activity"],
+        "process_identity": status.get("process_identity"),
         "phase": status.get("phase"),
         "transport": status.get("transport"),
         "transport_alive": status.get("transport_alive"),
         "child_session_id": status.get("child_session_id"),
         "latest_activity": status.get("latest_activity"),
+        "timeout_seconds": status.get("timeout_seconds"),
+        "timeout_deadline": status.get("timeout_deadline"),
+        "terminal_reason": status.get("terminal_reason"),
+        "cancellation_requested": bool(status.get("cancellation_requested", False)),
+        "interrupted": bool(status.get("interrupted", False)),
         "event_metadata": _safe_event_metadata(status),
         "last_control": status.get("last_control"),
         "notification_status": status.get("notification_status"),
@@ -2667,24 +2848,31 @@ def profile_delegate_cancel(
             "idempotent": True,
         }
     _, commands, acks = _control_dirs(run_dir)
-    for path in sorted(commands.glob("*.json")):
-        try:
-            existing = read_json_file(path)
-        except ProfileDelegateError:
-            continue
-        if existing.get("type") != "cancel":
-            continue
-        ack_path = acks / path.name
-        ack = read_json_file(ack_path) if ack_path.exists() else None
-        return {
-            "success": True,
-            "task_id": run_dir.name,
-            "command_id": existing.get("command_id"),
-            "state": ack.get("state") if ack else "cancel_pending",
-            "idempotent": True,
-            "ack": ack,
-        }
-    _, command = _write_control_command(run_dir, "cancel", {}, caller_origin)
+    with FingerprintLock(f"control-{run_dir.name}"):
+        for path in sorted(commands.glob("*.json")):
+            try:
+                existing = read_json_file(path)
+            except ProfileDelegateError:
+                continue
+            if existing.get("type") != "cancel":
+                continue
+            ack_path = acks / path.name
+            ack = read_json_file(ack_path) if ack_path.exists() else None
+            return {
+                "success": True,
+                "task_id": run_dir.name,
+                "command_id": existing.get("command_id"),
+                "state": ack.get("state") if ack else "cancel_pending",
+                "idempotent": True,
+                "ack": ack,
+            }
+        _, command = _write_control_command(
+            run_dir, "cancel", {}, caller_origin, lock_held=True,
+        )
+        if not status.get("background") and status.get("transport") == "cli":
+            merge_run_status(run_dir, {
+                "phase": "cancellation_requested", "cancellation_requested": True,
+            })
     ack = _wait_control_ack(run_dir, command)
     return {
         "success": True,

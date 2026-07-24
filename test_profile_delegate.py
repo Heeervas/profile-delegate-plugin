@@ -898,7 +898,8 @@ def test_run_capped_subprocess_timeout_keeps_bounded_output(tmp_path, monkeypatc
         stderr_path=tmp_path / "stderr.txt",
     )
     assert result["timed_out"] is True
-    assert result["exit_code"] is None
+    assert result["stop_reason"] == "timed_out"
+    assert result["exit_code"] in {-15, -9}
     assert len((tmp_path / "stdout.txt").read_text()) <= 12
     grandchild_pid = int(marker.read_text())
     deadline = time.time() + 2
