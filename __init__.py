@@ -47,7 +47,9 @@ TOOL_DESCRIPTION = (
     "Supports fresh one-shot runs or explicit target-profile session resume; no parent approval brokering. "
     "Caller chooses what context to pass; prefer compact summaries and artifact paths over giant transcript dumps. "
     "The target profile's policy/tool permissions apply. Requires PROFILE_DELEGATE_ALLOWED_PROFILES unless explicitly configured to allow all. "
-    "Returns compact JSON plus local run artifact paths."
+    "Returns compact JSON plus local run artifact paths. When a delegated child uses profile_delegate, "
+    "its direct nested run results are surfaced in result.nested_delegations; inspect/reuse those before "
+    "delegating the same work again."
 )
 
 

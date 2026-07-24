@@ -23,6 +23,7 @@ Example uses:
 - Launches Hermes in-process through a plugin-owned bootstrap before agent construction. The bootstrap installs deterministic child approvals and optional schema filtering, then runs quiet single-query mode with a prompt file reference. `--yolo` is added only when `child_approval_mode: approve_yolo` is explicit.
 - Explicit target-profile allowlist by default.
 - Recursion/depth guard via `PROFILE_DELEGATE_MAX_DEPTH`.
+- Direct nested-delegation lineage and result surfacing: a child run created through `profile_delegate` is linked to its parent and returned under `result.nested_delegations`, so the controller can reuse a builder's reviewer result instead of paying for the same review twice.
 - Global concurrency guard via lock files and `PROFILE_DELEGATE_MAX_CONCURRENT`.
 - Bounded streaming stdout/stderr capture via `PROFILE_DELEGATE_MAX_STDOUT_CHARS` and `PROFILE_DELEGATE_MAX_STDERR_CHARS`.
 - Optional working-directory allowlist via `PROFILE_DELEGATE_ALLOWED_WORKDIRS`.
@@ -225,6 +226,7 @@ Notes:
 - `session_title` is required, truncated to 50 chars, and used to rename new sessions after the parent parses Hermes' `session_id:` footer. Short Spanish/broken-English shorthand is fine.
 - `session_mode` defaults to `new`; use `resume` with `session_id` to continue a target-profile session. Find ids with `hermes -p <profile> sessions list`.
 - `PROFILE_DELEGATE_MAX_TRANSIENT_RESUMES` controls automatic same-session transport recovery (`0..2`, default `2`). Recovery is limited to the plugin's anchored allowlist; timeout, policy/approval, validation, quota/auth, OOM/SIGKILL, and ambiguous failures are never retried.
+- If the delegated profile invokes `profile_delegate`, the plugin propagates the parent task id into the nested child and appends bounded direct-child status/result summaries to the parent's `result.nested_delegations`. Controllers should inspect that field before launching a follow-up delegate for the same reviewer/research task. This is direct-child lineage, not a general message bus.
 - `context` is caller-selected. Keep it compact; pass paths and summaries instead of dumping whole transcripts.
 - `workdir` defaults to the current process working directory.
 - Explicit `workdir` values require `PROFILE_DELEGATE_ALLOWED_WORKDIRS`.

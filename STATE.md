@@ -1,7 +1,7 @@
 # Profile Delegate project state
 
-Last updated: 2026-07-22 by Adán
-Status: release candidate verified and independently approved; awaiting commit/push and remote CI
+Last updated: 2026-07-24 by Adán
+Status: nested-delegation visibility implemented locally; release validation pending
 
 ## Active objective
 
@@ -24,6 +24,7 @@ Ship the plugin-only reliability reset and minimal agent-managed project operati
 - Authoritative CLI/TUI timeout, cancellation, transport, and nonzero-exit semantics.
 - Portable sanitized historical regression fixtures.
 - Public lifecycle/schema parity and updated operator documentation.
+- Direct nested `profile_delegate` runs are linked to their parent and surfaced under `result.nested_delegations`, allowing controllers to reuse child-performed reviews instead of repeating them.
 - Historical durable-delivery/outbox plans marked rejected or superseded.
 - Minimal tracked agent-managed project contracts.
 
@@ -47,9 +48,9 @@ Ship the plugin-only reliability reset and minimal agent-managed project operati
 
 ## Latest validation result
 
-- Full pytest: 303 passed after the operating-contract retrofit.
-- Ruff, Python compilation, YAML parse, `git diff --check`, secret scan, and release registration/handler smoke: passed.
-- Final independent Reviewer re-review: PASS after CI dependency and state-contract corrections.
+- Full pytest: 306 passed after nested-delegation lineage/result surfacing.
+- Ruff, Python compilation, `git diff --check`, and release registration/handler smoke: passed.
+- Live gateway processes still require restart/reload before this code and schema guidance become active.
 
 ## Next action
 
