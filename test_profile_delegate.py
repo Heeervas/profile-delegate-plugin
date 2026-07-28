@@ -29,6 +29,22 @@ def setup_function(_function):
     core.os.environ["PROFILE_DELEGATE_DEPTH"] = "0"
 
 
+@pytest.mark.parametrize(
+    ("execution_status", "wrapper_success", "expected"),
+    [
+        ("completed", True, "completed"),
+        ("completed", False, "completed"),
+        ("failed", False, "error"),
+        ("timed_out", False, "error"),
+        ("cancelled", False, "error"),
+    ],
+)
+def test_async_completion_event_status_tracks_execution_not_wrapper_success(
+    execution_status: str, wrapper_success: bool, expected: str,
+):
+    assert core.async_completion_event_status(execution_status, wrapper_success) == expected
+
+
 def test_extract_json_pure():
     assert core.extract_json_object('{"status":"ok","summary":"x"}') == {"status": "ok", "summary": "x"}
 
@@ -1002,7 +1018,18 @@ def test_delegate_background_start_failure_marks_run_failed(tmp_path, monkeypatc
     assert result["contract_status"] == "not_evaluated"
 
 
-def test_push_profile_delegate_completion_queues_async_event(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("final_success", "task_status", "expected_event_status"),
+    [
+        (True, "ok", "completed"),
+        (False, "unknown", "completed"),
+        (False, "blocked", "completed"),
+        (False, "failed", "completed"),
+    ],
+)
+def test_push_profile_delegate_completion_queues_async_event(
+    tmp_path, monkeypatch, final_success, task_status, expected_event_status,
+):
     monkeypatch.setenv("PROFILE_DELEGATE_NOTIFY_MAX_SUMMARY_CHARS", "1000")
     run_dir = tmp_path / "runs" / "pd_20260101_010101_abc123"
     run_dir.mkdir(parents=True)
@@ -1017,7 +1044,15 @@ def test_push_profile_delegate_completion_queues_async_event(tmp_path, monkeypat
     }
     core.json_safe_write(run_dir / "request.json", request)
     core.json_safe_write(run_dir / "status.json", {**request, "status": "completed"})
-    final = {"success": True, "status": "completed", "result": {"status": "ok", "summary": "done", "artifacts": [], "errors": [], "next_steps": []}, "paths": core.base_paths(run_dir)}
+    final = {
+        "success": final_success,
+        "status": "completed",
+        "result": {
+            "status": task_status, "summary": "done", "artifacts": [],
+            "errors": [], "next_steps": [],
+        },
+        "paths": core.base_paths(run_dir),
+    }
 
     class Queue:
         def __init__(self):
@@ -1037,6 +1072,7 @@ def test_push_profile_delegate_completion_queues_async_event(tmp_path, monkeypat
     assert evt["type"] == "async_delegation"
     assert evt["session_key"] == "discord:guild:chan:thread"
     assert evt["delegation_id"] == run_dir.name
+    assert evt["status"] == expected_event_status
     status = json.loads((run_dir / "status.json").read_text())
     assert status["notification_status"] == "queued"
     assert status["notified_at"]
@@ -2165,4 +2201,5 @@ def test_no_post_creation_direct_status_writes_remain():
     core_source = Path(core.__file__).read_text(encoding="utf-8")
     runner_source = Path(core.__file__).with_name("tui_runner.py").read_text(encoding="utf-8")
     assert core_source.count('json_safe_write(run_dir / "status.json"') == 2
+    assert core_source.count("_write_locked_status_snapshot(run_dir, current)") == 3
     assert 'json_safe_write(run_dir / "status.json"' not in runner_source

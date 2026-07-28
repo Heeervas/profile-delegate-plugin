@@ -1,7 +1,7 @@
 # Profile Delegate project state
 
-Last updated: 2026-07-24 by Adán
-Status: synchronous lifecycle repair independently approved; commit pending
+Last updated: 2026-07-28 by Adán
+Status: dead-worker reconciliation and Markdown return repair validated; activation pending
 
 ## Active objective
 
@@ -28,6 +28,8 @@ Ship the plugin-only reliability reset and minimal agent-managed project operati
 - Foreground subprocesses propagate bounded parent activity, consume Hermes interruption state and exact-origin cancellation markers, terminate/reap their complete owned process group, and publish truthful bounded lifecycle status.
 - Historical durable-delivery/outbox plans marked rejected or superseded.
 - Minimal tracked agent-managed project contracts.
+- Conservative explicit dead-worker reconciliation preserves evidence, protects live/unverifiable workers, and remains separate from prune.
+- Explicit Markdown `PASS` results recover task success; async notifications now reflect execution lifecycle rather than wrapper success.
 
 ## Blockers
 
@@ -49,13 +51,14 @@ Ship the plugin-only reliability reset and minimal agent-managed project operati
 
 ## Latest validation result
 
-- Full pytest: 324 passed after synchronous lifecycle repair.
-- Ruff, Python compilation, `git diff --check`, and release registration/handler smoke: passed.
-- Live gateway processes still require restart/reload before this code and schema guidance become active.
+- Focused reconciliation/Markdown/notification regressions passed, including sanitized real-run fixtures and adversarial review cases.
+- Full release gate: 351 tests passed; Ruff, Python compilation, registration/handler smoke, and `git diff --check` passed.
+- Independent review found no release blocker after its Markdown ambiguity and artifact/ack validation findings were fixed.
+- Live gateway processes still require restart/reload before this code and schema guidance become active; no restart is authorized in this task.
 
 ## Next action
 
-Resolve final review findings, rerun the release gate, commit the lifecycle repair, then request operator approval before any activation restart or live acceptance smoke.
+Commit/push only if requested, then obtain operator approval before any activation restart, live reconcile, prune, or acceptance smoke.
 
 ## Known limitations
 

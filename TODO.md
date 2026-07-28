@@ -31,7 +31,7 @@ Historical observation: `pd_20260627_143510_na5ck4` was listed but status lookup
 
 - [ ] Collect several days of post-P0/P1 failure-rate evidence by transport.
 - [ ] Decide whether evidence justifies `transport_mode=auto|simple|interactive`.
-- [ ] If justified, add validation, persistence, fingerprinting, cancellation/steer semantics, and explicit dead-worker reconciliation.
+- [ ] If justified, add validation, persistence, fingerprinting, and transport-selection cancellation/steer semantics. Explicit dead-worker reconciliation is implemented independently and does not change transport defaults.
 
 **Do not start from theory alone:** this changes execution routing and should be evidence-led.
 
@@ -42,6 +42,7 @@ Already absorbed into P0/P1: portable fixtures, README/schema alignment, lifecyc
 - [ ] Add compact run-health reporting by execution/task/contract/notification/transport state.
 - [ ] Add legacy artifact compatibility projectors only when the next schema change is actually required.
 - [ ] Run real simple sync, detached background, and interactive steer/cancel smokes for the relevant transport release.
+- [ ] Decide and approve a retention schedule only after reviewing unresolved legacy runs; keep prune separate from reconciliation.
 - [ ] Re-review each shipped slice independently.
 
 ## Explicit non-goals

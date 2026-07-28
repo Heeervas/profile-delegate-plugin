@@ -16,6 +16,7 @@ try:
         profile_delegate_list,
         profile_delegate_policy,
         profile_delegate_prune,
+        profile_delegate_reconcile,
         profile_delegate_status,
         profile_delegate_steer as profile_delegate_steer,
     )
@@ -36,6 +37,7 @@ except ImportError:  # direct import / pytest from plugin directory
         profile_delegate_list,
         profile_delegate_policy,
         profile_delegate_prune,
+        profile_delegate_reconcile,
         profile_delegate_status,
         profile_delegate_steer as profile_delegate_steer,
     )
@@ -295,6 +297,24 @@ def _prune_schema() -> Dict[str, Any]:
     }
 
 
+def _reconcile_schema() -> Dict[str, Any]:
+    return {
+        "name": "profile_delegate_reconcile",
+        "description": (
+            "Conservatively reconcile one stale Profile Delegate run. Never signals processes "
+            "or deletes artifacts; live and unverifiable workers remain unchanged."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Run task id to reconcile."},
+            },
+            "required": ["task_id"],
+            "additionalProperties": False,
+        },
+    }
+
+
 def _error_result(exc: Exception) -> Dict[str, Any]:
     code = getattr(exc, "code", "internal_error")
     return {"success": False, "error": str(exc), "error_code": code, "status": "failed", **getattr(exc, "details", {})}
@@ -447,6 +467,22 @@ def _prune_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+def _reconcile_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
+    payload = {**kwargs, **(args if isinstance(args, dict) else {})}
+    try:
+        result = profile_delegate_reconcile(payload.get("task_id", ""))
+    except ProfileDelegateError as exc:
+        result = _error_result(exc)
+    except Exception as exc:
+        result = {
+            "success": False,
+            "error": f"profile_delegate_reconcile internal error: {type(exc).__name__}: {exc}",
+            "error_code": "internal_error",
+            "status": "failed",
+        }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 def _policy_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     try:
         result = profile_delegate_policy()
@@ -523,6 +559,7 @@ def register(ctx: Any) -> None:
         ("profile_delegate_cancel", _cancel_schema(), _cancel_handler, "Cancel an active Profile Delegate run."),
         ("profile_delegate_list", _list_schema(), _list_handler, "List recent Profile Delegate runs."),
         ("profile_delegate_policy", _policy_schema(), _policy_handler, "Inspect effective non-secret Profile Delegate policy."),
+        ("profile_delegate_reconcile", _reconcile_schema(), _reconcile_handler, "Reconcile one stale Profile Delegate run."),
         ("profile_delegate_prune", _prune_schema(), _prune_handler, "Prune old Profile Delegate run artifacts."),
     ]:
         ctx.register_tool(

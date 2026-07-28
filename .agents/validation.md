@@ -18,7 +18,7 @@ PYTHONPATH=/opt/hermes .venv/bin/python -m pytest -q -o 'addopts='
   event_journal.py event_schema.py spectator.py tui_rpc.py tui_runner.py \
   scripts/validate_release.py \
   test_event_journal.py test_profile_delegate.py test_reliability_reset.py \
-  test_spectator.py test_tui_rpc.py
+  test_run_reconciliation.py test_spectator.py test_sync_lifecycle.py test_tui_rpc.py
 git diff --check
 ```
 

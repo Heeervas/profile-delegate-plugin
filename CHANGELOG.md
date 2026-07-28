@@ -9,12 +9,15 @@ All notable changes to Profile Delegate are documented here.
 - Foreground lifecycle heartbeats through Hermes' thread-local activity callback.
 - Exact-origin foreground cancellation through private control markers consumed by the synchronous process owner.
 - Bounded foreground lifecycle status including owned worker identity, liveness, deadline, activity, and terminal reason.
+- Explicit conservative per-run reconciliation for dead detached workers, with live/legacy fail-closed behavior and artifact preservation.
 
 ### Fixed
 
 - Parent interruption and foreground cancellation now terminate and reap the owned process group with TERM-then-KILL escalation and finalize as `cancelled`.
 - Plugin deadline remains authoritative and finalizes as `timed_out`; cancellation, interruption, and timeout cannot enter transient recovery.
 - Terminal lifecycle metadata is immutable, and synchronous selectors/streams are closed on every exit path.
+- Explicit Markdown `PASS` verdicts now recover task success conservatively; conflicting or negated verdicts remain unknown.
+- Async completion notifications now report execution completion independently from task/contract success, preventing completed Markdown work from being announced as an execution error.
 
 ### Verification
 

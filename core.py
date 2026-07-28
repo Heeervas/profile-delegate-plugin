@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 import uuid
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -438,7 +438,7 @@ def merge_run_status(run_dir: Path, updates: Dict[str, Any], *, terminal: bool =
             if terminal and existing not in TERMINAL_RUN_STATUSES and requested not in TERMINAL_RUN_STATUSES:
                 raise ProfileDelegateError("terminal update requires terminal state", "invalid_terminal_status")
             current.update(updates)
-            json_safe_write(run_dir / "status.json", current)
+            _write_locked_status_snapshot(run_dir, current)
             return current
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -1154,6 +1154,12 @@ def _active_matching_run(fingerprint: str, window_seconds: int) -> Optional[Dict
         created = parse_iso(ensure_text(status.get("created_at")))
         if created is None or created < cutoff:
             continue
+        if (
+            status.get("background_worker_mode") == "detached"
+            and probe_worker_alive(status.get("worker_pid")) is False
+        ):
+            profile_delegate_reconcile(run_dir.name)
+            continue
         pid = status.get("owner_pid") or status.get("worker_pid")
         if probe_worker_alive(pid) is False:
             continue
@@ -1702,9 +1708,9 @@ def _recover_text_status(raw_output: str) -> Optional[str]:
     # early OK cannot hide a later conflicting or negated terminal status.
     lines = (raw_output or "").splitlines()
     bounded_text = "\n".join(lines)
+    status_token = r"(?:PASS|OK|BLOCKED|FAILED)(?:_[A-Z0-9_]+)?"
     if re.search(
-        r"\b(?:not|never|without|isn't|wasn't|isnt|wasnt)\s+"
-        r"(?:OK|BLOCKED|FAILED)(?:_[A-Z0-9_]+)?\b",
+        rf"\b(?:not|never|without|isn't|wasn't|isnt|wasnt)\s+{status_token}\b",
         bounded_text,
         re.I,
     ):
@@ -1715,17 +1721,23 @@ def _recover_text_status(raw_output: str) -> Optional[str]:
             continue
         candidate = re.sub(r"^#{1,6}\s*", "", candidate).strip(" `*_:-")
         match = re.fullmatch(
-            r"(?:verdict|status)\s*[:=-]\s*"
-            r"(OK|BLOCKED|FAILED)(?:_[A-Z0-9_]+)?[.!]?|"
-            r"(OK|BLOCKED|FAILED)(?:_[A-Z0-9_]+)?[.!]?",
+            rf"(?:verdict|status)\s*[:=-]\s*(?P<label>{status_token})[.!]?|"
+            rf"(?P<token>{status_token})(?:[.!]|\s+[—-]\s+(?P<detail>.{{1,300}}))?",
             candidate,
             re.I,
         )
-        if match:
-            token = match.group(1) or match.group(2)
-            recovered.append(
-                {"ok": "ok", "blocked": "blocked", "failed": "failed"}[token.lower()]
-            )
+        if not match:
+            continue
+        token = match.group("label") or match.group("token")
+        detail = match.group("detail") or ""
+        # A prose detail may describe evidence, but must not smuggle in a second
+        # terminal token (for example "PASS — FAILED validation").
+        if detail and re.search(rf"\b{status_token}\b", detail, re.I):
+            return None
+        base = token.split("_", 1)[0].lower()
+        recovered.append(
+            {"pass": "ok", "ok": "ok", "blocked": "blocked", "failed": "failed"}[base]
+        )
     return recovered[0] if len(recovered) == 1 else None
 
 
@@ -2170,6 +2182,14 @@ def _make_profile_delegate_summary(result: Dict[str, Any], paths: Dict[str, str]
     return text[:limit] + ("\n…[truncated]" if len(text) > limit else "")
 
 
+def async_completion_event_status(execution_status: Any, success: Any = False) -> str:
+    """Map execution lifecycle to the native async event without hiding task outcome."""
+    lifecycle = ensure_text(execution_status).strip().lower()
+    if lifecycle == "completed":
+        return "completed"
+    return "error"
+
+
 def _push_profile_delegate_completion(run_dir: Path, final: Dict[str, Any]) -> None:
     """Best-effort notify-on-complete via Hermes' native async-delegation queue."""
     try:
@@ -2186,7 +2206,7 @@ def _push_profile_delegate_completion(run_dir: Path, final: Dict[str, Any]) -> N
         from tools.process_registry import process_registry
         completed_at = time.time()
         dispatched_at = float(request.get("dispatched_at_epoch") or completed_at)
-        evt_status = "completed" if final.get("success") else "error"
+        evt_status = async_completion_event_status(final.get("status"), final.get("success"))
         evt = {
             "type": "async_delegation",
             "delegation_id": request.get("task_id", run_dir.name),
@@ -2457,8 +2477,11 @@ def _start_detached_background_worker(run_dir: Path) -> None:
                 continue
             if candidate_status.get("status") != "running" or candidate_status.get("background_worker_mode") != "detached":
                 continue
-            if probe_worker_alive(candidate_status.get("worker_pid")) is not False:
-                active += 1
+            worker_alive = probe_worker_alive(candidate_status.get("worker_pid"))
+            if worker_alive is False:
+                profile_delegate_reconcile(candidate.name)
+                continue
+            active += 1
         if active >= max_async:
             raise ProfileDelegateError(
                 f"profile_delegate background capacity reached ({max_async} running)",
@@ -2724,6 +2747,190 @@ def resolve_run_dir(task_id: str) -> Path:
     if not run_dir.is_dir():
         raise ProfileDelegateError(f"run not found: {clean}", "run_not_found")
     return run_dir
+
+
+@contextmanager
+def _locked_run_status(run_dir: Path):
+    """Yield one current status snapshot while holding the run's status lock."""
+    if fcntl is None:
+        raise ProfileDelegateError("status locking is unavailable", "status_lock_unavailable")
+    lock_path = run_dir / "status.lock"
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield read_json_file(run_dir / "status.json")
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _write_locked_status_snapshot(run_dir: Path, status: Dict[str, Any]) -> None:
+    """Write status only while the caller holds this run's exclusive status lock."""
+    json_safe_write(run_dir / "status.json", status)
+
+
+def _cancel_evidence(run_dir: Path) -> Tuple[bool, bool]:
+    commands_dir = run_dir / "control" / "commands"
+    acks_dir = run_dir / "control" / "acks"
+    pending = acknowledged = False
+    if not commands_dir.is_dir():
+        return pending, acknowledged
+    for command_path in sorted(commands_dir.glob("*.json")):
+        try:
+            command = read_json_file(command_path)
+        except ProfileDelegateError:
+            continue
+        if command.get("type") != "cancel":
+            continue
+        pending = True
+        ack_path = acks_dir / command_path.name
+        if not ack_path.is_file():
+            continue
+        try:
+            ack = read_json_file(ack_path)
+        except ProfileDelegateError:
+            continue
+        command_id = ensure_text(command.get("command_id"))
+        ack_matches = (
+            ack.get("type") == "cancel"
+            and command_id
+            and ensure_text(ack.get("command_id")) == command_id
+            and ack.get("seq") == command.get("seq")
+        )
+        if ack_matches and ensure_text(ack.get("state")).lower() in {
+            "accepted", "completed", "cancelled",
+        }:
+            acknowledged = True
+    return pending, acknowledged
+
+
+def _validated_terminal_result(run_dir: Path) -> Optional[Dict[str, Any]]:
+    """Return a schema-valid terminal result artifact, otherwise fail closed."""
+    result_path = run_dir / "result.json"
+    if not result_path.is_file():
+        return None
+    try:
+        candidate = read_json_file(result_path)
+    except ProfileDelegateError:
+        return None
+    if candidate.get("result_schema_version") != RESULT_SCHEMA_VERSION:
+        return None
+    if ensure_text(candidate.get("task_id")) != run_dir.name:
+        return None
+    if candidate.get("status") not in VALID_RESULT_STATUSES:
+        return None
+    if ensure_text(candidate.get("execution_status")).lower() not in TERMINAL_RUN_STATUSES:
+        return None
+    return candidate
+
+
+def _reconciled_failure_result(run_dir: Path, lifecycle: str, reason: str) -> Dict[str, Any]:
+    if lifecycle == "cancelled":
+        summary = "Delegated profile cancellation was acknowledged before its worker stopped."
+        errors = ["cancelled"]
+    else:
+        summary = "Delegated profile worker exited before publishing a terminal result."
+        errors = [reason]
+    return {
+        # The lifecycle failed or was cancelled, but no trustworthy final task
+        # verdict exists. Keep the task axis unknown instead of inventing failure.
+        "status": "unknown",
+        "execution_status": lifecycle,
+        "contract_status": "not_evaluated",
+        "summary": summary,
+        "artifacts": [],
+        "errors": errors,
+        "next_steps": ["Inspect preserved run artifacts before retrying the task."],
+        "structured": True,
+        "error_code": reason,
+        "reconciled": True,
+    }
+
+
+def profile_delegate_reconcile(task_id: str) -> Dict[str, Any]:
+    """Conservatively finalize one stale run without signalling or deleting anything."""
+    run_dir = resolve_run_dir(task_id)
+    with _locked_run_status(run_dir) as status:
+        lifecycle = ensure_text(status.get("status")).strip().lower()
+        if lifecycle in TERMINAL_RUN_STATUSES:
+            return {
+                "success": True, "task_id": run_dir.name, "reconciled": False,
+                "status": lifecycle, "reason": "already_terminal",
+            }
+        if lifecycle not in {"running", "cancelling"}:
+            return {
+                "success": True, "task_id": run_dir.name, "reconciled": False,
+                "status": lifecycle or "unknown", "reason": "lifecycle_unverifiable",
+            }
+
+        if status.get("background_worker_mode") != "detached" or not isinstance(
+            status.get("worker_pid"), int
+        ):
+            return {
+                "success": True, "task_id": run_dir.name, "reconciled": False,
+                "status": lifecycle, "reason": "liveness_unverifiable",
+            }
+        worker_alive = probe_worker_alive(status.get("worker_pid"))
+        if worker_alive is True:
+            return {
+                "success": True, "task_id": run_dir.name, "reconciled": False,
+                "status": lifecycle, "reason": "worker_alive",
+            }
+        if worker_alive is not False:
+            return {
+                "success": True, "task_id": run_dir.name, "reconciled": False,
+                "status": lifecycle, "reason": "liveness_unverifiable",
+            }
+
+        result = _validated_terminal_result(run_dir)
+        if result is not None:
+            terminal_status = ensure_text(result.get("execution_status")).lower()
+            updates = {
+                "status": terminal_status, "phase": terminal_status, "ended_at": now_iso(),
+                "error_code": result.get("error_code"), "worker_alive": False,
+                "transport_alive": False, "terminal_reason": "terminal_result_authority",
+                "reconciled_at": now_iso(), "reconciliation_reason": "terminal_result_authority",
+            }
+            current = dict(status)
+            current.update(updates)
+            _write_locked_status_snapshot(run_dir, current)
+            return {
+                "success": True, "task_id": run_dir.name, "reconciled": True,
+                "status": terminal_status, "reason": "terminal_result_authority",
+            }
+
+        pending_cancel, acknowledged_cancel = _cancel_evidence(run_dir)
+        interrupted = bool(status.get("interrupted"))
+        if interrupted:
+            terminal_status, reason = "cancelled", "interrupted"
+        elif acknowledged_cancel:
+            terminal_status, reason = "cancelled", "cancel_acknowledged"
+        else:
+            terminal_status, reason = "failed", "worker_died"
+        result = _reconciled_failure_result(run_dir, terminal_status, reason)
+        write_result_artifact(run_dir, result)
+        ended_at = now_iso()
+        current = dict(status)
+        current.update({
+            "status": terminal_status, "phase": terminal_status, "ended_at": ended_at,
+            "error_code": reason, "worker_alive": False, "transport_alive": False,
+            "terminal_reason": reason, "cancellation_requested": acknowledged_cancel,
+            "interrupted": interrupted, "reconciled_at": ended_at,
+            "reconciliation_reason": reason,
+        })
+        _write_locked_status_snapshot(run_dir, current)
+        return {
+            "success": True, "task_id": run_dir.name, "reconciled": True,
+            "status": terminal_status, "reason": reason,
+            "pending_cancel": pending_cancel, "cancel_acknowledged": acknowledged_cancel,
+            "paths": base_paths(run_dir),
+        }
 
 
 def _safe_event_metadata(status: Dict[str, Any]) -> Dict[str, Any]:

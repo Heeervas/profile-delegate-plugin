@@ -38,7 +38,7 @@ Example uses:
 - Async background mode with best-effort notify-on-complete through Hermes' native async-delegation completion queue.
 - Stable error codes for common failures.
 - Tool preview patch so users see the target profile and one-line task summary.
-- Inspection tools: status, list, prune.
+- Inspection/maintenance tools: read-only status/list, explicit conservative reconcile, and separate prune.
 - Read-only terminal spectator: `hermes profile-delegate watch <task_id>` and bounded `inspect --json`.
 
 ## What this is not
@@ -258,6 +258,28 @@ Default result requested from the target profile:
 ```
 
 The plugin normalizes non-list fields into arrays where appropriate and converts invalid statuses into a structured failure. `unknown` is a real non-success task result used for useful output that has no safe explicit verdict; it is never promoted to wrapper success.
+
+For explicit Markdown/text output, one unambiguous terminal line beginning with
+`PASS`/`OK`, `BLOCKED`, or `FAILED` may recover task status. Conflicting or
+negated verdicts remain `unknown`. Async notification status follows execution
+lifecycle: a completed run is announced as completed even when its task result is
+blocked, failed, or unknown; the compact result preserves that distinction.
+
+### Reconciliation and retention
+
+`profile_delegate_reconcile(task_id)` is an explicit, per-run repair operation.
+It never signals a process and never deletes artifacts. It leaves live workers
+and legacy/unverifiable records unchanged, trusts a valid terminal `result.json`
+only after the detached worker is known dead, maps acknowledged cancellation or
+recorded interruption to `cancelled`, and otherwise finalizes a verifiably dead
+modern detached worker as `failed/worker_died` while preserving all evidence.
+
+Ordinary `status` and `list` remain read-only. Duplicate/capacity checks may
+reconcile a dead modern worker so stale artifacts do not poison dispatch.
+Retention remains a separate operator action: `profile_delegate_prune` is dry-run
+by default, locked, age-based, and terminal-only. Reconciliation never implies
+deletion, and unresolved legacy evidence should be reviewed before any retention
+policy is applied.
 
 Final results carry three orthogonal fields:
 

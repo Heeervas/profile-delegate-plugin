@@ -59,6 +59,36 @@ def test_historical_markdown_blocked_report_is_recovered_not_false_green():
     assert core.wrapper_success("completed", result) is False
 
 
+def test_historical_markdown_pass_report_is_recovered_success():
+    result = normalized_fixture("historical_markdown_pass_report.md", output_mode="markdown")
+    assert result["status"] == "ok"
+    assert result["execution_status"] == "completed"
+    assert result["contract_status"] == "recovered"
+    assert result["structured"] is False
+    assert result["summary"] == "## RESULT"
+    assert core.wrapper_success("completed", result) is True
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "PASS — finished\nSTATUS: BLOCKED",
+        "NOT PASS — still broken",
+        "PASS — finished\nFAILED — later contradiction",
+        "PASS — FAILED because validation broke",
+        "PASS — BLOCKED pending approval",
+    ],
+)
+def test_markdown_pass_recovery_remains_conservative(raw: str):
+    result = core.normalize_result(
+        None, "/tmp/stdout.txt", raw_output=raw,
+        parse_meta={"parse_method": "none", "candidate_count": 0},
+        output_mode="markdown",
+    )
+    assert result["status"] == "unknown"
+    assert core.wrapper_success("completed", result) is False
+
+
 def test_historical_markdown_only_contract_and_full_markdown_compatibility():
     request = json.loads(fixture_text("historical_markdown_request.json"))
     requested, resolved = core.resolve_output_mode("auto", request["output_contract"])
