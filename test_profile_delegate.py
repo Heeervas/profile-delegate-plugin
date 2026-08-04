@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -1066,6 +1067,7 @@ def test_push_profile_delegate_completion_queues_async_event(
     import types
     fake_mod = types.SimpleNamespace(process_registry=Registry())
     monkeypatch.setitem(sys.modules, "tools.process_registry", fake_mod)
+    monkeypatch.setattr(core, "_persist_profile_delegate_completion", lambda run_dir, final: True)
     core._push_profile_delegate_completion(run_dir, final)
     assert len(Registry.completion_queue.items) == 1
     evt = Registry.completion_queue.items[0]
@@ -1076,6 +1078,229 @@ def test_push_profile_delegate_completion_queues_async_event(
     status = json.loads((run_dir / "status.json").read_text())
     assert status["notification_status"] == "queued"
     assert status["notified_at"]
+
+
+def test_persist_profile_delegate_completion_survives_missing_live_queue(
+    tmp_path, monkeypatch,
+):
+    run_dir = tmp_path / "runs" / "pd_20260101_010101_abc123"
+    run_dir.mkdir(parents=True)
+    request = {
+        "task_id": run_dir.name,
+        "profile": "reviewer",
+        "session_title": "durable completion",
+        "session_mode": "new",
+        "origin_session_key": "discord:guild:chan:thread",
+        "origin": {"session_id": "expired-session", "ui_session_id": "expired-ui"},
+        "notify_on_complete": True,
+        "dispatched_at_epoch": 1000.0,
+    }
+    core.json_safe_write(run_dir / "request.json", request)
+    core.json_safe_write(run_dir / "status.json", {**request, "status": "completed"})
+    final = {
+        "success": True,
+        "status": "completed",
+        "result": {"status": "ok", "summary": "done"},
+        "paths": core.base_paths(run_dir),
+    }
+    persisted = []
+    durable_rows = {}
+
+    def persist_completion(event, result):
+        persisted.append((event, result))
+        durable_rows[event["delegation_id"]] = {
+            "state": event["status"], "delivery_state": "pending",
+        }
+
+    fake_async = type("Async", (), {
+        "_persist_completion": staticmethod(persist_completion),
+        "get_durable_delegation": staticmethod(lambda task_id: durable_rows.get(task_id)),
+    })
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_async)
+
+    assert core._persist_profile_delegate_completion(run_dir, final) is True
+    assert len(persisted) == 1
+    event, result = persisted[0]
+    assert event["delegation_id"] == run_dir.name
+    assert event["session_key"] == "discord:guild:chan:thread"
+    assert event.get("parent_session_id") in {None, ""}
+    assert result["status"] == "ok"
+    status = json.loads((run_dir / "status.json").read_text())
+    assert status["notification_status"] == "pending"
+    assert status["notification_delivery_id"] == run_dir.name
+
+
+def test_register_durable_notification_uses_lane_not_expiring_session(
+    tmp_path, monkeypatch,
+):
+    run_dir = tmp_path / "runs" / "pd_20260101_010101_abc123"
+    run_dir.mkdir(parents=True)
+    request = {
+        "task_id": run_dir.name,
+        "origin_session_key": "discord:guild:chan:thread",
+        "origin": {"session_id": "old-session", "ui_session_id": "old-ui"},
+        "notify_on_complete": True,
+        "dispatched_at_epoch": 1000.0,
+    }
+    core.json_safe_write(run_dir / "request.json", request)
+    core.json_safe_write(run_dir / "status.json", {**request, "status": "running"})
+    records = []
+    fake_async = type("Async", (), {
+        "_persist_dispatch": staticmethod(lambda record: records.append(record)),
+    })
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_async)
+
+    assert core._register_durable_notification(run_dir) is True
+    assert records[0]["session_key"] == "discord:guild:chan:thread"
+    assert records[0]["parent_session_id"] is None
+
+
+def test_native_async_ledger_compatibility_is_read_only_and_accepts_current_contract(
+    tmp_path, monkeypatch,
+):
+    db = tmp_path / "state.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("""CREATE TABLE async_delegations (
+            delegation_id TEXT PRIMARY KEY, origin_session TEXT NOT NULL,
+            parent_session_id TEXT, state TEXT NOT NULL, dispatched_at REAL NOT NULL,
+            completed_at REAL, updated_at REAL NOT NULL, event_json TEXT,
+            result_json TEXT, delivery_state TEXT NOT NULL,
+            delivery_attempts INTEGER NOT NULL, delivered_at REAL
+        )""")
+    fake_async = type("Async", (), {
+        "_persist_dispatch": staticmethod(lambda record: None),
+        "_persist_completion": staticmethod(lambda event, result: None),
+        "get_durable_delegation": staticmethod(lambda delegation_id: None),
+    })
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_async)
+    monkeypatch.setattr(core, "get_hermes_home_path", lambda: tmp_path)
+
+    report = core.native_async_ledger_compatibility()
+
+    assert report["compatible"] is True
+    assert report["database_open_mode"] == "read_only"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM async_delegations").fetchone()[0] == 0
+
+
+def test_native_async_ledger_compatibility_rejects_missing_api_without_touching_db(
+    tmp_path, monkeypatch,
+):
+    db = tmp_path / "state.db"
+    db.write_bytes(b"not a sqlite database")
+    fake_async = type("Async", (), {
+        "_persist_dispatch": staticmethod(lambda record: None),
+    })
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_async)
+    monkeypatch.setattr(core, "get_hermes_home_path", lambda: tmp_path)
+    before = db.read_bytes()
+
+    report = core.native_async_ledger_compatibility()
+
+    assert report["compatible"] is False
+    assert "_persist_completion" in report["missing_apis"]
+    assert db.read_bytes() == before
+
+
+def test_native_async_ledger_compatibility_rejects_missing_columns(tmp_path, monkeypatch):
+    db = tmp_path / "state.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE async_delegations (delegation_id TEXT PRIMARY KEY)")
+    fake_async = type("Async", (), {
+        "_persist_dispatch": staticmethod(lambda record: None),
+        "_persist_completion": staticmethod(lambda event, result: None),
+        "get_durable_delegation": staticmethod(lambda delegation_id: None),
+    })
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_async)
+    monkeypatch.setattr(core, "get_hermes_home_path", lambda: tmp_path)
+
+    report = core.native_async_ledger_compatibility()
+
+    assert report["compatible"] is False
+    assert "delivery_state" in report["missing_columns"]
+
+
+def test_background_notify_fails_before_run_creation_when_native_ledger_is_incompatible(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
+    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+    monkeypatch.setattr(core, "native_async_ledger_compatibility", lambda: {
+        "compatible": False, "reason": "missing native API",
+    })
+
+    with pytest.raises(core.ProfileDelegateError) as exc_info:
+        core.delegate_profile(
+            profile="reviewer", task="safe task", session_title="compatibility gate",
+            background=True, notify_on_complete=True,
+            origin_session_key="discord:guild:channel:thread",
+        )
+
+    assert exc_info.value.code == "native_async_ledger_incompatible"
+    assert list(core.get_runs_root().glob("pd_*")) == []
+
+
+@pytest.mark.parametrize("session_end", ["expiry", "auto_reset", "explicit_close"])
+def test_completion_after_session_end_routes_by_origin_lane(
+    tmp_path, session_end,
+):
+    run_dir = tmp_path / "runs" / "pd_20260101_010101_abc123"
+    run_dir.mkdir(parents=True)
+    request = {
+        "task_id": run_dir.name,
+        "profile": "reviewer",
+        "session_title": session_end,
+        "origin_session_key": "discord:guild:chan:thread",
+        "origin": {
+            "session_id": f"ended-{session_end}",
+            "ui_session_id": f"ended-{session_end}",
+        },
+        "dispatched_at_epoch": 1000.0,
+    }
+    core.json_safe_write(run_dir / "request.json", request)
+    event, _result = core._profile_delegate_completion_payload(
+        run_dir,
+        {"success": True, "status": "completed", "result": {"status": "ok"}},
+        request,
+    )
+    assert event["session_key"] == "discord:guild:chan:thread"
+    assert event["parent_session_id"] is None
+    assert event["origin_ui_session_id"] == ""
+
+
+def test_completion_persistence_is_idempotent_across_worker_and_parent_watcher(
+    tmp_path, monkeypatch,
+):
+    run_dir = tmp_path / "runs" / "pd_20260101_010101_abc123"
+    run_dir.mkdir(parents=True)
+    request = {
+        "task_id": run_dir.name,
+        "origin_session_key": "discord:guild:chan:thread",
+        "notify_on_complete": True,
+        "dispatched_at_epoch": 1000.0,
+    }
+    core.json_safe_write(run_dir / "request.json", request)
+    core.json_safe_write(run_dir / "status.json", {**request, "status": "completed"})
+    row = {"state": "completed", "delivery_state": "pending"}
+    persisted = []
+    fake_async = type("Async", (), {
+        "get_durable_delegation": staticmethod(lambda _task_id: row),
+        "_persist_completion": staticmethod(lambda event, result: persisted.append((event, result))),
+    })
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_async)
+    final = {"success": True, "status": "completed", "result": {"status": "ok"}}
+
+    assert core._persist_profile_delegate_completion(run_dir, final) is True
+    assert core._persist_profile_delegate_completion(run_dir, final) is True
+    assert persisted == []
+    status = json.loads((run_dir / "status.json").read_text())
+    assert status["notification_status"] == "pending"
+    assert status["notification_delivery_id"] == run_dir.name
 
 
 def test_status_list_and_prune(tmp_path, monkeypatch):

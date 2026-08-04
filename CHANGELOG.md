@@ -13,6 +13,9 @@ All notable changes to Profile Delegate are documented here.
 
 ### Fixed
 
+- Added a non-destructive native-ledger compatibility circuit breaker: required API signatures and minimum `async_delegations` columns are inspected read-only before durable background notification; incompatible Hermes upgrades fail before run creation or database writes.
+- Detached `notify_on_complete` now persists through Hermes' native durable async-delegation ledger before execution and on completion, routes by the origin lane `session_key` rather than an expired logical session id, and rehydrates on gateway restart with task-id delivery idempotency.
+- Notification state now distinguishes `pending`, live-queue `queued`, gateway-confirmed `delivered`, unroutable/terminal `failed`, and `disabled` without changing execution/task outcomes.
 - Parent interruption and foreground cancellation now terminate and reap the owned process group with TERM-then-KILL escalation and finalize as `cancelled`.
 - Plugin deadline remains authoritative and finalizes as `timed_out`; cancellation, interruption, and timeout cannot enter transient recovery.
 - Terminal lifecycle metadata is immutable, and synchronous selectors/streams are closed on every exit path.
@@ -25,7 +28,6 @@ All notable changes to Profile Delegate are documented here.
 
 ### Deferred
 
-- P2 honest best-effort notification semantics.
 - Evidence-gated P3 transport simplification and dead-worker reconciliation.
 - Remaining P4 run-health reporting and live transport release smokes.
 

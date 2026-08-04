@@ -35,7 +35,8 @@ Example uses:
 - Conservative local fallback for useful non-JSON child output; no automatic profile retry on parse failure.
 - Strict automatic recovery for recognized terminal transport failures: resume the same child session up to twice, wait 10 seconds between attempts, and share one total timeout budget. Never restart in a fresh session.
 - Private local run artifacts: request, prompt, status, stdout, stderr, result, and redacted/hash-only approval events.
-- Async background mode with best-effort notify-on-complete through Hermes' native async-delegation completion queue.
+- Async background mode with durable notify-on-complete through Hermes' native async-delegation ledger and completion queue. Delivery is lane-routed and idempotent by task id across session reset and gateway restart.
+- A read-only compatibility circuit breaker runs before every background task with `notify_on_complete=true`. It opens `state.db` with SQLite `mode=ro` plus `PRAGMA query_only`, validates required native API signatures and minimum `async_delegations` columns, and fails before creating a run or writing the database if Hermes has become incompatible.
 - Stable error codes for common failures.
 - Tool preview patch so users see the target profile and one-line task summary.
 - Inspection/maintenance tools: read-only status/list, explicit conservative reconcile, and separate prune.
@@ -47,7 +48,7 @@ Example uses:
 - Not a durable profile message bus.
 - Supports explicit target-profile session resume via `session_mode: "resume"` and `session_id`.
 - Automatic recovery requires the strict final `session_id:` footer; a recognized transient failure without one fails closed instead of repeating the task.
-- Not a guaranteed delivery system; async notifications are best-effort and `profile_delegate_status` remains the durable source of truth.
+- Not an exactly-once platform delivery system; Hermes records durable pending/delivered/failed delivery state, while `profile_delegate_status` and run artifacts remain the source of truth.
 - Not approval brokering between parent and target profile.
 - Not safe for untrusted users without explicit policy configuration.
 
@@ -55,6 +56,7 @@ Example uses:
 
 - Hermes Agent installed and available as `hermes` on `PATH`, or configured with `PROFILE_DELEGATE_HERMES_BIN`.
 - Hermes version with plugin support and the TUI Gateway JSON-RPC stdio transport. Foreground and rollback execution retain quiet single-query chat compatibility.
+- Durable notification additionally requires Hermes' native async-delegation API/schema contract. Inspect `profile_delegate_policy.native_async_ledger`; incompatibility returns `native_async_ledger_incompatible`. Foreground and background calls with `notify_on_complete=false` remain available and do not use the ledger.
 - At least one named profile created with `hermes profile create <name>`.
 - The plugin enabled in the caller profile.
 - Python on a Unix-like platform for lock-file concurrency control.
@@ -243,7 +245,7 @@ Notes:
 - `background=true` returns immediately with `mode: "async"`, `task_id`, and run artifact paths; the delegated run continues in the configured thread or detached worker using persisted request data.
 - Identical active requests from the same resolved caller origin are reused under a per-fingerprint file lock. `duplicate_policy:"new"` permits intentional duplicate work. Completed runs are not silently reused.
 - Both synchronous and detached runs execute the same bootstrap path. If legacy/core output contains `Timeout — denying command`, the run is finalized as structured `approval_timeout` failure instead of being reported as successful or left active.
-- `notify_on_complete=true` queues a native Hermes `async_delegation` completion event back to the originating gateway session when the background run finishes. This requires a fresh gateway/CLI process after plugin upgrade so the new schema/code is loaded.
+- `notify_on_complete=true` registers a native durable Hermes `async_delegation` delivery before launch, commits the completion from the detached worker, and routes it back by the originating lane `session_key`. Logical session expiry, `/new`, auto-reset, and gateway restart therefore do not discard the result. The task id is the delivery idempotency key. This requires a fresh gateway/CLI process after plugin upgrade so the new code is loaded.
 
 Default result requested from the target profile:
 

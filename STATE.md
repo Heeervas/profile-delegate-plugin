@@ -1,7 +1,7 @@
 # Profile Delegate project state
 
-Last updated: 2026-07-28 by Adán
-Status: dead-worker reconciliation and Markdown return repair validated; activation pending
+Last updated: 2026-08-04 by Adán
+Status: durable detached notification repair validated; activation and visual delivery smoke pending
 
 ## Active objective
 
@@ -30,6 +30,8 @@ Ship the plugin-only reliability reset and minimal agent-managed project operati
 - Minimal tracked agent-managed project contracts.
 - Conservative explicit dead-worker reconciliation preserves evidence, protects live/unverifiable workers, and remains separate from prune.
 - Explicit Markdown `PASS` results recover task success; async notifications now reflect execution lifecycle rather than wrapper success.
+- Detached completion delivery is persisted through Hermes' native async-delegation ledger, lane-routed across logical-session reset/expiry, restored by Hermes after gateway restart, and idempotent by Profile Delegate task id.
+- Durable notification has an automatic read-only compatibility gate. Incompatible Hermes API/schema changes fail before run creation or database mutation; foreground and explicit `notify_on_complete=false` execution remain available.
 
 ## Blockers
 
@@ -51,6 +53,8 @@ Ship the plugin-only reliability reset and minimal agent-managed project operati
 
 ## Latest validation result
 
+- 2026-08-04: full release gate passed with 361 tests; Ruff, compilation, registration/handler smoke, diff check, and live read-only native-ledger compatibility probe passed.
+- Real detached process smoke `pd_20260804_071319_ksvge5`: dispatcher exited before child completion; terminal result persisted with the exact Discord thread lane, `parent_session_id=null`, stable task-id delivery identity, `delivery_state=pending`, and zero attempts. The child itself failed because the isolated smoke shell lacked OpenAI credentials, so this certifies detached durable handoff—not successful model execution or visual platform delivery.
 - Focused reconciliation/Markdown/notification regressions passed, including sanitized real-run fixtures and adversarial review cases.
 - Full release gate: 351 tests passed; Ruff, Python compilation, registration/handler smoke, and `git diff --check` passed.
 - Independent review found no release blocker after its Markdown ambiguity and artifact/ack validation findings were fixed.
@@ -62,7 +66,7 @@ Commit/push only if requested, then obtain operator approval before any activati
 
 ## Known limitations
 
-- Notifications are best-effort; status/result artifacts are durable truth.
+- Platform delivery is at-least-once under crash ambiguity; status/result artifacts and Hermes' delivery ledger are durable truth.
 - P3 transport-mode changes remain evidence-gated.
 - Profiles are not OS sandboxes.
 - Working tree may include historical plan/audit documents retained as clearly superseded decision history.

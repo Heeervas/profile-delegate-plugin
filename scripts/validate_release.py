@@ -16,7 +16,6 @@ class FakeContext:
     def __init__(self) -> None:
         self.tools: dict[str, dict] = {}
         self.commands: dict[str, dict] = {}
-
     def register_tool(self, **kwargs) -> None:
         self.tools[kwargs["name"]] = kwargs
 
