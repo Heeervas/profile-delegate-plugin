@@ -78,6 +78,10 @@ class TuiRpcClient:
         self._closed = False
         self._stderr_tail = ""
         self.last_event_type = "none"
+        # Single-owner client: a locally timed-out RPC may still answer later.
+        # Remember that exact id so one late response can be discarded without
+        # weakening correlation for any other response.
+        self._abandoned_ids: set[int] = set()
 
     @property
     def stderr_tail(self) -> str:
@@ -119,7 +123,7 @@ class TuiRpcClient:
             except Exception as exc:
                 raise TuiTransportError(f"TUI stdin write failed: {exc}") from exc
 
-    def read_frame(self, timeout: float) -> dict[str, Any]:
+    def _read_raw_frame(self, timeout: float) -> dict[str, Any]:
         if self.process.stdout is None:
             raise TuiTransportError("TUI stdout unavailable")
         raw = _readline_with_timeout(self.process.stdout, timeout)
@@ -136,6 +140,54 @@ class TuiRpcClient:
             raise TuiProtocolError("invalid TUI JSON-RPC frame")
         return frame
 
+    @staticmethod
+    def _is_event(frame: dict[str, Any]) -> bool:
+        """Classify only id-less event notifications as events."""
+        return "id" not in frame and frame.get("method") == "event"
+
+    @staticmethod
+    def _validate_response(frame: dict[str, Any]) -> int:
+        """Validate the strict response shape before correlating or discarding it."""
+        if "method" in frame:
+            raise TuiProtocolError("TUI RPC response must not include method")
+        response_id = frame.get("id")
+        if type(response_id) is not int:
+            raise TuiProtocolError("TUI RPC response id must be an integer")
+        has_result = "result" in frame
+        has_error = "error" in frame
+        if has_result == has_error:
+            raise TuiProtocolError("TUI RPC response must contain exactly one of result or error")
+        if has_result and not isinstance(frame["result"], dict):
+            raise TuiProtocolError("TUI RPC result must be an object")
+        if has_error:
+            error = frame["error"]
+            if (
+                not isinstance(error, dict)
+                or type(error.get("code")) is not int
+                or not isinstance(error.get("message"), str)
+            ):
+                raise TuiProtocolError("TUI RPC error must contain integer code and string message")
+        return response_id
+
+    def read_frame(self, timeout: float) -> dict[str, Any]:
+        """Read one frame, consuming only strictly valid known late responses."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            frame = self._read_raw_frame(max(0.001, deadline - time.monotonic()))
+            response_id = frame.get("id")
+            if type(response_id) is int and response_id in self._abandoned_ids:
+                validated_id = self._validate_response(frame)
+                self._abandoned_ids.remove(validated_id)
+                continue
+            return frame
+
+    def read_event(self, timeout: float) -> dict[str, Any]:
+        frame = self.read_frame(timeout)
+        if not self._is_event(frame):
+            response_id = self._validate_response(frame)
+            raise TuiProtocolError(f"unexpected idle response id {response_id!r}")
+        return frame
+
     def wait_ready(self, timeout: float = 15.0, *, on_event: Optional[Callable[[dict], None]] = None) -> dict:
         deadline = time.monotonic() + timeout
         while True:
@@ -148,7 +200,7 @@ class TuiRpcClient:
                         f"last event={self.last_event_type}"
                     ) from exc
                 raise
-            if frame.get("method") == "event":
+            if self._is_event(frame):
                 self.last_event_type = str((frame.get("params") or {}).get("type") or "unknown")
                 if on_event:
                     on_event(frame)
@@ -171,40 +223,53 @@ class TuiRpcClient:
                 frame = self.read_frame(deadline - time.monotonic())
             except TuiTransportError as exc:
                 if "timed out" in str(exc).lower():
+                    self._abandoned_ids.add(request_id)
                     raise TuiTransportError(
                         f"{stage} RPC {method} timed out after {timeout:.1f}s; "
                         f"last event={self.last_event_type}"
                     ) from exc
                 raise
-            if frame.get("method") == "event":
+            if self._is_event(frame):
                 self.last_event_type = str((frame.get("params") or {}).get("type") or "unknown")
                 if on_event:
                     on_event(frame)
                 continue
-            if frame.get("id") != request_id:
-                raise TuiProtocolError(f"unexpected response id {frame.get('id')!r}")
+            response_id = self._validate_response(frame)
+            if response_id != request_id:
+                raise TuiProtocolError(f"unexpected response id {response_id!r}")
             if "error" in frame:
-                error = frame.get("error") or {}
-                raise TuiRemoteError(error.get("code"), str(error.get("message") or "unknown error"))
-            result = frame.get("result")
-            if not isinstance(result, dict):
-                raise TuiProtocolError("TUI RPC result must be an object")
-            return result
+                error = frame["error"]
+                raise TuiRemoteError(error["code"], error["message"])
+            return frame["result"]
 
-    def close(self, *, grace: float = 2.0) -> None:
+    def close(self, *, grace: float = 2.0, deadline: Optional[float] = None) -> None:
+        """Close and reap the owned process without exceeding an optional deadline."""
         if self._closed:
             return
         self._closed = True
+
+        def remaining() -> float:
+            if deadline is None:
+                return max(0.0, grace)
+            return max(0.0, deadline - time.monotonic())
+
+        def wait_bounded(*, fraction: float = 1.0) -> bool:
+            wait_timeout = remaining()
+            if deadline is not None:
+                wait_timeout *= max(0.0, min(1.0, fraction))
+            try:
+                self.process.wait(timeout=wait_timeout)
+                return True
+            except Exception:
+                return False
+
         try:
             if self.process.stdin is not None:
                 self.process.stdin.close()
         except Exception:
             pass
-        try:
-            self.process.wait(timeout=grace)
+        if wait_bounded(fraction=0.25):
             return
-        except Exception:
-            pass
         try:
             os.killpg(self.process.pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError, AttributeError):
@@ -212,11 +277,8 @@ class TuiRpcClient:
                 self.process.terminate()
             except Exception:
                 pass
-        try:
-            self.process.wait(timeout=grace)
+        if wait_bounded(fraction=0.5):
             return
-        except Exception:
-            pass
         try:
             os.killpg(self.process.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, AttributeError):
@@ -224,10 +286,7 @@ class TuiRpcClient:
                 self.process.kill()
             except Exception:
                 pass
-        try:
-            self.process.wait(timeout=grace)
-        except Exception:
-            pass
+        wait_bounded()
 
 
 def launch_gateway(*, python: str, cwd: str, env: dict[str, str],
@@ -287,8 +346,12 @@ def steer(client: Any, session_id: str, text: str, *, on_event: Optional[Callabl
     return client.call("session.steer", {"session_id": session_id, "text": text}, timeout=15, on_event=on_event)
 
 
-def interrupt(client: Any, session_id: str, *, on_event: Optional[Callable[[dict], None]] = None) -> dict:
-    return client.call("session.interrupt", {"session_id": session_id}, timeout=15, on_event=on_event)
+def interrupt(client: Any, session_id: str, *, timeout: float = 15.0,
+              on_event: Optional[Callable[[dict], None]] = None) -> dict:
+    return client.call(
+        "session.interrupt", {"session_id": session_id}, timeout=timeout,
+        on_event=on_event,
+    )
 
 
 def wait_for_completion(events: queue.Queue[dict], session_id: str, *, timeout: float,

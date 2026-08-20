@@ -13,6 +13,10 @@ All notable changes to Profile Delegate are documented here.
 
 ### Fixed
 
+- Correlated locally timed-out TUI RPC calls by exact integer request id so one strictly valid known late `result`/`error` is consumed without weakening handling of id-bearing event hybrids, unknown/type-confused ids, malformed response shapes, duplicate late responses, EOF, or real channel failures.
+- Kept native steer rejection (`4010`) and delivery timeout in the control ACK lifecycle instead of converting them into false run-level transport failures.
+- Made local cancellation terminally authoritative before native interrupt delivery, exits event polling immediately after acceptance, and uses one absolute cleanup deadline covering control draining, graceful close, TERM/KILL escalation, and reaping; diagnostics remain truthful when interrupt is rejected, late, timed out, or the channel fails.
+
 - Added a non-destructive native-ledger compatibility circuit breaker: required API signatures and minimum `async_delegations` columns are inspected read-only before durable background notification; incompatible Hermes upgrades fail before run creation or database writes.
 - Detached `notify_on_complete` now persists through Hermes' native durable async-delegation ledger before execution and on completion, routes by the origin lane `session_key` rather than an expired logical session id, and rehydrates on gateway restart with task-id delivery idempotency.
 - Notification state now distinguishes `pending`, live-queue `queued`, gateway-confirmed `delivered`, unroutable/terminal `failed`, and `disabled` without changing execution/task outcomes.

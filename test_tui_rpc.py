@@ -5,7 +5,10 @@ import io
 import json
 import os
 import queue
+import signal
+import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -61,11 +64,7 @@ def test_gateway_command_uses_hermes_runtime_python(tmp_path):
 
 
 def test_cancel_deadline_is_bounded():
-    # Keep the escalation contract explicit: accepted native interrupt gets a
-    # short grace window, never the run's full timeout.
-    source = Path(tui_runner.__file__).read_text(encoding="utf-8")
-    assert "cancel_deadline = time.monotonic() + 5.0" in source
-    assert "time.monotonic() >= cancel_deadline" in source
+    assert tui_runner.CANCEL_GRACE_SECONDS == 5.0
 
 
 def test_rpc_correlates_response_and_delivers_interleaved_event():
@@ -107,6 +106,7 @@ def test_rpc_timeout_names_exact_stage_method_and_last_event():
     class SilentClient(tui_rpc.TuiRpcClient):
         def __init__(self):
             self._next_id = 1
+            self._abandoned_ids = set()
 
         def _write(self, frame):
             pass
@@ -124,6 +124,130 @@ def test_rpc_timeout_names_exact_stage_method_and_last_event():
             "session.create", {"profile": "reviewer"}, timeout=0.01,
             stage="session_creating",
         )
+
+
+def test_rpc_timeout_tracks_id_and_late_response_is_consumed_once():
+    class TimeoutOnceClient(tui_rpc.TuiRpcClient):
+        def __init__(self, process):
+            super().__init__(process)
+            self.force_timeout = True
+
+        def read_frame(self, timeout):
+            if self.force_timeout:
+                raise tui_rpc.TuiTransportError("TUI RPC response timed out")
+            return super().read_frame(timeout)
+
+    proc = FakeProcess([])
+    client = TimeoutOnceClient(proc)
+    with pytest.raises(tui_rpc.TuiTransportError, match="timed out"):
+        client.call("session.steer", {"session_id": "ui-1", "text": "x"}, timeout=0.01)
+    client.force_timeout = False
+    assert client._abandoned_ids == {1}
+
+    proc.stdout = io.BytesIO(
+        (
+            json.dumps({"jsonrpc": "2.0", "id": 1, "error": {"code": 4010, "message": "late"}})
+            + "\n"
+            + json.dumps({
+                "jsonrpc": "2.0", "method": "event",
+                "params": {"type": "message.complete", "session_id": "ui-1", "payload": {}},
+            })
+            + "\n"
+        ).encode()
+    )
+    frame = client.read_event(1)
+    assert frame["params"]["type"] == "message.complete"
+    assert client._abandoned_ids == set()
+
+
+def test_idle_unknown_response_id_remains_fatal():
+    client = tui_rpc.TuiRpcClient(FakeProcess([
+        {"jsonrpc": "2.0", "id": 999, "result": {}},
+    ]))
+    with pytest.raises(tui_rpc.TuiProtocolError, match="unexpected idle response id"):
+        client.read_event(1)
+
+
+@pytest.mark.parametrize(
+    "frame, message",
+    [
+        ({"jsonrpc": "2.0", "id": True, "result": {}}, "id must be an integer"),
+        ({"jsonrpc": "2.0", "id": 1.0, "result": {}}, "id must be an integer"),
+        ({"jsonrpc": "2.0", "id": 1, "result": {}, "error": {"code": 1, "message": "x"}}, "exactly one"),
+        ({"jsonrpc": "2.0", "id": 1, "result": "bad"}, "result must be an object"),
+        ({"jsonrpc": "2.0", "id": 1, "error": "bad"}, "error must contain"),
+        ({"jsonrpc": "2.0", "id": 1, "error": {"code": True, "message": "bad"}}, "error must contain"),
+        ({"jsonrpc": "2.0", "id": 1, "method": None, "result": {}}, "must not include method"),
+    ],
+)
+def test_malformed_matching_late_response_remains_fatal(frame, message):
+    client = tui_rpc.TuiRpcClient(FakeProcess([frame]))
+    client._abandoned_ids.add(1)
+    with pytest.raises(tui_rpc.TuiProtocolError, match=message):
+        client.read_event(1)
+    assert client._abandoned_ids == {1}
+
+
+def test_valid_late_result_is_consumed_once_and_duplicate_is_fatal():
+    late = {"jsonrpc": "2.0", "id": 1, "result": {}}
+    client = tui_rpc.TuiRpcClient(FakeProcess([late, late]))
+    client._abandoned_ids.add(1)
+    with pytest.raises(tui_rpc.TuiProtocolError, match="unexpected idle response id 1"):
+        client.read_event(1)
+    assert client._abandoned_ids == set()
+
+
+@pytest.mark.parametrize("response_id", [1, 9])
+def test_idle_id_bearing_event_hybrid_is_fatal(response_id):
+    frame = {
+        "jsonrpc": "2.0", "id": response_id, "method": "event",
+        "params": {"type": "message.complete", "session_id": "ui-1", "payload": {}},
+    }
+    client = tui_rpc.TuiRpcClient(FakeProcess([frame]))
+    with pytest.raises(tui_rpc.TuiProtocolError, match="must not include method"):
+        client.read_event(1)
+
+
+def test_abandoned_id_bearing_event_hybrid_is_fatal_without_consuming_id():
+    frame = {
+        "jsonrpc": "2.0", "id": 1, "method": "event",
+        "params": {"type": "message.complete", "session_id": "ui-1", "payload": {}},
+    }
+    client = tui_rpc.TuiRpcClient(FakeProcess([frame]))
+    client._abandoned_ids.add(1)
+    with pytest.raises(tui_rpc.TuiProtocolError, match="must not include method"):
+        client.read_event(1)
+    assert client._abandoned_ids == {1}
+
+
+def test_active_call_id_bearing_event_hybrid_is_fatal():
+    frame = {
+        "jsonrpc": "2.0", "id": 1, "method": "event",
+        "params": {"type": "status.update", "session_id": "ui-1", "payload": {}},
+    }
+    client = tui_rpc.TuiRpcClient(FakeProcess([frame]))
+    with pytest.raises(tui_rpc.TuiProtocolError, match="must not include method"):
+        client.call("session.status", {"session_id": "ui-1"}, timeout=1)
+
+
+def test_close_honors_absolute_deadline_and_kills_stubborn_process():
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    client = tui_rpc.TuiRpcClient(proc)
+    started = time.monotonic()
+    try:
+        client.close(deadline=started + 0.3)
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.8
+        assert proc.poll() is not None
+        assert proc.returncode == -signal.SIGKILL
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
 
 
 def test_runner_exposes_separate_bounded_startup_and_agent_init_timeouts(monkeypatch):
@@ -190,7 +314,7 @@ def test_runner_poll_flushes_pending_journal_text_after_active_and_idle_reads(ti
     frame = {"method": "event", "params": {"type": "status.update"}}
 
     class Client:
-        def read_frame(self, poll_timeout):
+        def read_event(self, poll_timeout):
             if timeout:
                 raise tui_rpc.TuiTransportError("TUI RPC response timed out")
             return frame
@@ -209,7 +333,7 @@ def test_runner_poll_flushes_pending_journal_text_after_active_and_idle_reads(ti
 
 def test_runner_poll_flushes_before_propagating_transport_error():
     class Client:
-        def read_frame(self, _timeout):
+        def read_event(self, _timeout):
             raise tui_rpc.TuiTransportError("TUI RPC EOF")
 
     class RecordingJournal:
@@ -277,13 +401,13 @@ def test_runner_publishes_ready_status_transitions_after_success(tmp_path, monke
         def wait_ready(self, **kwargs):
             return None
 
-        def read_frame(self, timeout):
+        def read_event(self, timeout):
             return complete
 
         def call(self, *args, **kwargs):
             return {}
 
-        def close(self):
+        def close(self, **kwargs):
             return None
 
     monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", lambda **kwargs: Client())
@@ -336,13 +460,13 @@ def test_runner_nonzero_transport_exit_overrides_complete_ok(tmp_path, monkeypat
         def wait_ready(self, **kwargs):
             return None
 
-        def read_frame(self, timeout):
+        def read_event(self, timeout):
             return complete
 
         def call(self, *args, **kwargs):
             return {}
 
-        def close(self):
+        def close(self, **kwargs):
             return None
 
     monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", lambda **kwargs: Client())
@@ -357,6 +481,259 @@ def test_runner_nonzero_transport_exit_overrides_complete_ok(tmp_path, monkeypat
     assert result["error_code"] == "tui_nonzero_exit"
     assert result["result"]["status"] == "failed"
     assert result["result"]["execution_status"] == "failed"
+
+
+def _execute_with_control(
+    tmp_path, monkeypatch, command_type, control_call, *, extra_command_type=None,
+    return_trace=False, client_factory=None,
+):
+    run = tmp_path / f"pd_control_{command_type}"
+    run.mkdir()
+    request = {
+        "task_id": run.name, "timeout_seconds": 10, "workdir": str(tmp_path),
+        "profile": "reviewer", "session_mode": "new", "requested_session_id": "",
+        "session_title": "control", "profile_home": str(tmp_path), "hermes_bin": sys.executable,
+        "child_approval_mode": "deny", "effective_execution": {}, "effective_capabilities": {},
+        "effective_policy": {"limits": {"max_concurrent": 8}},
+    }
+    (run / "request.json").write_text(json.dumps(request), encoding="utf-8")
+    (run / "prompt.txt").write_text("prompt", encoding="utf-8")
+    (run / "status.json").write_text(
+        json.dumps({"task_id": run.name, "status": "running"}), encoding="utf-8",
+    )
+    _, commands, acks = core._control_dirs(run)
+    command = {
+        "schema_version": 1, "task_id": run.name, "type": command_type,
+        "command_id": "cmd-1", "seq": 1, "created_at": core.now_iso(),
+        "payload": {"text": "redirect"} if command_type == "steer" else {},
+    }
+    command_path = commands / "000000000001-cmd-1.json"
+    command_path.write_text(json.dumps(command), encoding="utf-8")
+    extra_path = None
+    if extra_command_type:
+        extra = {
+            "schema_version": 1, "task_id": run.name, "type": extra_command_type,
+            "command_id": "cmd-2", "seq": 2, "created_at": core.now_iso(),
+            "payload": {"text": "late redirect"} if extra_command_type == "steer" else {},
+        }
+        extra_path = commands / "000000000002-cmd-2.json"
+        extra_path.write_text(json.dumps(extra), encoding="utf-8")
+    monkeypatch.setattr(tui_runner, "_environment", lambda request, run_dir: {})
+
+    @contextmanager
+    def slot(_limit):
+        yield type("Slot", (), {"slot": 0})()
+
+    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", slot)
+    complete = {
+        "method": "event", "params": {
+            "type": "message.complete", "session_id": "ui-1",
+            "payload": {"status": "complete", "text": '{"status":"ok","summary":"done"}'},
+        },
+    }
+
+    class Client:
+        stderr_tail = ""
+
+        def __init__(self):
+            self.process = type("Process", (), {"pid": os.getpid(), "poll": lambda self: 0})()
+            self.calls = []
+            self.close_kwargs = None
+
+        def wait_ready(self, **kwargs):
+            return None
+
+        def read_event(self, _timeout):
+            return complete
+
+        def call(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return {}
+
+        def close(self, **kwargs):
+            self.close_kwargs = kwargs
+            return None
+
+    client = client_factory(complete) if client_factory else Client()
+    monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", lambda **kwargs: client)
+    monkeypatch.setattr(
+        tui_runner.tui_rpc, "start_session",
+        lambda *args, **kwargs: {"ui_session_id": "ui-1", "child_session_id": "child-1"},
+    )
+    monkeypatch.setattr(tui_runner.tui_rpc, "submit", lambda *args, **kwargs: {})
+    control_call()
+    result = tui_runner.execute(run)
+    ack = json.loads((acks / command_path.name).read_text(encoding="utf-8"))
+    trace = {"client": client, "extra_path": extra_path, "acks": acks}
+    return (result, ack, trace) if return_trace else (result, ack)
+
+
+def test_runner_steer_4010_is_rejected_without_failing_turn(tmp_path, monkeypatch):
+    def arrange():
+        monkeypatch.setattr(
+            tui_runner.tui_rpc, "steer",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                tui_rpc.TuiRemoteError(4010, "agent does not support steer")
+            ),
+        )
+
+    result, ack = _execute_with_control(tmp_path, monkeypatch, "steer", arrange)
+    assert result["status"] == "completed"
+    assert ack["state"] == "rejected"
+
+
+def test_runner_steer_timeout_is_delivery_unknown_without_failing_turn(tmp_path, monkeypatch):
+    def arrange():
+        monkeypatch.setattr(
+            tui_runner.tui_rpc, "steer",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                tui_rpc.TuiTransportError("TUI RPC response timed out")
+            ),
+        )
+
+    result, ack = _execute_with_control(tmp_path, monkeypatch, "steer", arrange)
+    assert result["status"] == "completed"
+    assert ack["state"] == "delivery_unknown"
+
+
+def test_runner_cancel_preserves_cleanup_reserve_and_reaps_stubborn_process(
+    tmp_path, monkeypatch,
+):
+    holder = {}
+
+    def factory(_complete):
+        proc = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('READY', flush=True); time.sleep(30)",
+            ],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        assert proc.stdout and proc.stdout.readline() == b"READY\n"
+        rpc_client = tui_rpc.TuiRpcClient(proc)
+
+        class StubbornClient:
+            process = proc
+            stderr_tail = ""
+            close_kwargs = None
+            read_calls = 0
+            calls = []
+
+            def wait_ready(self, **kwargs):
+                return None
+
+            def read_event(self, _timeout):
+                self.read_calls += 1
+                raise AssertionError("cancelled runner must not resume event polling")
+
+            def call(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return {}
+
+            def close(self, **kwargs):
+                self.close_kwargs = kwargs
+                rpc_client.close(**kwargs)
+
+        client = StubbornClient()
+        holder["client"] = client
+        return client
+
+    def arrange():
+        monkeypatch.setattr(tui_runner, "CANCEL_GRACE_SECONDS", 0.3)
+        monkeypatch.setattr(
+            tui_runner.tui_rpc, "interrupt",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                tui_rpc.TuiTransportError("TUI RPC response timed out")
+            ),
+        )
+
+    started = time.monotonic()
+    result, ack, trace = _execute_with_control(
+        tmp_path, monkeypatch, "cancel", arrange,
+        return_trace=True, client_factory=factory,
+    )
+    elapsed = time.monotonic() - started
+    client = holder["client"]
+    assert result["status"] == "cancelled"
+    assert ack["state"] == "accepted"
+    assert client.read_calls == 0
+    assert client.close_kwargs and client.close_kwargs["deadline"] > started
+    assert client.process.poll() is not None
+    assert client.process.returncode == -signal.SIGKILL
+    assert elapsed < 0.8
+    assert trace["client"] is client
+
+
+def test_runner_cancel_timeout_is_authoritative_and_bounded(tmp_path, monkeypatch):
+    interrupt_timeouts = []
+
+    def arrange():
+        monkeypatch.setattr(tui_runner, "CANCEL_GRACE_SECONDS", 0.01)
+
+        def interrupt(*args, **kwargs):
+            interrupt_timeouts.append(kwargs["timeout"])
+            raise tui_rpc.TuiTransportError("TUI RPC response timed out")
+
+        monkeypatch.setattr(tui_runner.tui_rpc, "interrupt", interrupt)
+
+    result, ack, trace = _execute_with_control(
+        tmp_path, monkeypatch, "cancel", arrange,
+        extra_command_type="steer", return_trace=True,
+    )
+    assert result["status"] == "cancelled"
+    assert result["result"]["execution_status"] == "cancelled"
+    assert ack["state"] == "accepted"
+    assert "delivery unknown" in ack["detail"]
+    assert interrupt_timeouts and interrupt_timeouts[0] <= 0.005
+    assert trace["client"].calls == []
+    assert trace["client"].close_kwargs and "deadline" in trace["client"].close_kwargs
+    assert not (trace["acks"] / trace["extra_path"].name).exists()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        tui_rpc.TuiProtocolError("malformed response"),
+        tui_rpc.TuiTransportError("TUI stdout EOF"),
+    ],
+)
+def test_runner_non_timeout_steer_failure_remains_fatal(tmp_path, monkeypatch, failure):
+    def arrange():
+        monkeypatch.setattr(
+            tui_runner.tui_rpc, "steer",
+            lambda *args, **kwargs: (_ for _ in ()).throw(failure),
+        )
+
+    result, ack = _execute_with_control(tmp_path, monkeypatch, "steer", arrange)
+    assert result["status"] == "failed"
+    assert result["error_code"] == "tui_transport_error"
+    assert ack["state"] == "rejected"
+
+
+@pytest.mark.parametrize(
+    "failure, detail_fragment",
+    [
+        (tui_rpc.TuiRemoteError(4999, "cannot interrupt"), "rejected"),
+        (tui_rpc.TuiProtocolError("malformed response"), "protocol failure"),
+        (tui_rpc.TuiTransportError("TUI stdout EOF"), "delivery unknown"),
+    ],
+)
+def test_runner_cancel_failures_remain_authoritative(
+    tmp_path, monkeypatch, failure, detail_fragment,
+):
+    def arrange():
+        monkeypatch.setattr(tui_runner, "CANCEL_GRACE_SECONDS", 0.01)
+        monkeypatch.setattr(
+            tui_runner.tui_rpc, "interrupt",
+            lambda *args, **kwargs: (_ for _ in ()).throw(failure),
+        )
+
+    result, ack = _execute_with_control(tmp_path, monkeypatch, "cancel", arrange)
+    assert result["status"] == "cancelled"
+    assert result["result"]["execution_status"] == "cancelled"
+    assert ack["state"] == "accepted"
+    assert detail_fragment in ack["detail"]
 
 
 @pytest.mark.parametrize(

@@ -1,7 +1,7 @@
 # Profile Delegate project state
 
-Last updated: 2026-08-04 by Adán
-Status: durable detached notification repair validated; activation and visual delivery smoke pending
+Last updated: 2026-08-20 by Adán
+Status: late TUI RPC correlation and authoritative local cancellation validated locally; activation and live smoke pending
 
 ## Active objective
 
@@ -32,11 +32,14 @@ Ship the plugin-only reliability reset and minimal agent-managed project operati
 - Explicit Markdown `PASS` results recover task success; async notifications now reflect execution lifecycle rather than wrapper success.
 - Detached completion delivery is persisted through Hermes' native async-delegation ledger, lane-routed across logical-session reset/expiry, restored by Hermes after gateway restart, and idempotent by Profile Delegate task id.
 - Durable notification has an automatic read-only compatibility gate. Incompatible Hermes API/schema changes fail before run creation or database mutation; foreground and explicit `notify_on_complete=false` execution remain available.
+- TUI RPC calls now retain exact correlation after a local timeout: one strictly valid response for the exact integer id is consumed, while id-bearing event hybrids, type-confused/unknown ids, malformed response shapes, duplicates, EOF, and channel failures remain fatal.
+- Steer rejection/timeout is reported through control ACKs without falsely killing a healthy turn, and accepted local cancellation exits event polling immediately and remains terminally authoritative under one five-second deadline covering native interrupt, transport close, TERM/KILL escalation, and reaping.
 
 ## Blockers
 
-- No code/test review blockers remain.
-- Loaded gateway processes require restart/reload after push before the new code/schema is live.
+- The original `agent=None` / agent-build stall remains unisolated and is outside this control/correlation fix. It reproduced twice for Builder before any prompt/API/tool activity; unrestricted tool discovery is the leading boundary, not a proven root cause.
+- Loaded gateway processes require restart/reload before the new code is live.
+- A fresh-process interactive steer/cancel smoke is still required before release-ready claims.
 
 ## Skill route
 
@@ -53,6 +56,7 @@ Ship the plugin-only reliability reset and minimal agent-managed project operati
 
 ## Latest validation result
 
+- 2026-08-20: full release gate passed with 385 tests after resolving two rounds of independent-review blockers: strict late-response validation, id-bearing event hybrids, immediate exit from polling after accepted cancellation, and end-to-end cleanup/reaping under the shared deadline. Ruff, Python compilation, plugin registration/handler smoke, secret scan, and `git diff --check` passed. Final independent re-review returned PASS with no material blocker; fresh-process interactive steer/cancel smoke remains pending activation approval.
 - 2026-08-04: full release gate passed with 361 tests; Ruff, compilation, registration/handler smoke, diff check, and live read-only native-ledger compatibility probe passed.
 - Real detached process smoke `pd_20260804_071319_ksvge5`: dispatcher exited before child completion; terminal result persisted with the exact Discord thread lane, `parent_session_id=null`, stable task-id delivery identity, `delivery_state=pending`, and zero attempts. The child itself failed because the isolated smoke shell lacked OpenAI credentials, so this certifies detached durable handoff—not successful model execution or visual platform delivery.
 - Focused reconciliation/Markdown/notification regressions passed, including sanitized real-run fixtures and adversarial review cases.

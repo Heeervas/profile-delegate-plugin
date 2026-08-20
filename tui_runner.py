@@ -16,6 +16,9 @@ except ImportError:
     from event_journal import EventJournal  # type: ignore[no-redef]
 
 
+CANCEL_GRACE_SECONDS = 5.0
+
+
 def _stage_timeout(name: str, default: float) -> float:
     try:
         value = float(os.getenv(name, str(default)).strip())
@@ -81,13 +84,17 @@ def _poll_event(
 ) -> Optional[Dict[str, Any]]:
     """Read one frame and drive timer-based journal flushing on idle polls."""
     try:
-        return client.read_frame(timeout)
+        return client.read_event(timeout)
     except tui_rpc.TuiTransportError as exc:
         if "timed out" not in str(exc):
             raise
         return None
     finally:
         journal.flush()
+
+
+def _is_local_timeout(exc: BaseException) -> bool:
+    return isinstance(exc, tui_rpc.TuiTransportError) and "timed out" in str(exc).lower()
 
 
 def execute(run_dir: Path) -> Dict[str, Any]:
@@ -107,6 +114,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
     terminal_event = False
     cancelled = False
     cancel_deadline: Optional[float] = None
+    cancel_transport_diagnostic = ""
     timed_out = False
     final_status = "failed"
     error_code: Optional[str] = None
@@ -149,8 +157,8 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             terminal_event = True
 
     def process_controls() -> None:
-        nonlocal cancelled, cancel_deadline
-        if client is None or not ui_session_id:
+        nonlocal cancelled, cancel_deadline, cancel_transport_diagnostic
+        if client is None or not ui_session_id or cancelled:
             return
         for command_path, command in core._pending_control_commands(run_dir):
             command_type = core.ensure_text(command.get("type"))
@@ -164,19 +172,69 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                 command["claimed_at"] = core.now_iso()
                 core.json_safe_write(command_path, command)
                 if command_type == "steer":
-                    response = tui_rpc.steer(
-                        client, ui_session_id,
-                        core.ensure_text((command.get("payload") or {}).get("text")),
-                        on_event=persist_event,
-                    )
-                    state = "accepted" if response.get("status") == "queued" else "rejected"
-                    core._ack_control(run_dir, command_path, command, state)
+                    try:
+                        response = tui_rpc.steer(
+                            client, ui_session_id,
+                            core.ensure_text((command.get("payload") or {}).get("text")),
+                            on_event=persist_event,
+                        )
+                    except tui_rpc.TuiRemoteError as exc:
+                        if exc.code != 4010:
+                            raise
+                        core._ack_control(
+                            run_dir, command_path, command, "rejected",
+                            f"native steer unavailable: {exc.message}",
+                        )
+                    except tui_rpc.TuiTransportError as exc:
+                        if not _is_local_timeout(exc):
+                            raise
+                        core._ack_control(
+                            run_dir, command_path, command, "delivery_unknown", str(exc)
+                        )
+                    else:
+                        state = "accepted" if response.get("status") == "queued" else "rejected"
+                        core._ack_control(run_dir, command_path, command, state)
                 elif command_type == "cancel":
-                    tui_rpc.interrupt(client, ui_session_id, on_event=persist_event)
+                    # Local cancellation is terminal authority. Establish its
+                    # short deadline before attempting the best-effort native
+                    # interrupt so an unready agent cannot consume the run timeout.
                     cancelled = True
-                    cancel_deadline = time.monotonic() + 5.0
-                    core.merge_run_status(run_dir, {"status": "cancelling", "phase": "interrupting"})
-                    core._ack_control(run_dir, command_path, command, "accepted")
+                    cancel_deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+                    core.merge_run_status(
+                        run_dir, {"status": "cancelling", "phase": "interrupting"}
+                    )
+                    detail = "native interrupt accepted"
+                    try:
+                        interrupt_budget = max(
+                            0.001, (cancel_deadline - time.monotonic()) * 0.5,
+                        )
+                        tui_rpc.interrupt(
+                            client, ui_session_id,
+                            timeout=interrupt_budget,
+                            on_event=persist_event,
+                        )
+                    except tui_rpc.TuiRemoteError as exc:
+                        detail = (
+                            "native interrupt rejected; local cancellation authoritative: "
+                            f"{exc}"
+                        )
+                    except tui_rpc.TuiTransportError as exc:
+                        detail = (
+                            "native interrupt delivery unknown; local cancellation authoritative: "
+                            f"{exc}"
+                        )
+                        if not _is_local_timeout(exc):
+                            cancel_transport_diagnostic = detail
+                    except tui_rpc.TuiProtocolError as exc:
+                        detail = (
+                            "native interrupt protocol failure; local cancellation authoritative: "
+                            f"{exc}"
+                        )
+                        cancel_transport_diagnostic = detail
+                    core._ack_control(run_dir, command_path, command, "accepted", detail)
+                    # Cancellation owns the remaining lifecycle. Do not drain
+                    # later controls under its absolute cleanup deadline.
+                    return
                 else:
                     core._ack_control(
                         run_dir, command_path, command, "rejected", "unsupported command type"
@@ -186,6 +244,10 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                     run_dir, command_path, command, "rejected",
                     f"{type(exc).__name__}: {exc}",
                 )
+                if command_type != "cancel" and isinstance(
+                    exc, (tui_rpc.TuiProtocolError, tui_rpc.TuiTransportError)
+                ):
+                    raise
 
     try:
         policy_limits = ((request.get("effective_policy") or {}).get("limits") or {})
@@ -255,7 +317,9 @@ def execute(run_dir: Path) -> Dict[str, Any]:
 
             while not terminal_event:
                 process_controls()
-                if cancelled and cancel_deadline is not None and time.monotonic() >= cancel_deadline:
+                if cancelled:
+                    # Preserve the cleanup reserve: accepted local cancellation
+                    # exits event polling immediately and reaps under the same deadline.
                     break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -268,14 +332,11 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                 frame = _poll_event(client, min(0.15, remaining), journal)
                 if frame is None:
                     continue
-                if frame.get("method") != "event":
-                    raise tui_rpc.TuiProtocolError(
-                        f"unexpected idle response id {frame.get('id')!r}"
-                    )
                 persist_event(frame)
 
-            process_controls()
-            if ui_session_id:
+            if not cancelled:
+                process_controls()
+            if ui_session_id and not cancelled:
                 try:
                     client.call(
                         "session.close", {"session_id": ui_session_id}, timeout=5,
@@ -292,16 +353,29 @@ def execute(run_dir: Path) -> Dict[str, Any]:
         else:
             error_code, final_status = "tui_turn_error", "failed"
     except Exception as exc:
-        error_code = getattr(exc, "code", "tui_transport_error")
-        final_status = "failed"
+        if cancelled:
+            error_code = "cancelled"
+            final_status = "cancelled"
+            cancel_transport_diagnostic = cancel_transport_diagnostic or (
+                f"{type(exc).__name__}: {exc}"
+            )
+        else:
+            error_code = getattr(exc, "code", "tui_transport_error")
+            final_status = "failed"
         core.text_safe_write(
             run_dir / "stderr.txt",
             f"{type(exc).__name__}: {exc}; last observed event={last_observed_event}\n"
+            + (f"{cancel_transport_diagnostic}\n" if cancel_transport_diagnostic else "")
             + (client.stderr_tail if client else ""),
         )
     finally:
         if client is not None:
-            client.close()
+            if cancelled:
+                if cancel_deadline is None:
+                    cancel_deadline = time.monotonic()
+                client.close(deadline=cancel_deadline)
+            else:
+                client.close()
             exit_code = client.process.poll()
         core.merge_run_status(run_dir, {"transport_alive": False})
 
