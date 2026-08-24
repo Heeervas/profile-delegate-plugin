@@ -165,6 +165,21 @@ def _parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list
     return args, command
 
 
+def prepare_tui_runtime() -> None:
+    """Finish plugin registration before TUI starts concurrent discovery/build.
+
+    The stdio gateway starts MCP discovery in one thread and lazily builds the
+    first agent in another. Both paths can enter plugin discovery. A plugin
+    register hook that imports ``run_agent`` while the build thread imports
+    ``model_tools`` creates a plugin-lock/import-lock inversion and strands the
+    submitted prompt until the 600-second agent-build timeout. Serial discovery
+    here makes the registry stable before either TUI thread exists.
+    """
+    from hermes_cli.plugins import discover_plugins
+
+    discover_plugins()
+
+
 def main(argv: list[str] | None = None) -> int:
     args, command = _parse_args(argv)
     # Non-Hermes commands are test/compatibility shims. Execute them directly;
@@ -186,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
             return subprocess.run(command, check=False).returncode
         raise
     if args.tui_gateway:
+        prepare_tui_runtime()
         from tui_gateway.entry import main as tui_main
 
         result = tui_main()

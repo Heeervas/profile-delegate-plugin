@@ -29,9 +29,11 @@ Historical observation: `pd_20260627_143510_na5ck4` was listed but status lookup
 
 ### P3 — Simpler background transport
 
-- [ ] Collect several days of post-P0/P1 failure-rate evidence by transport.
-- [ ] Decide whether evidence justifies `transport_mode=auto|simple|interactive`.
+- [ ] Collect post-repair failure-rate and startup-latency evidence by transport; the 2026-08-24 incident is one strong data point, not a complete rollout sample.
+- [x] Architecture decision: preserve TUI for native cross-process steer/cancel, but do not require it for every run. Target `transport_mode=auto|simple|interactive`, where `auto` uses simple CLI unless interactive control is explicitly requested.
 - [ ] If justified, add validation, persistence, fingerprinting, and transport-selection cancellation/steer semantics. Explicit dead-worker reconciliation is implemented independently and does not change transport defaults.
+
+Hermes' native `delegate_task(action=list|steer|stop)` is the reference control-plane design for ownership and lineage, but not a replacement: it is an in-process same-profile registry, while Profile Delegate owns cross-profile process isolation, resumable profile sessions, approval policy, durable artifacts, reconciliation, and notification state.
 
 **Do not start from theory alone:** this changes execution routing and should be evidence-led.
 

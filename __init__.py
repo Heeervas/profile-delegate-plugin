@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Any, Dict, Optional
 
 try:
@@ -530,12 +531,15 @@ def _install_tool_preview_patch() -> None:
     wrapped._profile_delegate_patch = True  # type: ignore[attr-defined]
     display.build_tool_preview = wrapped
 
-    try:
-        import run_agent
-        if getattr(run_agent, "_build_tool_preview", None) is current:
-            run_agent._build_tool_preview = wrapped
-    except Exception:
-        pass
+    # Never import agent-runtime modules from plugin registration. Discovery
+    # holds the plugin-manager lock, while a concurrent deferred TUI build can
+    # hold Python's import lock on ``run_agent`` and wait for discovery via
+    # ``model_tools``. Importing ``run_agent`` here therefore deadlocks both
+    # threads. Modules loaded after this point inherit the patched display
+    # function normally; update only an executor that is already loaded.
+    executor = sys.modules.get("agent.tool_executor")
+    if executor is not None and getattr(executor, "_build_tool_preview", None) is current:
+        setattr(executor, "_build_tool_preview", wrapped)
 
 
 def register(ctx: Any) -> None:

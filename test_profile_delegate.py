@@ -1,6 +1,7 @@
 """Tests for Profile Delegate. Usage: pytest . -q"""
 from __future__ import annotations
 
+import builtins
 import json
 import os
 import sqlite3
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,7 @@ if str(PLUGIN_DIR) not in sys.path:
 
 import core
 import __init__ as plugin
+import child_bootstrap
 
 
 HERMES_TEST_PYTHON = Path("/opt/hermes/.venv/bin/python")
@@ -820,6 +823,52 @@ def test_profile_delegate_preview_truncates_task():
     assert preview.startswith("to reviewer: ")
     assert preview.endswith("...")
     assert len(preview) <= 40
+
+
+def test_preview_patch_does_not_import_agent_runtime(monkeypatch):
+    """Plugin discovery must not import run_agent while holding its load lock.
+
+    MCP discovery can register this plugin concurrently with the deferred TUI
+    agent build. Importing ``run_agent`` here creates an import/plugin-lock
+    inversion with ``run_agent -> model_tools -> discover_plugins``.
+    """
+    import agent.display as display
+
+    def original(tool_name: str, args: dict, max_len: int | None = None) -> str:
+        return f"original:{tool_name}"
+
+    fake_executor = types.ModuleType("agent.tool_executor")
+    setattr(fake_executor, "_build_tool_preview", original)
+    monkeypatch.setattr(display, "build_tool_preview", original)
+    monkeypatch.setitem(sys.modules, "agent.tool_executor", fake_executor)
+    monkeypatch.delitem(sys.modules, "run_agent", raising=False)
+
+    imported: list[str] = []
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "run_agent":
+            imported.append(name)
+            raise AssertionError("preview registration imported run_agent")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    plugin._install_tool_preview_patch()
+
+    assert imported == []
+    assert "run_agent" not in sys.modules
+    assert fake_executor._build_tool_preview("profile_delegate", {"profile": "reviewer"}) == "to reviewer"
+
+
+def test_tui_runtime_finishes_plugin_discovery_synchronously(monkeypatch):
+    calls: list[str] = []
+    fake_plugins = types.ModuleType("hermes_cli.plugins")
+    setattr(fake_plugins, "discover_plugins", lambda: calls.append("discover"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", fake_plugins)
+
+    child_bootstrap.prepare_tui_runtime()
+
+    assert calls == ["discover"]
 
 
 def test_delegate_uses_prompt_file_not_raw_prompt_in_argv(tmp_path, monkeypatch):
