@@ -1,6 +1,6 @@
 # Profile Delegate 🤝
 
-Version: `1.9.0`
+Version: `1.10.0`
 
 > Stable local-power-user Hermes Agent plugin. It is **not a sandbox** and should be configured deliberately before broad use.
 
@@ -493,7 +493,7 @@ for h in hits: print(h)
 PY
 ```
 
-CI runs pytest and py_compile on Python 3.10, 3.11, and 3.12.
+CI runs pytest and py_compile on Python 3.11, 3.12, and 3.13 with frozen, hash-locked dependencies and immutable action revisions, matching Hermes' supported interpreter window.
 
 ## Roadmap
 

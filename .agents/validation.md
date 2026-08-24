@@ -2,18 +2,27 @@
 
 Run from the repository root.
 
+Dependency installation is lock-governed:
+
+```bash
+uv lock --check
+uv sync --frozen
+```
+
+`pyproject.toml` and `uv.lock` must remain aligned with Hermes' Python 3.11–3.13 support window.
+
 ## Fast feedback
 
 ```bash
-PYTHONPATH=/opt/hermes .venv/bin/python -m pytest -q -o 'addopts=' test_reliability_reset.py test_tui_rpc.py
+PYTHONPATH=/opt/hermes uv run --frozen python -m pytest -q -o 'addopts=' test_reliability_reset.py test_tui_rpc.py
 ```
 
 ## Release gate
 
 ```bash
-PYTHONPATH=/opt/hermes .venv/bin/python -m pytest -q -o 'addopts='
-.venv/bin/ruff check .
-.venv/bin/python -m py_compile \
+PYTHONPATH=/opt/hermes uv run --frozen python -m pytest -q -o 'addopts=' -W error
+uv run --frozen ruff check .
+uv run --frozen python -m py_compile \
   __init__.py child_bootstrap.py cli.py cli_smoke.py core.py \
   event_journal.py event_schema.py spectator.py tui_rpc.py tui_runner.py \
   scripts/validate_release.py \
@@ -25,7 +34,7 @@ git diff --check
 ## Plugin registration and handler smoke
 
 ```bash
-.venv/bin/python scripts/validate_release.py
+uv run --frozen python scripts/validate_release.py
 ```
 
 This calls `register(ctx)` through a fake plugin context, asserts every manifest tool is registered with OpenAI-format `parameters`, checks version alignment, and invokes a harmless validation-error handler path. For a live install, use a fresh Hermes process after code/schema changes and verify plugin discovery before claiming the gateway sees it.

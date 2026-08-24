@@ -13,19 +13,19 @@ Canonical design: [`docs/plans/2026-07-22-plugin-only-reliability-reset-p0-p4.md
 
 ### Maintenance follow-up
 
-- [ ] Reproduce the historical `profile_delegate_status` task-ID rejection against the current shared validator. Current create/list/status regexes appear aligned and emitted suffixes fit the accepted 6–12 lowercase-alphanumeric form; close this item if a fresh regression cannot reproduce it.
+- [x] Close the historical `profile_delegate_status` task-ID rejection: current create/list/status formats are aligned, emitted suffixes fit the accepted 6–12 lowercase-alphanumeric form, and the regression suite covers listed IDs.
 
 Historical observation: `pd_20260627_143510_na5ck4` was listed but status lookup reportedly returned `invalid task_id format`. Expected behavior is that every ID emitted/listed by the plugin is accepted by status lookup.
 
-### P2 — Honest best-effort notifications
+### P2 — Honest durable notifications
 
-- [ ] Model notification state independently from execution/task state.
-- [ ] Persist completion before queue attempts; bounded retry only while parent is alive.
-- [ ] Project legacy notification states without rewriting old artifacts.
-- [ ] Make status output lead with result preservation when notification is unavailable.
-- [ ] Document that guaranteed delivery across gateway restart is unsupported plugin-only.
+- [x] Model notification state independently from execution/task state.
+- [x] Persist dispatch/completion through Hermes' native async-delegation ledger and rehydrate across gateway restart.
+- [x] Project legacy notification states without rewriting old artifacts.
+- [x] Preserve execution/task results independently from notification availability.
+- [x] Gate durable notification on a read-only native API/schema compatibility probe.
 
-**Start gate:** preserve the reviewed P0/P1 baseline in the v1.9 release commit before beginning this slice.
+Implemented without a plugin-owned outbox; Hermes remains the durable delivery owner.
 
 ### P3 — Simpler background transport
 
@@ -43,9 +43,10 @@ Already absorbed into P0/P1: portable fixtures, README/schema alignment, lifecyc
 
 - [ ] Add compact run-health reporting by execution/task/contract/notification/transport state.
 - [ ] Add legacy artifact compatibility projectors only when the next schema change is actually required.
-- [ ] Run real simple sync, detached background, and interactive steer/cancel smokes for the relevant transport release.
+- [x] Run real detached execution and interactive steer/cancel smokes for the TUI transport release.
 - [ ] Decide and approve a retention schedule only after reviewing unresolved legacy runs; keep prune separate from reconciliation.
-- [ ] Re-review each shipped slice independently.
+- [x] Complete bounded independent re-reviews of the final functional diff: concurrency/lifecycle PASS, API/compatibility PASS, and security/release PASS_WITH_RESIDUAL_RISK.
+- [x] Close the remaining low CI supply-chain residual with `uv.lock`, frozen installs, artifact hashes, immutable action revisions, and a pinned uv runtime; verify the same lock in isolated Python 3.11–3.13 suites.
 
 ## Explicit non-goals
 

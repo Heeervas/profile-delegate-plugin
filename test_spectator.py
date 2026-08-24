@@ -471,6 +471,6 @@ def test_default_output_mode_uses_plain_when_not_tty(tmp_path):
     assert "\x1b" not in out.getvalue()
 
 
-def test_module_is_python_310_compatible_surface():
-    # Guard the most common accidental 3.11+ dependency for this stdlib-only module.
+def test_module_keeps_minimal_stdlib_surface():
+    # Keep this standalone spectator module free of project-metadata parsing.
     assert not hasattr(importlib.import_module("spectator"), "tomllib")

@@ -7,6 +7,8 @@ import json
 import re
 from pathlib import Path
 
+import tomllib
+
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +38,7 @@ def load_plugin():
 
 def main() -> int:
     manifest = yaml.safe_load((ROOT / "plugin.yaml").read_text(encoding="utf-8"))
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     match = re.search(r"^Version: `([^`]+)`$", readme, re.MULTILINE)
@@ -43,6 +46,8 @@ def main() -> int:
         raise AssertionError("README version marker missing")
     version = str(manifest["version"])
     assert match.group(1) == version, "README/manifest version mismatch"
+    assert str(pyproject["project"]["version"]) == version, "pyproject/manifest version mismatch"
+    assert pyproject["project"]["requires-python"] == ">=3.11,<3.14", "pyproject Python support mismatch"
     assert f"## [{version}]" in changelog, "CHANGELOG release entry missing"
 
     plugin = load_plugin()

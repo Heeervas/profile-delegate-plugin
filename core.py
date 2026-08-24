@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 import uuid
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2239,7 +2239,7 @@ def native_async_ledger_compatibility() -> Dict[str, Any]:
         return report
     try:
         uri = f"{db_path.as_uri()}?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=2) as conn:
+        with closing(sqlite3.connect(uri, uri=True, timeout=2)) as conn:
             conn.execute("PRAGMA query_only=ON")
             table = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='async_delegations'"

@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import types
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -1208,7 +1209,7 @@ def test_native_async_ledger_compatibility_is_read_only_and_accepts_current_cont
     tmp_path, monkeypatch,
 ):
     db = tmp_path / "state.db"
-    with sqlite3.connect(db) as conn:
+    with closing(sqlite3.connect(db)) as conn:
         conn.execute("""CREATE TABLE async_delegations (
             delegation_id TEXT PRIMARY KEY, origin_session TEXT NOT NULL,
             parent_session_id TEXT, state TEXT NOT NULL, dispatched_at REAL NOT NULL,
@@ -1216,6 +1217,7 @@ def test_native_async_ledger_compatibility_is_read_only_and_accepts_current_cont
             result_json TEXT, delivery_state TEXT NOT NULL,
             delivery_attempts INTEGER NOT NULL, delivered_at REAL
         )""")
+        conn.commit()
     fake_async = type("Async", (), {
         "_persist_dispatch": staticmethod(lambda record: None),
         "_persist_completion": staticmethod(lambda event, result: None),
@@ -1228,7 +1230,7 @@ def test_native_async_ledger_compatibility_is_read_only_and_accepts_current_cont
 
     assert report["compatible"] is True
     assert report["database_open_mode"] == "read_only"
-    with sqlite3.connect(db) as conn:
+    with closing(sqlite3.connect(db)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM async_delegations").fetchone()[0] == 0
 
 
@@ -1253,8 +1255,9 @@ def test_native_async_ledger_compatibility_rejects_missing_api_without_touching_
 
 def test_native_async_ledger_compatibility_rejects_missing_columns(tmp_path, monkeypatch):
     db = tmp_path / "state.db"
-    with sqlite3.connect(db) as conn:
+    with closing(sqlite3.connect(db)) as conn:
         conn.execute("CREATE TABLE async_delegations (delegation_id TEXT PRIMARY KEY)")
+        conn.commit()
     fake_async = type("Async", (), {
         "_persist_dispatch": staticmethod(lambda record: None),
         "_persist_completion": staticmethod(lambda event, result: None),

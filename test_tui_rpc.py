@@ -8,6 +8,7 @@ import queue
 import signal
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -126,6 +127,30 @@ def test_rpc_timeout_names_exact_stage_method_and_last_event():
         )
 
 
+def test_rpc_deadline_remains_authoritative_during_continuous_events(monkeypatch):
+    class FloodClient(tui_rpc.TuiRpcClient):
+        def __init__(self):
+            super().__init__(FakeProcess([]))
+            self.reads = 0
+
+        def _read_raw_frame(self, timeout):
+            self.reads += 1
+            return {
+                "jsonrpc": "2.0", "method": "event",
+                "params": {"type": "status.update", "session_id": "ui-1", "payload": {}},
+            }
+
+    ticks = iter([0.0, 0.0, 0.0, 0.0, 0.002, 0.002, 0.002])
+    monkeypatch.setattr(tui_rpc.time, "monotonic", lambda: next(ticks))
+    client = FloodClient()
+
+    with pytest.raises(tui_rpc.TuiTransportError, match="timed out"):
+        client.call("session.interrupt", {"session_id": "ui-1"}, timeout=0.001)
+
+    assert client.reads == 1
+    assert client._abandoned_ids == {1}
+
+
 def test_rpc_timeout_tracks_id_and_late_response_is_consumed_once():
     class TimeoutOnceClient(tui_rpc.TuiRpcClient):
         def __init__(self, process):
@@ -232,11 +257,12 @@ def test_active_call_id_bearing_event_hybrid_is_fatal():
 
 def test_close_honors_absolute_deadline_and_kills_stubborn_process():
     proc = subprocess.Popen(
-        [sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"],
+        [sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(30)"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         start_new_session=True,
     )
     client = tui_rpc.TuiRpcClient(proc)
+    assert proc.stdout is not None and proc.stdout.readline() == b"ready\n"
     started = time.monotonic()
     try:
         client.close(deadline=started + 0.3)
@@ -244,6 +270,10 @@ def test_close_honors_absolute_deadline_and_kills_stubborn_process():
         assert elapsed < 0.8
         assert proc.poll() is not None
         assert proc.returncode == -signal.SIGKILL
+        assert all(
+            stream is None or stream.closed
+            for stream in (proc.stdin, proc.stdout, proc.stderr)
+        )
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -307,6 +337,7 @@ def test_close_reaps_process_and_is_idempotent():
     client.close()
     client.close()
     assert proc.returncode == 0
+    assert proc.stdin.closed and proc.stdout.closed and proc.stderr.closed
 
 
 @pytest.mark.parametrize("timeout", [False, True])
@@ -594,6 +625,131 @@ def test_runner_steer_timeout_is_delivery_unknown_without_failing_turn(tmp_path,
     result, ack = _execute_with_control(tmp_path, monkeypatch, "steer", arrange)
     assert result["status"] == "completed"
     assert ack["state"] == "delivery_unknown"
+
+
+def test_runner_applies_steer_over_real_stdio_gateway(tmp_path, monkeypatch):
+    run = tmp_path / "pd_20260824_120000_stdio1"
+    run.mkdir()
+    methods_path = tmp_path / "methods.txt"
+    request = {
+        "task_id": run.name, "timeout_seconds": 10, "workdir": str(tmp_path),
+        "profile": "reviewer", "session_mode": "new", "requested_session_id": "",
+        "session_title": "stdio steer", "profile_home": str(tmp_path),
+        "hermes_bin": sys.executable, "child_approval_mode": "deny",
+        "requested_execution": {}, "effective_execution": {},
+        "effective_capabilities": {}, "approval_policy": {},
+        "resolved_output_mode": "json",
+        "effective_policy": {"limits": {"max_concurrent": 8}},
+    }
+    (run / "request.json").write_text(json.dumps(request), encoding="utf-8")
+    (run / "prompt.txt").write_text("initial prompt", encoding="utf-8")
+    (run / "status.json").write_text(
+        json.dumps({"task_id": run.name, "status": "running"}), encoding="utf-8",
+    )
+    _, commands, acks = core._control_dirs(run)
+    command = {
+        "schema_version": 1, "task_id": run.name, "type": "steer",
+        "command_id": "stdio-steer", "seq": 1, "created_at": core.now_iso(),
+        "payload": {"text": "redirect through stdio"},
+    }
+    command_path = commands / "000000000001-stdio-steer.json"
+
+    gateway_code = r'''
+import json
+import sys
+
+methods_path = sys.argv[1]
+
+def send(frame):
+    sys.stdout.write(json.dumps(frame, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+send({"jsonrpc": "2.0", "method": "event", "params": {
+    "type": "gateway.ready", "session_id": "", "payload": {},
+}})
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request["method"]
+    with open(methods_path, "a", encoding="utf-8") as handle:
+        handle.write(method + "\n")
+    if method == "session.create":
+        result = {"session_id": "ui-stdio", "session_key": "durable-stdio"}
+    elif method == "prompt.submit":
+        result = {"accepted": True}
+    elif method == "session.steer":
+        result = {"status": "queued"}
+    elif method == "session.close":
+        result = {}
+    else:
+        result = {}
+    send({"jsonrpc": "2.0", "id": request["id"], "result": result})
+    if method == "session.steer":
+        send({"jsonrpc": "2.0", "method": "event", "params": {
+            "type": "message.complete", "session_id": "ui-stdio", "payload": {
+                "status": "complete", "text": json.dumps({
+                    "status": "ok", "summary": "STEER_STDIO_OK",
+                    "artifacts": [], "errors": [], "next_steps": [],
+                }),
+            },
+        }})
+'''
+
+    monkeypatch.setattr(tui_runner, "_environment", lambda request, run_dir: {})
+    monkeypatch.setattr(
+        tui_runner, "_gateway_command",
+        lambda request, run_dir: [sys.executable, "-u", "-c", gateway_code, str(methods_path)],
+    )
+
+    @contextmanager
+    def slot(_limit):
+        yield type("Slot", (), {"slot": 0})()
+
+    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", slot)
+
+    poll_entered = threading.Event()
+    command_written = threading.Event()
+    real_poll_event = tui_runner._poll_event
+    real_launch_gateway = tui_runner.tui_rpc.launch_gateway
+    holder = {}
+
+    def poll_event(*args, **kwargs):
+        poll_entered.set()
+        return real_poll_event(*args, **kwargs)
+
+    def launch_gateway(**kwargs):
+        client = real_launch_gateway(**kwargs)
+        holder["client"] = client
+        return client
+
+    def enqueue_steer() -> None:
+        assert poll_entered.wait(timeout=2), "runner never entered event polling"
+        core.json_safe_write(command_path, command)
+        command_written.set()
+
+    monkeypatch.setattr(tui_runner, "_poll_event", poll_event)
+    monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", launch_gateway)
+    producer = threading.Thread(target=enqueue_steer, name="stdio-steer-producer")
+    producer.start()
+
+    result = tui_runner.execute(run)
+    producer.join(timeout=2)
+
+    ack = json.loads((acks / command_path.name).read_text(encoding="utf-8"))
+    methods = methods_path.read_text(encoding="utf-8").splitlines()
+    status = json.loads((run / "status.json").read_text(encoding="utf-8"))
+    assert result["success"] is True
+    assert result["status"] == "completed"
+    assert result["result"]["summary"] == "STEER_STDIO_OK"
+    assert command_written.is_set()
+    assert ack["state"] == "accepted"
+    assert methods == ["session.create", "prompt.submit", "session.steer", "session.close"]
+    assert status["transport_alive"] is False
+    process = holder["client"].process
+    assert process.returncode == 0
+    assert process.stdin.closed and process.stdout.closed and process.stderr.closed
+    if hasattr(os, "waitpid"):
+        with pytest.raises(ChildProcessError):
+            os.waitpid(process.pid, os.WNOHANG)
 
 
 def test_runner_cancel_preserves_cleanup_reserve_and_reaps_stubborn_process(

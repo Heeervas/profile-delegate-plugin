@@ -173,7 +173,10 @@ class TuiRpcClient:
         """Read one frame, consuming only strictly valid known late responses."""
         deadline = time.monotonic() + max(0.0, timeout)
         while True:
-            frame = self._read_raw_frame(max(0.001, deadline - time.monotonic()))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TuiTransportError("TUI RPC response timed out")
+            frame = self._read_raw_frame(remaining)
             response_id = frame.get("id")
             if type(response_id) is int and response_id in self._abandoned_ids:
                 validated_id = self._validate_response(frame)
@@ -264,29 +267,41 @@ class TuiRpcClient:
                 return False
 
         try:
-            if self.process.stdin is not None:
-                self.process.stdin.close()
-        except Exception:
-            pass
-        if wait_bounded(fraction=0.25):
-            return
-        try:
-            os.killpg(self.process.pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, AttributeError):
             try:
-                self.process.terminate()
+                if self.process.stdin is not None:
+                    self.process.stdin.close()
             except Exception:
                 pass
-        if wait_bounded(fraction=0.5):
-            return
-        try:
-            os.killpg(self.process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, AttributeError):
+            if wait_bounded(fraction=0.25):
+                return
             try:
-                self.process.kill()
-            except Exception:
-                pass
-        wait_bounded()
+                os.killpg(self.process.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, AttributeError):
+                try:
+                    self.process.terminate()
+                except Exception:
+                    pass
+            if wait_bounded(fraction=0.5):
+                return
+            try:
+                os.killpg(self.process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, AttributeError):
+                try:
+                    self.process.kill()
+                except Exception:
+                    pass
+            wait_bounded()
+        finally:
+            # Popen.wait() reaps the process but deliberately leaves the three
+            # pipe objects open. Detached workers are short-lived, yet callers
+            # and tests may create several transports in one process; close all
+            # owned descriptors deterministically instead of relying on GC.
+            for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
 
 
 def launch_gateway(*, python: str, cwd: str, env: dict[str, str],

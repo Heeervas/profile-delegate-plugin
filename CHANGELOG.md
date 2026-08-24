@@ -4,6 +4,10 @@ All notable changes to Profile Delegate are documented here.
 
 ## [Unreleased]
 
+No unreleased changes.
+
+## [1.10.0] — 2026-08-24
+
 ### Added
 
 - Foreground lifecycle heartbeats through Hermes' thread-local activity callback.
@@ -13,6 +17,10 @@ All notable changes to Profile Delegate are documented here.
 
 ### Fixed
 
+- Closed all owned TUI subprocess pipes deterministically after bounded reaping, and made the stubborn-process escalation regression wait until its SIGTERM handler is installed.
+- Closed the read-only native-ledger SQLite probe explicitly instead of relying on transaction context or garbage collection.
+- Kept RPC deadlines authoritative even when the gateway continuously emits immediately available events, preventing event-flood starvation and CPU spin past the caller's timeout.
+- Hardened CI with least-privilege permissions, immutable action SHAs, a pinned uv installer/runtime, frozen hash-locked dependencies, a job timeout, and Python 3.11–3.13 coverage matching Hermes' supported interpreter window.
 - Correlated locally timed-out TUI RPC calls by exact integer request id so one strictly valid known late `result`/`error` is consumed without weakening handling of id-bearing event hybrids, unknown/type-confused ids, malformed response shapes, duplicate late responses, EOF, or real channel failures.
 - Kept native steer rejection (`4010`) and delivery timeout in the control ACK lifecycle instead of converting them into false run-level transport failures.
 - Made local cancellation terminally authoritative before native interrupt delivery, exits event polling immediately after acceptance, and uses one absolute cleanup deadline covering control draining, graceful close, TERM/KILL escalation, and reaping; diagnostics remain truthful when interrupt is rejected, late, timed out, or the channel fails.
@@ -29,6 +37,7 @@ All notable changes to Profile Delegate are documented here.
 ### Verification
 
 - Focused synchronous lifecycle suite covers heartbeat stop conditions, exact-origin authorization, descendant cleanup, timeout/cancel distinction, atomic private status, retry-delay interruption, and advisory execution-mode guidance.
+- Full frozen-lock suites pass on isolated Python 3.11, 3.12, and 3.13 environments; the synchronized real-stdio steer regression enqueues control only after event polling begins, then verifies RPC correlation, accepted ACK, terminal event, session close, closed pipes, and direct subprocess reaping.
 
 ### Deferred
 
