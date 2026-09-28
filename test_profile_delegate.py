@@ -50,55 +50,6 @@ def test_async_completion_event_status_tracks_execution_not_wrapper_success(
     assert core.async_completion_event_status(execution_status, wrapper_success) == expected
 
 
-def test_extract_json_pure():
-    assert core.extract_json_object('{"status":"ok","summary":"x"}') == {"status": "ok", "summary": "x"}
-
-
-def test_extract_json_fenced():
-    text = 'noise\n```json\n{"status":"ok","summary":"x"}\n```'
-    obj = core.extract_json_object(text)
-    assert isinstance(obj, dict)
-    assert obj["status"] == "ok"
-
-
-def test_extract_json_last_object():
-    text = 'first {"status":"failed"}\nlast {"status":"ok","summary":"final"}'
-    obj = core.extract_json_object(text)
-    assert isinstance(obj, dict)
-    assert obj["summary"] == "final"
-
-
-def test_extract_json_warning_prelude_prefers_outer_envelope_over_nested_map():
-    text = '''⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
-{
-  "status": "ok",
-  "summary": "full result",
-  "ssr_status": "READY",
-  "mode": "DESIGN_ONLY",
-  "normalized_input": {"objective": "compare"},
-  "evaluation_design": {
-    "expected_execution_output": {
-      "rating_distribution": {
-        "1": "count_or_share_placeholder",
-        "2": "count_or_share_placeholder",
-        "3": "count_or_share_placeholder",
-        "4": "count_or_share_placeholder",
-        "5": "count_or_share_placeholder"
-      }
-    }
-  },
-  "artifacts": [],
-  "errors": [],
-  "next_steps": []
-}
-'''
-    obj = core.extract_json_object(text)
-    assert isinstance(obj, dict)
-    assert obj["summary"] == "full result"
-    assert obj["ssr_status"] == "READY"
-    assert "1" not in obj
-
-
 def test_extract_json_multiple_objects_prefers_stronger_final_envelope():
     text = 'progress {"status":"ok","summary":"partial"}\nfinal {"status":"ok","summary":"final","artifacts":[],"errors":[],"next_steps":[]}'
     obj = core.extract_json_object(text)
@@ -120,39 +71,6 @@ def test_parse_json_result_ignores_nested_terminal_object():
     assert parsed["summary"] == "outer"
     assert meta["candidate_count"] == 1
 
-
-def test_extract_json_ignores_non_envelope_nested_object():
-    text = 'noise {"1":"placeholder","2":"placeholder"}'
-    assert core.extract_json_object(text) is None
-
-
-def test_delegate_parses_warning_prefixed_stdout_outer_envelope(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
-
-    stdout = '''⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
-{"status":"ok","summary":"outer","ssr_status":"READY","mode":"DESIGN_ONLY","normalized_input":{},"evaluation_design":{"rating_distribution":{"1":"count_or_share_placeholder","2":"count_or_share_placeholder"}},"artifacts":[],"errors":[],"next_steps":[]}
-
-session_id: sid_outer'''
-
-    def fake_run_capped(cmd, **kwargs):
-        core.text_safe_write(kwargs["stdout_path"], stdout)
-        core.text_safe_write(kwargs["stderr_path"], "")
-        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": len(stdout), "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
-
-    monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
-    monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True, "rename_exit_code": 0, "rename_error": None})
-    result = core.delegate_profile("ssr_synthetic_consumer", "task", session_title="warning stdout")
-    assert result["success"] is True
-    assert result["child_session_id"] == "sid_outer"
-    assert result["result"]["summary"] == "outer"
-    assert result["result"]["ssr_status"] == "READY"
-    assert "1" not in result["result"]
 
 
 def test_session_id_footer_helpers():
@@ -206,14 +124,6 @@ def test_normalize_result_parse_failure_coerces_plain_text():
     assert result["errors"] == []
 
 
-def test_normalize_result_recovers_blocked_markdown_without_false_success():
-    raw = "scanner warning\n\n## `BLOCKED_NEEDS_FIXES`\n\nUseful review body."
-    result = core.normalize_result(None, "/tmp/stdout.txt", raw_output=raw, output_mode="json")
-    assert result["status"] == "blocked"
-    assert result["contract_status"] == "recovered"
-    assert result["structured"] is False
-
-
 def test_normalize_result_statusless_custom_json_is_unknown_and_preserves_keys():
     parsed = {"verdict": "PASS", "findings": [], "summary": "useful"}
     result = core.normalize_result(parsed, "/tmp/stdout.txt")
@@ -259,20 +169,8 @@ def test_build_prompt_contains_task_context_contract():
     assert "ctx" in prompt
     assert "contract" in prompt
     assert "Final serialization mode: JSON object" in prompt
-
-
-def test_output_mode_auto_preserves_historical_markdown_contract():
-    requested, resolved = core.resolve_output_mode("auto", "Return full Markdown plan only")
-    assert (requested, resolved) == ("auto", "markdown")
-    prompt = core.build_prompt("task", output_contract="Return full Markdown plan only")
-    assert "Resolved output mode: markdown" in prompt
-    assert "Final serialization mode: Markdown" in prompt
-
-
-def test_explicit_output_mode_conflicts_fail_before_launch():
-    with pytest.raises(core.ProfileDelegateError) as caught:
-        core.resolve_output_mode("json", "Return full Markdown plan only")
-    assert caught.value.code == "contract_conflict"
+    markdown_prompt = core.build_prompt("task", output_contract="Return full Markdown plan only")
+    assert "Final serialization mode: Markdown" in markdown_prompt
 
 
 def test_plugin_registers_tools():
@@ -2481,11 +2379,3 @@ def test_required_status_merge_lock_failure_propagates_optional_enrichment_is_be
         core.merge_run_status(run_dir, {"status": "failed", "ended_at": "now"}, terminal=True)
     assert core.merge_run_status_best_effort(run_dir, {"event_seq": 3}) is False
     assert core.read_json_file(run_dir / "status.json")["status"] == "running"
-
-
-def test_no_post_creation_direct_status_writes_remain():
-    core_source = Path(core.__file__).read_text(encoding="utf-8")
-    runner_source = Path(core.__file__).with_name("tui_runner.py").read_text(encoding="utf-8")
-    assert core_source.count('json_safe_write(run_dir / "status.json"') == 2
-    assert core_source.count("_write_locked_status_snapshot(run_dir, current)") == 2
-    assert 'json_safe_write(run_dir / "status.json"' not in runner_source

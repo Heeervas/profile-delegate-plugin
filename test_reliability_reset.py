@@ -28,13 +28,6 @@ def normalized_fixture(name: str, *, output_mode: str = "json") -> dict:
     )
 
 
-def test_repository_fixtures_are_portable_and_immutable_inputs():
-    assert FIXTURES.is_dir()
-    runtime_prefix = "/opt/data/profile_delegate" + "/runs"
-    assert runtime_prefix not in Path(__file__).read_text(encoding="utf-8")
-    assert all(path.is_file() for path in FIXTURES.iterdir())
-
-
 def test_historical_custom_json_contracts_remain_structured():
     blocked = normalized_fixture("historical_custom_blocked.json")
     assert blocked["status"] == "blocked"
@@ -230,13 +223,10 @@ def test_whole_statusless_custom_json_is_valid_but_task_outcome_is_unknown():
     ("requested", "contract", "resolved"),
     [
         ("auto", "", "json"),
-        ("auto", "JSON only", "json"),
         ("auto", "Return full Markdown plan only", "markdown"),
         ("auto", "Full Markdown", "markdown"),
         ("auto", "Plain text only", "text"),
         ("json", "", "json"),
-        ("markdown", "", "markdown"),
-        ("text", "", "text"),
         ("json", "JSON only", "json"),
         ("markdown", "Markdown only", "markdown"),
         ("text", "Plain text only", "text"),

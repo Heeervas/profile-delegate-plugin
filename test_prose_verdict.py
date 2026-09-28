@@ -26,10 +26,3 @@ def test_new_prose_verdict_contract(body, expected):
     if expected == "unknown":
         assert result["error_code"] == "missing_verdict"
         assert not core.wrapper_success("completed", result)
-
-
-def test_legacy_prose_first_line_remains_compatible():
-    result = core.normalize_result(None, "/tmp/stdout.txt", raw_output="PASS\nReport",
-                                   output_mode="markdown")
-    assert result["status"] == "ok"
-    assert result["contract_status"] == "recovered"

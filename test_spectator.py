@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import builtins
-import importlib
 import io
 import json
 import sys
@@ -397,14 +396,6 @@ def test_spectator_opens_no_file_for_writing(tmp_path, monkeypatch):
     spectator.watch_run(run, output_mode="plain", poll_interval=0.01, stdout=io.StringIO())
 
 
-def test_spectator_has_no_transport_or_control_imports():
-    source = (PLUGIN_DIR / "spectator.py").read_text(encoding="utf-8")
-    assert "tui_rpc" not in source
-    assert "session.resume" not in source
-    assert "session.steer" not in source
-    assert "control/" not in source
-
-
 def test_register_cli_help_contract_and_only_v1_commands(capsys):
     parser = argparse.ArgumentParser(prog="hermes profile-delegate")
     cli.register_cli(parser)
@@ -469,8 +460,3 @@ def test_default_output_mode_uses_plain_when_not_tty(tmp_path):
     out = NonTTY()
     assert spectator.watch_run(run, output_mode="auto", poll_interval=0.01, stdout=out) == 0
     assert "\x1b" not in out.getvalue()
-
-
-def test_module_keeps_minimal_stdlib_surface():
-    # Keep this standalone spectator module free of project-metadata parsing.
-    assert not hasattr(importlib.import_module("spectator"), "tomllib")

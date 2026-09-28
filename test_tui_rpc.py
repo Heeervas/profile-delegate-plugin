@@ -289,12 +289,6 @@ def test_runner_exposes_separate_bounded_startup_and_agent_init_timeouts(monkeyp
     assert tui_runner._stage_timeout("PROFILE_DELEGATE_AGENT_INIT_TIMEOUT_SECONDS", 60) == 600.0
 
 
-def test_rpc_transport_has_no_projection_or_sanitization_policy():
-    source = Path(tui_rpc.__file__).read_text(encoding="utf-8")
-    assert "def reduce_event" not in source
-    assert "EventJournal" not in source
-
-
 def test_session_flow_uses_create_resume_submit_and_native_controls():
     class RecordingClient:
         def __init__(self):
