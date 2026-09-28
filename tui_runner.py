@@ -17,6 +17,9 @@ except ImportError:
 
 
 CANCEL_GRACE_SECONDS = 5.0
+# Twice the 0.6s delayed follow-up regression observation in test_tui_rpc.py.
+# This only bounds observation of an unobserved follow-up, never proves delivery.
+PENDING_FOLLOWUP_OBSERVATION_SECONDS = 1.2
 
 
 def _stage_timeout(name: str, default: float) -> float:
@@ -100,6 +103,7 @@ def _is_local_timeout(exc: BaseException) -> bool:
 def execute(run_dir: Path) -> Dict[str, Any]:
     request = core.read_json_file(run_dir / "request.json")
     timeout = int(request.get("timeout_seconds") or core.DEFAULT_TIMEOUT_SECONDS)
+    # Includes actual gateway startup; never grant startup an unmeasured bonus.
     deadline = time.monotonic() + timeout
     cwd = Path(core.ensure_text(request.get("workdir"))).resolve()
     profile = core.ensure_text(request.get("profile"))
@@ -112,6 +116,11 @@ def execute(run_dir: Path) -> Dict[str, Any]:
     final_text = ""
     message_status = ""
     terminal_event = False
+    turn_settled = False
+    followup_started = False
+    followup_completed = False
+    accepted_steer = False
+    steer_response_uncertain = False
     cancelled = False
     cancel_deadline: Optional[float] = None
     cancel_transport_diagnostic = ""
@@ -138,7 +147,8 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             last_snapshot = now
 
     def persist_event(frame: Dict[str, Any]) -> None:
-        nonlocal final_text, message_status, terminal_event, last_observed_event
+        nonlocal final_text, message_status, terminal_event, turn_settled, last_observed_event
+        nonlocal followup_started, followup_completed
         raw_params = frame.get("params")
         params: Dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
         last_observed_event = core.ensure_text(params.get("type") or "unknown")
@@ -155,9 +165,20 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             final_text = core.ensure_text(payload.get("text"))
             message_status = core.ensure_text(payload.get("status") or "complete")
             terminal_event = True
+            turn_settled = False
+            if followup_started:
+                followup_completed = True
+        elif params.get("type") == "message.start" and event_sid == ui_session_id:
+            if accepted_steer and terminal_event:
+                followup_started = True
+            terminal_event = False
+            turn_settled = False
+        elif params.get("type") == "session.info" and event_sid == ui_session_id and terminal_event:
+            turn_settled = True
 
     def process_controls() -> None:
-        nonlocal cancelled, cancel_deadline, cancel_transport_diagnostic
+        nonlocal cancelled, cancel_deadline, cancel_transport_diagnostic, accepted_steer
+        nonlocal steer_response_uncertain
         if client is None or not ui_session_id or cancelled:
             return
         for command_path, command in core._pending_control_commands(run_dir):
@@ -172,6 +193,9 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                 command["claimed_at"] = core.now_iso()
                 core.json_safe_write(command_path, command)
                 if command_type == "steer":
+                    if terminal_event and turn_settled:
+                        core._ack_control(run_dir, command_path, command, "rejected", "turn already settled")
+                        continue
                     try:
                         response = tui_rpc.steer(
                             client, ui_session_id,
@@ -188,11 +212,16 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                     except tui_rpc.TuiTransportError as exc:
                         if not _is_local_timeout(exc):
                             raise
+                        # A local RPC timeout does not prove the native steer
+                        # was rejected; it may have queued a later follow-up.
+                        accepted_steer = True
+                        steer_response_uncertain = True
                         core._ack_control(
                             run_dir, command_path, command, "delivery_unknown", str(exc)
                         )
                     else:
                         state = "accepted" if response.get("status") == "queued" else "rejected"
+                        accepted_steer = accepted_steer or state == "accepted"
                         core._ack_control(run_dir, command_path, command, state)
                 elif command_type == "cancel":
                     # Local cancellation is terminal authority. Establish its
@@ -260,22 +289,38 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                 "transport_alive": False,
             })
             env = _environment(request, run_dir)
-            client = tui_rpc.launch_gateway(
-                python=core.sys.executable,
-                cwd=str(cwd),
-                env=env,
-                command=_gateway_command(request, run_dir),
-            )
-            core.merge_run_status(run_dir, {"transport_pid": client.process.pid, "transport_alive": True})
-            gateway_timeout = min(
-                _stage_timeout("PROFILE_DELEGATE_GATEWAY_STARTUP_TIMEOUT_SECONDS", 30.0),
-                max(0.1, deadline - time.monotonic()),
-            )
-            client.wait_ready(
-                timeout=gateway_timeout,
-                on_event=persist_event,
-            )
-            core.merge_run_status(run_dir, {"phase": "transport_ready"})
+            readiness_origin = time.monotonic()
+            merge_status({"startup_readiness": {"stage": "readiness", "state": "waiting", "elapsed_ms": 0}}, force=True)
+            try:
+                client = tui_rpc.launch_gateway(
+                    python=core.sys.executable,
+                    cwd=str(cwd),
+                    env=env,
+                    command=_gateway_command(request, run_dir),
+                )
+                core.merge_run_status(run_dir, {
+                    "actual_transport": "tui_stdio", "steerability": "unavailable",
+                    "transport_pid": client.process.pid, "transport_alive": True,
+                })
+                gateway_timeout = min(
+                    _stage_timeout("PROFILE_DELEGATE_GATEWAY_STARTUP_TIMEOUT_SECONDS", 30.0),
+                    max(0.1, deadline - time.monotonic()),
+                )
+                client.wait_ready(
+                    timeout=gateway_timeout,
+                    on_event=persist_event,
+                )
+            except BaseException:
+                merge_status({"startup_readiness": {
+                    "stage": "readiness", "state": "failed",
+                    "elapsed_ms": min(600_000, max(0, int((time.monotonic() - readiness_origin) * 1000))),
+                }}, force=True)
+                raise
+            merge_status({"startup_readiness": {
+                "stage": "readiness", "state": "ready",
+                "elapsed_ms": min(600_000, max(0, int((time.monotonic() - readiness_origin) * 1000))),
+            }}, force=True)
+            core.merge_run_status(run_dir, {"phase": "transport_ready", "steerability": "available"})
             core.merge_run_status(run_dir, {"phase": "session_creating"})
             execution = request.get("effective_execution") or {}
             agent_init_timeout = min(
@@ -336,7 +381,36 @@ def execute(run_dir: Path) -> Dict[str, Any]:
 
             if not cancelled:
                 process_controls()
-            if ui_session_id and not cancelled:
+                # The host emits message.complete/session.info before it can
+                # requeue a leftover steer (prompt_turn.py). A settled observed
+                # follow-up needs no additional idle wait. Without a follow-up,
+                # observe only within a bounded window to classify uncertainty;
+                # silence is never delivery, missed-steer, or terminal proof.
+                pending_deadline = min(
+                    deadline, time.monotonic() + PENDING_FOLLOWUP_OBSERVATION_SECONDS,
+                )
+                while accepted_steer and not cancelled and not (followup_completed and turn_settled):
+                    process_controls()
+                    if cancelled or (followup_completed and turn_settled):
+                        break
+                    observation_deadline = deadline if followup_started else pending_deadline
+                    remaining = observation_deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    frame = _poll_event(client, min(0.15, remaining), journal)
+                    if frame is not None:
+                        persist_event(frame)
+                if accepted_steer and not cancelled and not (followup_completed and turn_settled):
+                    if followup_started and time.monotonic() >= deadline:
+                        timed_out = True
+                    else:
+                        # A quiet window cannot prove the host will not requeue
+                        # the steer later. Fail closed without consuming the task
+                        # deadline solely to resolve delivery uncertainty.
+                        error_code, final_status = "steer_outcome_uncertain", "failed"
+                # A settled completed turn is an execution receipt, not a
+                # correlated steer-delivery receipt; retain delivery unknown.
+            if ui_session_id and not cancelled and not accepted_steer:
                 try:
                     client.call(
                         "session.close", {"session_id": ui_session_id}, timeout=5,
@@ -348,6 +422,8 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             error_code, final_status = "timeout", "timed_out"
         elif cancelled or message_status == "interrupted":
             cancelled, final_status, error_code = True, "cancelled", "cancelled"
+        elif error_code == "steer_outcome_uncertain":
+            pass
         elif message_status == "complete":
             final_status = "completed"
         else:
@@ -390,6 +466,12 @@ def execute(run_dir: Path) -> Dict[str, Any]:
         error_code = error_code or "tui_nonzero_exit"
 
     core.text_safe_write(run_dir / "stdout.txt", final_text)
+    if accepted_steer:
+        core.merge_run_status(run_dir, {
+            "steer_delivery_state": "unknown", "followup_observed": followup_started,
+            "followup_settled": followup_completed,
+            "steer_response_uncertain": steer_response_uncertain,
+        })
     if client and not core.tail_text(run_dir / "stderr.txt", 1):
         core.text_safe_write(run_dir / "stderr.txt", client.stderr_tail)
     if timed_out:
@@ -399,6 +481,9 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             "execution_status": "timed_out", "contract_status": "not_evaluated",
             "error_code": "timeout",
         }
+        if final_text.strip():
+            result["raw_output_path"] = str(run_dir / "stdout.txt")
+            result["errors"].append("last settled turn preserved; follow-up did not settle")
     elif cancelled:
         result = {
             "status": "failed", "summary": "Delegated profile was cancelled.",
@@ -427,6 +512,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             raw_output=final_text,
             parse_meta=parse_meta,
             output_mode=core.ensure_text(request.get("resolved_output_mode") or "json"),
+            require_terminal_verdict=bool(request.get("require_terminal_verdict", False)),
         )
         if final_status != "completed" or message_status == "error":
             result["status"] = "failed"
@@ -447,7 +533,6 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             "recovery_history": [],
         }
     )
-    core.write_result_artifact(run_dir, result)
     terminal_updates = {
         "status": final_status,
         "phase": final_status,
@@ -458,7 +543,12 @@ def execute(run_dir: Path) -> Dict[str, Any]:
         "child_session_id": child_session_id,
         "transport_alive": False,
     }
-    merge_status({**terminal_updates, **journal.snapshot_fields()}, force=True, terminal=True)
+    result, published = core.publish_terminal_run(run_dir, result, {**terminal_updates, **journal.snapshot_fields()})
+    final_status = published["status"]
+    error_code = published.get("error_code")
+    exit_code = published.get("exit_code")
+    timed_out = bool(published.get("timed_out"))
+    child_session_id = published.get("child_session_id")
     try:
         journal.finalize(final_status, error_code=error_code, child_session_id=child_session_id)
         merge_status(journal.snapshot_fields(), force=True)

@@ -8,7 +8,6 @@ from typing import Any, Dict, Optional
 
 try:
     from .core import (
-        DEFAULT_CHILD_APPROVAL_MODE,
         DEFAULT_TIMEOUT_SECONDS,
         MAX_TIMEOUT_SECONDS,
         ProfileDelegateError,
@@ -16,8 +15,6 @@ try:
         profile_delegate_cancel as profile_delegate_cancel,
         profile_delegate_list,
         profile_delegate_policy,
-        profile_delegate_prune,
-        profile_delegate_reconcile,
         profile_delegate_status,
         profile_delegate_steer as profile_delegate_steer,
     )
@@ -29,7 +26,6 @@ except ImportError:  # direct import / pytest from plugin directory
     if plugin_dir not in sys.path:
         sys.path.insert(0, plugin_dir)
     from core import (  # type: ignore[no-redef]
-        DEFAULT_CHILD_APPROVAL_MODE,
         DEFAULT_TIMEOUT_SECONDS,
         MAX_TIMEOUT_SECONDS,
         ProfileDelegateError,
@@ -37,8 +33,6 @@ except ImportError:  # direct import / pytest from plugin directory
         profile_delegate_cancel as profile_delegate_cancel,
         profile_delegate_list,
         profile_delegate_policy,
-        profile_delegate_prune,
-        profile_delegate_reconcile,
         profile_delegate_status,
         profile_delegate_steer as profile_delegate_steer,
     )
@@ -82,12 +76,10 @@ def _schema() -> Dict[str, Any]:
                     "type": "string",
                     "enum": ["new", "resume"],
                     "description": "Start a fresh target-profile session or resume an explicit target-profile session_id. Default: new.",
-                    "default": "new",
                 },
                 "session_id": {
                     "type": "string",
-                    "description": "Target-profile Hermes session id to resume when session_mode='resume'. Use `hermes -p <profile> sessions list` to find it.",
-                    "default": "",
+                    "description": "Target-profile Hermes session id; required only with session_mode='resume', forbidden with new. Use `hermes -p <profile> sessions list` to find it.",
                 },
                 "context": {
                     "type": "string",
@@ -108,13 +100,13 @@ def _schema() -> Dict[str, Any]:
                 },
                 "output_contract": {
                     "type": "string",
-                    "description": "Optional content/schema guidance. Extra JSON keys are allowed. With output_mode=auto, exact legacy phrases such as 'Markdown only' or 'plain text' select that format.",
+                    "description": "Optional content/schema guidance. Extra JSON keys are allowed. With output_mode=auto, exact legacy phrases such as 'Markdown only' or 'plain text' select that format. New Markdown/text runs must end with PROFILE_DELEGATE_RESULT: ok|blocked|failed outside fences; no verdict means unknown, not success.",
                     "default": "",
                 },
                 "output_mode": {
                     "type": "string",
                     "enum": ["auto", "json", "markdown", "text"],
-                    "description": "Serialization mode. auto (default) preserves legacy contracts; explicit json/markdown/text wins and contradictory contracts fail before launch.",
+                    "description": "Serialization mode. auto (default) preserves legacy format selection; explicit json/markdown/text wins and contradictory contracts fail before launch. JSON uses a separate object envelope; new prose requires a terminal verdict.",
                     "default": "auto",
                 },
                 "workdir": {
@@ -146,7 +138,7 @@ def _schema() -> Dict[str, Any]:
                     "description": "Explicit child override, including 'none'. Omit it to inherit. Supplying it without reasoning_mode remains a backward-compatible explicit override.",
                 },
                 "reasoning_mode": {
-                    "type": "string", "enum": ["inherit", "override"], "default": "inherit",
+                    "type": "string", "enum": ["inherit", "override"],
                     "description": "inherit creates no reasoning overlay; override requires reasoning_effort. 'none' is explicit, never inheritance.",
                 },
                 "max_turns": {
@@ -174,14 +166,15 @@ def _schema() -> Dict[str, Any]:
                 "child_approval_mode": {
                     "type": "string",
                     "enum": ["deny", "approve_yolo"],
-                    "description": (
-                        "Optional per-call child approval policy. Default comes from config.yaml "
-                        "plugins.entries.profile-delegate.child_approval_mode, or 'deny' if unset. "
-                        "deny installs a plugin-owned immediate denial policy inside the child before agent execution; "
-                        "approve_yolo explicitly runs the child with --yolo/HERMES_YOLO_MODE=1; "
-                        "hardline and user deny rules remain enforced. Legacy config value strip_only migrates to deny, but new calls reject it."
-                    ),
-                    "default": DEFAULT_CHILD_APPROVAL_MODE,
+                    "description": "Deprecated model-supplied approval override: rejected. Configure child_approval_mode in operator-owned target policy instead; no request can elevate approval.",
+                },
+                "transport_mode": {
+                    "type": "string", "enum": ["auto", "interactive", "simple"],
+                    "description": "auto (default) keeps detached background work interactive/steerable and fails closed on startup errors. simple is non-steerable. interactive requires background=true.",
+                },
+                "preflight": {
+                    "type": "boolean", "default": False,
+                    "description": "Validate this exact request without creating a run or starting a child; return normalized fields, policy conflicts and a retry shape. Resolved capabilities are preflight estimates; runtime-observed fields remain unknown.",
                 },
                 "duplicate_policy": {
                     "type": "string", "enum": ["reuse", "new"], "default": "reuse",
@@ -385,9 +378,14 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
             skills=payload.get("skills"),
             capability_preset=payload.get("capability_preset", "build"),
             duplicate_policy=payload.get("duplicate_policy", "reuse"),
+            transport_mode=payload.get("transport_mode", "auto"),
+            preflight=payload.get("preflight", False),
         )
     except ProfileDelegateError as exc:
         result = _error_result(exc)
+        if payload.get("preflight") is True and isinstance(result.get("retry_patch"), dict):
+            result["preflight"] = True
+            result["retry_shape"] = {**payload, **result["retry_patch"]}
     except Exception as exc:
         result = {"success": False, "error": f"profile_delegate internal error: {type(exc).__name__}: {exc}", "error_code": "internal_error", "status": "failed"}
     return json.dumps(result, ensure_ascii=False, indent=2)
@@ -460,7 +458,7 @@ def _prune_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     payload = args if isinstance(args, dict) else {}
     payload = {**kwargs, **payload}
     try:
-        result = profile_delegate_prune(payload.get("max_age_days", 14), bool(payload.get("dry_run", True)))
+        raise ProfileDelegateError("prune requires operator CLI", "operator_only")
     except ProfileDelegateError as exc:
         result = _error_result(exc)
     except Exception as exc:
@@ -469,9 +467,8 @@ def _prune_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
 
 
 def _reconcile_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
-    payload = {**kwargs, **(args if isinstance(args, dict) else {})}
     try:
-        result = profile_delegate_reconcile(payload.get("task_id", ""))
+        raise ProfileDelegateError("reconcile requires operator CLI", "operator_only")
     except ProfileDelegateError as exc:
         result = _error_result(exc)
     except Exception as exc:
@@ -563,8 +560,6 @@ def register(ctx: Any) -> None:
         ("profile_delegate_cancel", _cancel_schema(), _cancel_handler, "Cancel an active Profile Delegate run."),
         ("profile_delegate_list", _list_schema(), _list_handler, "List recent Profile Delegate runs."),
         ("profile_delegate_policy", _policy_schema(), _policy_handler, "Inspect effective non-secret Profile Delegate policy."),
-        ("profile_delegate_reconcile", _reconcile_schema(), _reconcile_handler, "Reconcile one stale Profile Delegate run."),
-        ("profile_delegate_prune", _prune_schema(), _prune_handler, "Prune old Profile Delegate run artifacts."),
     ]:
         ctx.register_tool(
             name=name,

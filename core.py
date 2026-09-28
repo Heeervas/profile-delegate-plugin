@@ -250,6 +250,18 @@ def origin_match(
     return False, None
 
 
+def authorize_run(action: str, caller_origin: Any, status: Dict[str, Any]) -> str:
+    """Model access requires positive, exact origin correlation, including legacy runs."""
+    run = normalize_persisted_origin(status)
+    caller = normalize_origin(caller_origin)
+    field = next((key for key in ("ui_session_id", "session_id", "session_key") if caller[key] and run[key]), None)
+    if field is None or not run[field] or run[field] != caller[field]:
+        raise ProfileDelegateError(
+            f"{action} denied: caller is not the exact originating session", "origin_mismatch"
+        )
+    return field
+
+
 def probe_worker_alive(pid: Any) -> Optional[bool]:
     """Return advisory process liveness without changing run state."""
     if isinstance(pid, bool):
@@ -370,6 +382,18 @@ def _process_identity(pid: int) -> str:
         return f"owned-popen:{pid}"
 
 
+def _owned_group_identity(pid: int) -> Optional[str]:
+    """Linux start-time + session/group ownership; never trust a reused PID."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        fields = raw[raw.rfind(")") + 2:].split()
+        if int(fields[2]) != pid or int(fields[3]) != pid:
+            return None
+        return f"linux-group:{pid}:{fields[19]}"
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def _leader_exited_without_reap(pid: int) -> bool:
     """Observe direct-child exit without reaping it, preserving PID/PGID ownership."""
     waitid = getattr(os, "waitid", None)
@@ -385,8 +409,8 @@ def _leader_exited_without_reap(pid: int) -> bool:
         return False
 
 
-def write_result_artifact(run_dir: Path, result: Dict[str, Any]) -> None:
-    """Write a current-schema result with required lifecycle and run identity."""
+def _prepare_result_artifact(run_dir: Path, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and stamp a terminal result before entering the publication lock."""
     status = result.get("status")
     if not isinstance(status, str) or status not in VALID_RESULT_STATUSES:
         raise ProfileDelegateError("result artifact requires a valid status", "invalid_result_status")
@@ -404,59 +428,61 @@ def write_result_artifact(run_dir: Path, result: Dict[str, Any]) -> None:
         )
     current["result_schema_version"] = RESULT_SCHEMA_VERSION
     current["task_id"] = run_dir.name
-    json_safe_write(run_dir / "result.json", current)
+    return current
+
+
+def write_result_artifact(run_dir: Path, result: Dict[str, Any]) -> None:
+    """Publish a result alone only for fixture/bootstrap use; terminal writers use publish_terminal_run."""
+    json_safe_write(run_dir / "result.json", _prepare_result_artifact(run_dir, result))
+
+
+def publish_terminal_run(
+    run_dir: Path, result: Dict[str, Any], updates: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """One cooperative decision: preserve existing evidence, result first, then status.
+
+    Two atomic renames are not crash-atomic. A crash after the result rename leaves
+    that result authoritative for a later dead-worker reconciliation.
+    """
+    proposed = _prepare_result_artifact(run_dir, result)
+    lifecycle = ensure_text(updates.get("status")).lower()
+    if lifecycle not in TERMINAL_RUN_STATUSES or lifecycle != proposed["execution_status"]:
+        raise ProfileDelegateError("terminal status/result disagree", "invalid_terminal_status")
+    with _locked_run_status(run_dir) as current:
+        existing = _validated_terminal_result(run_dir)
+        if existing is not None:
+            if (ensure_text(current.get("status")).lower() in TERMINAL_RUN_STATUSES
+                    and current["status"] != existing["execution_status"]):
+                raise ProfileDelegateError("conflicting terminal evidence", "unsafe_artifact")
+            if existing is not None and current.get("status") not in TERMINAL_RUN_STATUSES:
+                raise ProfileDelegateError("result exists before terminal status; operator repair required", "terminal_publication_incomplete")
+            return existing, current
+        if current.get("status") in TERMINAL_RUN_STATUSES:
+            # A legacy terminal status without result is ambiguous, not a license
+            # for a later failure handler to manufacture a matching result.
+            raise ProfileDelegateError("terminal status without result", "unsafe_artifact")
+        json_safe_write(run_dir / "result.json", proposed)
+        current.update(updates)
+        _write_locked_status_snapshot(run_dir, current)
+        return proposed, current
 
 
 def merge_run_status(run_dir: Path, updates: Dict[str, Any], *, terminal: bool = False) -> Dict[str, Any]:
     """Merge status under a per-run lock while keeping terminal state immutable."""
-    if fcntl is None:
-        raise ProfileDelegateError("status locking is unavailable", "status_lock_unavailable")
-    lock_path = run_dir / "status.lock"
-    flags = os.O_RDWR | os.O_CREAT
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(lock_path, flags, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
-            raise ProfileDelegateError("unsafe status lock", "status_lock_unsafe")
-        identity = (info.st_dev, info.st_ino)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        try:
-            try:
-                live_lock = os.stat(lock_path, follow_symlinks=False)
-                live_dir = os.stat(run_dir, follow_symlinks=False)
-            except FileNotFoundError as exc:
-                raise ProfileDelegateError(
-                    "run vanished while waiting for status lock", "run_status_vanished",
-                ) from exc
-            if not stat.S_ISDIR(live_dir.st_mode) or (live_lock.st_dev, live_lock.st_ino) != identity:
-                raise ProfileDelegateError(
-                    "run identity changed while waiting for status lock", "run_identity_changed",
-                )
-            try:
-                current = read_json_file(run_dir / "status.json")
-            except ProfileDelegateError as exc:
-                raise ProfileDelegateError(
-                    "run status vanished while waiting for status lock", "run_status_vanished",
-                ) from exc
-            existing = ensure_text(current.get("status")).lower()
-            requested = ensure_text(updates.get("status")).lower()
-            if existing in TERMINAL_RUN_STATUSES:
-                updates = {
-                    key: value for key, value in updates.items()
-                    if key not in TERMINAL_OWNED_STATUS_FIELDS
-                }
-            if terminal and existing not in TERMINAL_RUN_STATUSES and requested not in TERMINAL_RUN_STATUSES:
-                raise ProfileDelegateError("terminal update requires terminal state", "invalid_terminal_status")
-            current.update(updates)
-            _write_locked_status_snapshot(run_dir, current)
-            return current
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
+    with _locked_run_status(run_dir) as current:
+        existing = ensure_text(current.get("status")).lower()
+        requested = ensure_text(updates.get("status")).lower()
+        if terminal and existing not in TERMINAL_RUN_STATUSES and requested in TERMINAL_RUN_STATUSES:
+            raise ProfileDelegateError("terminal update requires a result transaction", "invalid_terminal_status")
+        if existing in TERMINAL_RUN_STATUSES:
+            updates = {key: value for key, value in updates.items()
+                       if key not in TERMINAL_OWNED_STATUS_FIELDS}
+        elif not terminal and requested in TERMINAL_RUN_STATUSES:
+            updates = {key: value for key, value in updates.items()
+                       if key not in TERMINAL_OWNED_STATUS_FIELDS}
+        current.update(updates)
+        _write_locked_status_snapshot(run_dir, current)
+        return current
 
 
 def merge_run_status_best_effort(run_dir: Path, updates: Dict[str, Any]) -> bool:
@@ -478,6 +504,46 @@ def read_json_file(path: Path) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ProfileDelegateError(f"expected object JSON in {path}", "invalid_json_shape")
     return data
+
+
+def operator_read_json(path: Path, max_bytes: int = 1_048_576) -> Dict[str, Any]:
+    """Bound operator artifact reads and refuse symlinks/non-owned files."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > max_bytes:
+                raise ProfileDelegateError(f"unsafe or oversized operator artifact: {path.name}", "unsafe_artifact")
+            raw = handle.read(max_bytes + 1)
+        if len(raw) > max_bytes:
+            raise ProfileDelegateError(f"oversized operator artifact: {path.name}", "unsafe_artifact")
+        value = json.loads(raw.decode("utf-8"))
+    except ProfileDelegateError:
+        raise
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ProfileDelegateError(f"cannot read operator artifact {path.name}: {exc}", "unsafe_artifact") from exc
+    if not isinstance(value, dict):
+        raise ProfileDelegateError(f"operator artifact is not an object: {path.name}", "invalid_json_shape")
+    return value
+
+
+def operator_tail_text(path: Path, max_chars: int) -> str:
+    if not path.exists() and not path.is_symlink():
+        return ""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                raise ProfileDelegateError(f"unsafe operator log: {path.name}", "unsafe_artifact")
+            if not max_chars:
+                return ""
+            handle.seek(max(0, info.st_size - max_chars * 4))
+            return handle.read(max_chars * 4).decode("utf-8", "replace")[-max_chars:]
+    except ProfileDelegateError:
+        raise
+    except OSError as exc:
+        raise ProfileDelegateError(f"cannot read operator log {path.name}: {exc}", "unsafe_artifact") from exc
 
 
 def ensure_text(value: Any) -> str:
@@ -594,7 +660,7 @@ def load_effective_policy() -> EffectivePolicy:
         "allowed_profiles": [], "allow_all_profiles": False, "allowed_workdirs": [],
         "allowed_toolsets": [], "allowed_skills": [], "allow_model_override": True,
         "allow_provider_override": True, "allow_reasoning_override": True,
-        "allow_child_approval_override": True, "child_approval_mode": DEFAULT_CHILD_APPROVAL_MODE,
+        "allow_child_approval_override": False, "child_approval_mode": DEFAULT_CHILD_APPROVAL_MODE,
         "max_depth": DEFAULT_MAX_DEPTH, "max_concurrent": DEFAULT_MAX_CONCURRENT,
         "max_async": DEFAULT_MAX_ASYNC, "default_timeout_seconds": 1200,
         "max_timeout_seconds": 1800, "max_transient_resumes": DEFAULT_MAX_TRANSIENT_RESUMES,
@@ -611,7 +677,6 @@ def load_effective_policy() -> EffectivePolicy:
         "allow_model_override": ("bool", entry.get("allow_model_override")),
         "allow_provider_override": ("bool", entry.get("allow_provider_override")),
         "allow_reasoning_override": ("bool", entry.get("allow_reasoning_override")),
-        "allow_child_approval_override": ("bool", entry.get("allow_child_approval_override")),
         "max_depth": ("int", entry.get("max_depth")),
         "max_concurrent": ("int", entry.get("max_concurrent")),
         "max_async": ("int", entry.get("max_async")),
@@ -674,6 +739,8 @@ def load_effective_policy() -> EffectivePolicy:
             bounds = {"max_depth": (0, 20), "max_concurrent": (1, 100), "max_async": (1, 100), "default_timeout_seconds": (10, 604800)}
             values[key] = _config_int(raw, env_name, *bounds[key])
         sources[key] = "env"
+    # Historical config may contain this key; it is no longer a request grant.
+    values["allow_child_approval_override"] = False
     maximum = values["max_timeout_seconds"]
     if maximum and values["default_timeout_seconds"] > maximum:
         raise ProfileDelegateError("default_timeout_seconds must not exceed max_timeout_seconds", "configuration_error")
@@ -820,12 +887,12 @@ def validate_preflight(
         if "toolsets" not in unsupported:
             unsupported.append("toolsets")
         retry_patch["toolsets"] = []
-    if child_approval_explicit and not values["allow_child_approval_override"]:
+    if child_approval_explicit:
         unsupported.append("child_approval_mode")
         retry_patch["child_approval_mode"] = None
     if unsupported:
         raise PreflightError(
-            "requested overrides conflict with effective policy or inheritance state",
+            "requested overrides conflict with effective policy or inheritance state; remove child_approval_mode and configure approval in operator-owned target policy",
             unsupported, retry_patch, allowed_values=allowed_values,
         )
 
@@ -853,6 +920,10 @@ def resolve_capability_preset(
             "blocked_tools": list(REVIEW_BLOCKED_TOOLS),
             "terminal_access": False,
             "read_only_terminal_claimed": False,
+            "resolution": {
+                "mode": "preset", "requested": list(requested_execution.get("toolsets") or []),
+                "resolved": list(REVIEW_TOOLSETS), "observed": None, "state": "resolved_request",
+            },
         }
     return effective, {
         "preset": "build",
@@ -860,6 +931,13 @@ def resolve_capability_preset(
         "blocked_tools": [],
         "terminal_access": "terminal" in (effective.get("toolsets") or []),
         "read_only_terminal_claimed": False,
+        "resolution": {
+            "mode": "override" if effective.get("toolsets") else "inherit",
+            "requested": list(effective.get("toolsets") or []),
+            "resolved": list(effective.get("toolsets") or []) if effective.get("toolsets") else None,
+            "observed": None,
+            "state": "resolved_request" if effective.get("toolsets") else "unknown",
+        },
     }
 
 
@@ -1172,7 +1250,8 @@ def _active_matching_run(fingerprint: str, window_seconds: int) -> Optional[Dict
             status.get("background_worker_mode") == "detached"
             and probe_worker_alive(status.get("worker_pid")) is False
         ):
-            profile_delegate_reconcile(run_dir.name)
+            # Dispatch may inspect a foreign run but must never maintain it.
+            # A dead worker cannot satisfy duplicate reuse.
             continue
         pid = status.get("owner_pid") or status.get("worker_pid")
         if probe_worker_alive(pid) is False:
@@ -1354,6 +1433,7 @@ def run_capped_subprocess(
     activity_state = {"last_touch": started, "start": started, "interval": activity_interval}
     last_status = 0.0
     termination_escalated = False
+    cancel_identity_verified = False
 
     with subprocess.Popen(
         cmd, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1365,10 +1445,12 @@ def run_capped_subprocess(
         sel.register(proc.stderr, selectors.EVENT_READ, "stderr")
         deadline = time.monotonic() + timeout
         identity = _process_identity(proc.pid)
+        group_identity = _owned_group_identity(proc.pid)
         if run_dir is not None:
             merge_run_status_best_effort(run_dir, {
                 "phase": "child_running", "worker_pid": proc.pid,
                 "process_identity": identity, "worker_alive": True,
+                "process_group_identity": group_identity,
                 "latest_activity": now_iso(), "timeout_seconds": timeout,
                 "timeout_deadline": (datetime.now(timezone.utc) + timedelta(seconds=timeout)).isoformat(),
                 "cancellation_requested": False, "interrupted": False,
@@ -1382,8 +1464,12 @@ def run_capped_subprocess(
                     interrupted, stop_reason = True, "interrupted"
                     break
                 if not child_exited and cancel_command is not None:
-                    cancelled, stop_reason = True, "cancelled"
-                    break
+                    if group_identity and _owned_group_identity(proc.pid) == group_identity:
+                        cancel_identity_verified = True
+                        cancelled, stop_reason = True, "cancelled"
+                        break
+                    if run_dir is not None:
+                        _ack_control(run_dir, cancel_command[0], cancel_command[1], "rejected", "owned CLI process group identity unavailable or changed")
                 remaining = deadline - now
                 if remaining <= 0:
                     timed_out, stop_reason = True, "timed_out"
@@ -1442,7 +1528,10 @@ def run_capped_subprocess(
             })
             cancel_command = _foreground_cancel_command(run_dir)
             if cancel_command is not None and cancelled:
-                _ack_control(run_dir, cancel_command[0], cancel_command[1], "accepted")
+                if cancel_identity_verified and proc.poll() is not None:
+                    _ack_control(run_dir, cancel_command[0], cancel_command[1], "accepted", "owned CLI process group terminated and leader reaped")
+                else:
+                    _ack_control(run_dir, cancel_command[0], cancel_command[1], "delivery_unknown", "process group identity unavailable after reaping")
 
     chmod_best_effort(stdout_path, 0o600)
     chmod_best_effort(stderr_path, 0o600)
@@ -1524,11 +1613,11 @@ def build_prompt(
 Extra caller-requested keys are allowed. Do not wrap the final object in Markdown fences.'''
         final_rule = "Final serialization mode: JSON object."
     elif resolved_mode == "markdown":
-        format_block = "Return Markdown. Do not wrap the entire response in a JSON object."
-        final_rule = "Final serialization mode: Markdown."
+        format_block = "Return Markdown. Do not wrap the entire response in a JSON object. End with exactly one line PROFILE_DELEGATE_RESULT: ok|blocked|failed outside any code fence."
+        final_rule = "Final serialization mode: Markdown with terminal verdict."
     else:
-        format_block = "Return plain text. Do not wrap the response in JSON or Markdown fences."
-        final_rule = "Final serialization mode: plain text."
+        format_block = "Return plain text. Do not wrap the response in JSON or Markdown fences. End with exactly one line PROFILE_DELEGATE_RESULT: ok|blocked|failed."
+        final_rule = "Final serialization mode: plain text with terminal verdict."
     return f"""You are being delegated a bounded task by another Hermes profile.
 
 {format_block}
@@ -1715,11 +1804,33 @@ def summarize_unstructured_output(raw_output: str, limit: int = 500) -> str:
     return text[:limit]
 
 
-def _recover_text_status(raw_output: str) -> Optional[str]:
-    """Recover exactly one explicit, non-negated terminal task status."""
+def _recover_text_status(raw_output: str, *, require_terminal: bool = False) -> Optional[str]:
+    """Recover one non-negated verdict; new prose contracts require the terminal marker."""
+    # Legacy first-line verdicts are accepted only when there is no terminal line.
+    lines = (raw_output or "").splitlines()
+    marker = re.compile(r"^PROFILE_DELEGATE_RESULT:\s*(ok|blocked|failed)$", re.I)
+    marker_lines = [(index, marker.fullmatch(line.strip())) for index, line in enumerate(lines)
+                    if "PROFILE_DELEGATE_RESULT:" in line.upper()]
+    if marker_lines:
+        if (len(marker_lines) != 1 or marker_lines[0][1] is None
+                or marker_lines[0][0] != len(lines) - 1
+                or sum(line.strip().startswith("```") for line in lines[:-1]) % 2):
+            return None
+        prefix = "\n".join(lines[:-1])
+        legacy = _recover_legacy_text_status(prefix)
+        if legacy and legacy != marker_lines[0][1].group(1).lower():
+            return None
+        if re.search(r"\b(?:not|never|without|isn't|wasn't|isnt|wasnt)\s+(?:PASS|OK|BLOCKED|FAILED)\b", prefix, re.I):
+            return None
+        return marker_lines[0][1].group(1).lower()
+    if require_terminal:
+        return None
+    return _recover_legacy_text_status(raw_output)
+
+
+def _recover_legacy_text_status(raw_output: str) -> Optional[str]:
+    """Historical explicit first-line verdict recovery."""
     recovered: List[str] = []
-    # raw_output is already bounded by the capture limit. Inspect it all so an
-    # early OK cannot hide a later conflicting or negated terminal status.
     lines = (raw_output or "").splitlines()
     bounded_text = "\n".join(lines)
     status_token = r"(?:PASS|OK|BLOCKED|FAILED)(?:_[A-Z0-9_]+)?"
@@ -1733,7 +1844,7 @@ def _recover_text_status(raw_output: str) -> Optional[str]:
         candidate = line.strip()
         if not candidate:
             continue
-        candidate = re.sub(r"^#{1,6}\s*", "", candidate).strip(" `*_:-")
+        candidate = re.sub(r"^#{1,6}\s*", "", candidate).strip(" `*_: -")
         match = re.fullmatch(
             rf"(?:verdict|status)\s*[:=-]\s*(?P<label>{status_token})[.!]?|"
             rf"(?P<token>{status_token})(?:[.!]|\s+[—-]\s+(?P<detail>.{{1,300}}))?",
@@ -1803,6 +1914,7 @@ def normalize_result(
     *,
     parse_meta: Optional[Dict[str, Any]] = None,
     output_mode: str = "json",
+    require_terminal_verdict: bool = False,
 ) -> Dict[str, Any]:
     meta = dict(parse_meta or {})
     # Parse ambiguity/errors are authoritative. Never allow a caller-supplied
@@ -1816,7 +1928,9 @@ def normalize_result(
     if not isinstance(parsed, dict):
         summary = summarize_unstructured_output(raw_output)
         if summary:
-            recovered_status = None if meta.get("parse_error") else _recover_text_status(raw_output)
+            recovered_status = None if meta.get("parse_error") else _recover_text_status(
+                raw_output, require_terminal=require_terminal_verdict,
+            )
             status = recovered_status or "unknown"
             contract_status = (
                 "recovered" if recovered_status else contract_status_for_parse(
@@ -1837,6 +1951,8 @@ def normalize_result(
             }
             if meta.get("parse_error"):
                 result["error_code"] = meta["parse_error"]
+            elif require_terminal_verdict and not recovered_status:
+                result["error_code"] = "missing_verdict"
             elif output_mode == "json":
                 result["error_code"] = "unstructured_output"
             result.update({key: value for key, value in meta.items() if value is not None})
@@ -1934,31 +2050,48 @@ def _write_control_command(run_dir: Path, command_type: str, payload: Dict[str, 
     lifecycle = ensure_text(status.get("status")).lower()
     if lifecycle in TERMINAL_RUN_STATUSES:
         raise ProfileDelegateError(f"run is already terminal: {lifecycle}", "run_terminal", status=lifecycle)
-    foreground_cancel = command_type == "cancel" and not status.get("background") and status.get("transport") == "cli"
-    if not foreground_cancel and (not status.get("background") or status.get("transport") != "tui_stdio"):
+    cli_cancel = command_type == "cancel" and status.get("transport") == "cli"
+    if not cli_cancel and (not status.get("background") or status.get("transport") != "tui_stdio"):
         raise ProfileDelegateError("live controls require an active background TUI run", "control_unavailable")
-    allowed, matched_by = origin_match(
-        normalize_persisted_origin(status), normalize_origin(caller_origin), "current_session"
-    )
-    if not allowed or not matched_by:
-        raise ProfileDelegateError("control denied: caller is not the exact originating session", "origin_mismatch")
+    matched_by = authorize_run("control", caller_origin, status)
     root, commands, _ = _control_dirs(run_dir)
     lock_context = nullcontext() if lock_held else FingerprintLock(f"control-{run_dir.name}")
     with lock_context:
-        seq_path = root / "next_seq.json"
-        try:
-            seq = int(read_json_file(seq_path).get("next_seq") or 1)
-        except ProfileDelegateError:
-            seq = 1
-        command_id = uuid.uuid4().hex
-        command = {
-            "schema_version": 1, "task_id": run_dir.name, "type": command_type,
-            "command_id": command_id, "seq": seq, "created_at": now_iso(),
-            "origin_match_by": matched_by, "payload": payload,
-        }
-        path = commands / _control_filename(seq, command_id)
-        json_safe_write(path, command)
-        json_safe_write(seq_path, {"next_seq": seq + 1})
+        # The status lock closes dispatch-vs-terminal publication. Cancellation
+        # of detached CLI also requires the exact live process group recorded by
+        # its owner, not a PID-only liveness guess.
+        with _locked_run_status(run_dir) as current:
+            if current.get("status") in TERMINAL_RUN_STATUSES:
+                raise ProfileDelegateError("run is already terminal", "run_terminal")
+            if cli_cancel and current.get("background_worker_mode") == "detached":
+                pid = current.get("worker_pid")
+                identity = current.get("process_group_identity")
+                if type(pid) is not int or not identity:
+                    raise ProfileDelegateError(
+                        "detached CLI identity pending; cancellation was not accepted; retry after identity is published",
+                        "control_identity_pending",
+                    )
+                if (type(pid) is not int or not identity or
+                        identity != _owned_group_identity(pid) or
+                        probe_worker_alive(pid) is not True):
+                    raise ProfileDelegateError(
+                        "detached CLI identity unavailable or changed; cancellation was not accepted",
+                        "control_identity_unverifiable",
+                    )
+            seq_path = root / "next_seq.json"
+            try:
+                seq = int(read_json_file(seq_path).get("next_seq") or 1)
+            except ProfileDelegateError:
+                seq = 1
+            command_id = uuid.uuid4().hex
+            command = {
+                "schema_version": 1, "task_id": run_dir.name, "type": command_type,
+                "command_id": command_id, "seq": seq, "created_at": now_iso(),
+                "origin_match_by": matched_by, "payload": payload,
+            }
+            path = commands / _control_filename(seq, command_id)
+            json_safe_write(path, command)
+            json_safe_write(seq_path, {"next_seq": seq + 1})
     return path, command
 
 
@@ -2027,6 +2160,12 @@ def _bounded_diagnostic_lines(text: str) -> List[str]:
     return lines[-DIAGNOSTIC_TAIL_LINES:]
 
 
+def provider_realm_mismatch(stdout: str, stderr: str) -> bool:
+    """Recognize the provider's non-retryable session/realm diagnostic."""
+    lines = _bounded_diagnostic_lines(stdout) + _bounded_diagnostic_lines(stderr)
+    return any(re.search(r"\bHTTP\s+409\s*:\s*Reasoning chain belongs to a different provider realm\b", line, re.I) for line in lines)
+
+
 def classify_transient_failure(
     *, exit_code: Optional[int], timed_out: bool, stdout: str, stderr: str,
     parsed_result: Optional[Dict[str, Any]], stdout_truncated: bool = False,
@@ -2035,6 +2174,8 @@ def classify_transient_failure(
     if interrupted or timed_out or exit_code in {None, 0, -9, -15, 137, 143}:
         return None
     if isinstance(parsed_result, dict) and ensure_text(parsed_result.get("status")).lower() in VALID_RESULT_STATUSES:
+        return None
+    if provider_realm_mismatch(stdout, stderr):
         return None
     lines = _bounded_diagnostic_lines(stdout) + _bounded_diagnostic_lines(stderr)
     joined = "\n".join(lines)
@@ -2092,7 +2233,40 @@ def child_environment(
     parent_task_id: str = "",
 ) -> Dict[str, str]:
     mode = coerce_child_approval_mode(child_approval_mode)
-    env = os.environ.copy()
+    # Target profile config/.env owns policy and defaults, not caller execution overlays.
+    inherited = os.environ
+    passthrough = {
+        "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE",
+        "TERM", "TMPDIR", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PYTHONPATH", "VIRTUAL_ENV",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+        # This deployment's target profile .env resolves OPENAI_API_KEY from
+        # CUSTOM_1_API_KEY supplied by the operator process. Keep that provider
+        # credential, but never copy arbitrary caller execution overlays.
+        "OPENAI_API_KEY", "OPENAI_BASE_URL", "CUSTOM_1_API_KEY", "ANTHROPIC_API_KEY",
+        # Local OpenAI-compatible gateway validates this scoped provider realm.
+        # Pass the pair through together; never persist either value in artifacts.
+        "SPARTAN_REASONING_BINDING_SECRET", "SPARTAN_REASONING_REALM",
+        "OPENROUTER_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+        "XAI_API_KEY", "MISTRAL_API_KEY", "GROQ_API_KEY",
+        "DEEPSEEK_API_KEY", "TOGETHER_API_KEY", "FIREWORKS_API_KEY",
+        "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT",
+        "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+        "AWS_REGION", "AWS_DEFAULT_REGION",
+    }
+    env = {key: value for key, value in inherited.items() if key in passthrough}
+    # Preserve explicit operator delegation bounds but not caller execution scope.
+    for key in (
+        "PROFILE_DELEGATE_ALLOWED_PROFILES", "PROFILE_DELEGATE_ALLOW_ALL_PROFILES",
+        "PROFILE_DELEGATE_ALLOWED_WORKDIRS", "PROFILE_DELEGATE_ALLOWED_TOOLSETS",
+        "PROFILE_DELEGATE_ALLOWED_SKILLS", "PROFILE_DELEGATE_MAX_DEPTH",
+        "PROFILE_DELEGATE_MAX_CONCURRENT", "PROFILE_DELEGATE_MAX_ASYNC",
+        "PROFILE_DELEGATE_RUNS_ROOT", "PROFILE_DELEGATE_LOCKS_ROOT",
+        "PROFILE_DELEGATE_HERMES_BIN",
+    ):
+        if key in inherited:
+            env[key] = inherited[key]
     env["PROFILE_DELEGATE_DEPTH"] = str(parent_depth + 1)
     if parent_task_id:
         env["PROFILE_DELEGATE_PARENT_TASK_ID"] = ensure_text(parent_task_id)[:MAX_SESSION_ID_CHARS]
@@ -2422,6 +2596,8 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     depth = int(request.get("delegate_depth") or 0)
     child_approval_mode = coerce_child_approval_mode(request.get("child_approval_mode", DEFAULT_CHILD_APPROVAL_MODE))
     env = child_environment(depth, child_approval_mode, run_dir.name)
+    env["PROFILE_DELEGATE_ROOT_TASK_ID"] = ensure_text(request.get("root_task_id") or run_dir.name)
+    env["HERMES_HOME"] = ensure_text(request.get("profile_home"))
     requested_execution = request.get("effective_execution") or request.get("requested_execution") or {}
     reasoning_effort = requested_execution.get("reasoning_effort")
     if reasoning_effort:
@@ -2431,6 +2607,8 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
             raise ProfileDelegateError(f"reasoning_effort cannot replace existing Hermes managed scope: {existing_managed_dir}", "reasoning_managed_scope_conflict")
         env["HERMES_HOME"] = str(profile_home)
         env["HERMES_MANAGED_DIR"] = str(prepare_reasoning_config(run_dir, ensure_text(reasoning_effort)))
+
+    merge_run_status_best_effort(run_dir, {"actual_transport": "cli", "steerability": "unavailable"})
 
     deadline = time.monotonic() + timeout
     persisted_policy = request.get("effective_policy") if isinstance(request.get("effective_policy"), dict) else {}
@@ -2534,12 +2712,20 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
             raw_output=parse_stdout,
             parse_meta=parse_meta,
             output_mode=ensure_text(request.get("resolved_output_mode") or "json"),
+            require_terminal_verdict=bool(request.get("require_terminal_verdict", False)),
         )
         error_code = result.get("error_code") if isinstance(result.get("error_code"), str) else None
         if exit_code != 0:
             result["status"] = "failed"
             result["errors"] = coerce_list(result.get("errors")) + [f"hermes_exit_code_{exit_code}"]
-            error_code = "transient_resume_exhausted" if history and history[-1].get("transient_reason") else "nonzero_exit"
+            if provider_realm_mismatch(stdout, stderr):
+                error_code = "provider_session_incompatible"
+                result["summary"] = "Delegated session reasoning chain belongs to a different provider realm."
+                result["next_steps"] = coerce_list(result.get("next_steps")) + [
+                    "Start a new target-profile session or branch the existing session with a compatible provider; do not retry the same incompatible session."
+                ]
+            else:
+                error_code = "transient_resume_exhausted" if history and history[-1].get("transient_reason") else "nonzero_exit"
             result["error_code"] = error_code
         final_status = "completed" if exit_code == 0 else "failed"
         apply_execution_status(result, final_status)
@@ -2561,8 +2747,12 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     if child_session_id:
         result["session_id"] = child_session_id
     result.update({"requested_execution": request.get("requested_execution") or {}, "effective_execution": request.get("effective_execution") or {}, "effective_capabilities": request.get("effective_capabilities") or {}, "approval_policy": request.get("approval_policy") or {}, "recovery_history": history})
-    write_result_artifact(run_dir, result)
-    merge_run_status(run_dir, {"status": final_status, "phase": final_status, "ended_at": now_iso(), "exit_code": exit_code, "timed_out": timed_out, "error_code": error_code, "terminal_reason": stop_reason, "worker_alive": False, "cancellation_requested": stop_reason == "cancelled", "interrupted": stop_reason == "interrupted", "stdout_truncated": bool(run_meta.get("stdout_truncated")), "stderr_truncated": bool(run_meta.get("stderr_truncated")), "stdout_chars": run_meta.get("stdout_chars"), "stderr_chars": run_meta.get("stderr_chars"), "stdout_limit": run_meta.get("stdout_limit"), "stderr_limit": run_meta.get("stderr_limit"), "child_session_id": child_session_id, "recovery_history": history, **rename_meta}, terminal=True)
+    result, published = publish_terminal_run(run_dir, result, {"status": final_status, "phase": final_status, "ended_at": now_iso(), "exit_code": exit_code, "timed_out": timed_out, "error_code": error_code, "terminal_reason": stop_reason, "worker_alive": False, "cancellation_requested": stop_reason == "cancelled", "interrupted": stop_reason == "interrupted", "stdout_truncated": bool(run_meta.get("stdout_truncated")), "stderr_truncated": bool(run_meta.get("stderr_truncated")), "stdout_chars": run_meta.get("stdout_chars"), "stderr_chars": run_meta.get("stderr_chars"), "stdout_limit": run_meta.get("stdout_limit"), "stderr_limit": run_meta.get("stderr_limit"), "child_session_id": child_session_id, "recovery_history": history, **rename_meta})
+    final_status = published["status"]
+    error_code = published.get("error_code")
+    exit_code = published.get("exit_code")
+    timed_out = bool(published.get("timed_out"))
+    child_session_id = published.get("child_session_id")
     return {"success": wrapper_success(final_status, result), "mode": "sync", "task_id": request.get("task_id", run_dir.name), "profile": profile, "status": final_status, "error_code": error_code, "session_title": title_text, "session_mode": mode, "requested_session_id": resume_id, "child_approval_mode": child_approval_mode, "requested_execution": request.get("requested_execution") or {}, "effective_execution": request.get("effective_execution") or {}, "effective_capabilities": request.get("effective_capabilities") or {}, "approval_policy": request.get("approval_policy") or {}, "child_session_id": child_session_id, "recovery_history": history, **rename_meta, "result": result, "paths": base_paths(run_dir), "exit_code": exit_code, "timed_out": timed_out, "stdout_truncated": run_meta.get("stdout_truncated"), "stderr_truncated": run_meta.get("stderr_truncated")}
 
 
@@ -2583,9 +2773,8 @@ def _mark_background_worker_failure(run_dir: Path, exc: Exception) -> Dict[str, 
         "structured": True,
         "error_code": code,
     }
-    write_result_artifact(run_dir, result)
-    merge_run_status(run_dir, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": code}, terminal=True)
-    return {"success": False, "mode": "async", "task_id": run_dir.name, "status": "failed", "error_code": code, "result": result, "paths": base_paths(run_dir)}
+    result, published = publish_terminal_run(run_dir, result, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": code})
+    return {"success": wrapper_success(published["status"], result), "mode": "async", "task_id": run_dir.name, "status": published["status"], "error_code": published.get("error_code"), "result": result, "paths": base_paths(run_dir)}
 
 
 def _background_mode() -> str:
@@ -2649,7 +2838,8 @@ def _start_detached_background_worker(run_dir: Path) -> None:
                 continue
             worker_alive = probe_worker_alive(candidate_status.get("worker_pid"))
             if worker_alive is False:
-                profile_delegate_reconcile(candidate.name)
+                # Capacity is a read-only projection for every other run.
+                # Operators may explicitly reconcile stale artifacts later.
                 continue
             active += 1
         if active >= max_async:
@@ -2662,7 +2852,10 @@ def _start_detached_background_worker(run_dir: Path) -> None:
         text_safe_write(stdout_path, "")
         text_safe_write(stderr_path, "")
         cmd = [sys.executable, str(Path(__file__).resolve()), "--background-worker", str(run_dir)]
-        env = os.environ.copy()
+        env = child_environment(int(request.get("delegate_depth") or 0))
+        env["PROFILE_DELEGATE_DEPTH"] = str(int(request.get("delegate_depth") or 0))
+        env["HERMES_HOME"] = str(get_hermes_home_path())
+        env["PROFILE_DELEGATE_RUNS_ROOT"] = str(get_runs_root())
         with stdout_path.open("a", encoding="utf-8") as out, stderr_path.open("a", encoding="utf-8") as err:
             proc = subprocess.Popen(
                 cmd, cwd=str(Path.cwd()), env=env, stdin=subprocess.DEVNULL,
@@ -2670,16 +2863,24 @@ def _start_detached_background_worker(run_dir: Path) -> None:
             )
         merge_run_status(run_dir, {
             "background_worker_mode": "detached", "worker_pid": proc.pid,
-            "worker_started_at": now_iso(), "worker_stdout": str(stdout_path),
+            "worker_started_at": now_iso(), "worker_identity": _process_identity(proc.pid), "worker_stdout": str(stdout_path),
             "worker_stderr": str(stderr_path),
+            "process_group_identity": _owned_group_identity(proc.pid),
         })
 
     def _watch_for_notification() -> None:
         try:
             proc.wait()
-            status_after = read_json_file(run_dir / "status.json")
-            result_after = read_json_file(run_dir / "result.json") if (run_dir / "result.json").exists() else {}
-            final_status = str(status_after.get("status") or "unknown")
+            # Repair and terminal publication share this lock. Never combine
+            # two independently observed generations into a ledger completion.
+            with _locked_run_status(run_dir) as status_after:
+                final_status = status_after.get("status")
+                if final_status not in TERMINAL_RUN_STATUSES:
+                    return  # A dead worker needs explicit operator repair.
+                result_after = _validated_terminal_result(run_dir)
+                if (result_after is None
+                        or result_after["execution_status"] != final_status):
+                    return  # No coherent current-schema terminal pair.
             final = {
                 "success": wrapper_success(final_status, result_after),
                 "mode": "async",
@@ -2708,7 +2909,9 @@ def _background_worker_main(run_dir_arg: str) -> int:
     run_dir = Path(run_dir_arg).expanduser().resolve()
     try:
         request = read_json_file(run_dir / "request.json")
-        if request.get("transport") == "tui_stdio":
+        selected = "interactive" if request.get("transport") == "tui_stdio" else "simple"
+        merge_run_status(run_dir, {"selected_transport": selected, "transport_selection_state": "selected"})
+        if selected == "interactive":
             try:
                 from .tui_runner import execute as execute_tui_run
             except ImportError:
@@ -2749,19 +2952,36 @@ def delegate_profile(
     skills: Any = None,
     capability_preset: Any = DEFAULT_CAPABILITY_PRESET,
     duplicate_policy: Any = "reuse",
+    transport_mode: Any = "auto",
+    preflight: bool = False,
 ) -> Dict[str, Any]:
-    policy = load_effective_policy()
-    depth, max_depth = enforce_depth_policy(policy)
-    validated = validate_profile(profile, policy)
+    requested_transport = ensure_text(transport_mode or "auto").strip().lower()
+    if not isinstance(preflight, bool):
+        raise ProfileDelegateError("preflight must be a boolean", "validation_error")
+    if requested_transport not in {"auto", "interactive", "simple"}:
+        raise ProfileDelegateError("transport_mode must be auto, interactive, or simple", "validation_error")
+    if requested_transport == "interactive" and (not background or _background_mode() != "detached"):
+        raise ProfileDelegateError("interactive transport requires detached background=true", "validation_error")
+    if requested_transport == "auto" and background and _background_mode() != "detached":
+        raise ProfileDelegateError("auto background requires detached interactive worker; choose simple explicitly", "transport_unavailable")
+    # Basic malformed inputs fail without loading Hermes config or plugin state.
     task_text = bounded_text("task", task, MAX_TASK_CHARS).strip()
     if not task_text:
         raise ProfileDelegateError("task must be non-empty", "validation_error")
-    context_text = bounded_text("context", context, MAX_CONTEXT_CHARS)
-    contract_text = bounded_text("output_contract", output_contract, MAX_OUTPUT_CONTRACT_CHARS)
-    requested_output_mode, resolved_output_mode = resolve_output_mode(output_mode, contract_text)
     title_text = normalize_session_title(session_title)
     mode = coerce_session_mode(session_mode)
     resume_id = validate_session_id(session_id, required=(mode == "resume"))
+    if mode == "new" and resume_id:
+        raise ProfileDelegateError("session_mode=new forbids session_id; use resume or omit session_id", "validation_error")
+    policy = load_effective_policy()
+    depth, max_depth = enforce_depth_policy(policy)
+    validated = validate_profile(profile, policy)
+    parent_task_id = ensure_text(os.getenv("PROFILE_DELEGATE_PARENT_TASK_ID", ""))[:MAX_SESSION_ID_CHARS]
+    if parent_task_id and Path(validated.home).resolve() == get_hermes_home_path().resolve():
+        raise ProfileDelegateError("recursive same-home delegation would contend with its ancestor", "same_profile_delegation_not_supported")
+    context_text = bounded_text("context", context, MAX_CONTEXT_CHARS)
+    contract_text = bounded_text("output_contract", output_contract, MAX_OUTPUT_CONTRACT_CHARS)
+    requested_output_mode, resolved_output_mode = resolve_output_mode(output_mode, contract_text)
     child_approval_explicit = child_approval_mode not in {None, ""}
     resolved_child_approval_mode = coerce_child_approval_mode(
         child_approval_mode if child_approval_explicit else policy.values["child_approval_mode"]
@@ -2785,11 +3005,33 @@ def delegate_profile(
     hermes_bin = resolve_hermes_bin()
     normalized_origin = normalize_origin(origin, origin_session_key)
     normalized_origin_session_key = normalized_origin["session_key"]
-    if bool(background) and bool(notify_on_complete):
+    if bool(background) and bool(notify_on_complete) and not preflight:
         require_native_async_ledger_compatibility()
     duplicate_mode = ensure_text(duplicate_policy or "reuse").strip().lower()
     if duplicate_mode not in {"reuse", "new"}:
         raise ProfileDelegateError("duplicate_policy must be reuse or new", "validation_error")
+    if preflight:
+        selected = "interactive" if background and requested_transport != "simple" else "simple"
+        return {
+            "success": True, "preflight": True, "run_created": False,
+            "normalized_request": {
+                "profile": validated.canonical, "session_title": title_text,
+                "session_mode": mode, "session_id": resume_id,
+                "timeout_seconds": timeout, "workdir": str(cwd),
+                "background": bool(background), "notify_on_complete": bool(notify_on_complete),
+                "output_mode": resolved_output_mode, "duplicate_policy": duplicate_mode,
+                "transport_mode": requested_transport, "selected_transport": selected,
+                "capability_preset": effective_capabilities["preset"],
+            },
+            "requested_execution": requested_execution,
+            "preflight_execution": effective_execution,
+            "runtime_observed_execution": "unknown",
+            "preflight_capabilities": effective_capabilities,
+            "runtime_observed_capabilities": "unknown",
+            "approval_policy": {"effective": resolved_child_approval_mode,
+                                "source": "operator_policy"},
+            "retry_shape": None,
+        }
     fingerprint_payload = {
         "origin": next((normalized_origin[key] for key in ("ui_session_id", "session_id", "session_key") if normalized_origin[key]), ""),
         "profile": validated.canonical, "session_mode": mode, "session_id": resume_id,
@@ -2801,6 +3043,7 @@ def delegate_profile(
         "workdir": str(cwd), "timeout_seconds": timeout, "background": bool(background),
         "notify_on_complete": bool(notify_on_complete), "requested_execution": requested_execution,
         "capability_preset": effective_capabilities["preset"],
+        "transport_mode": requested_transport,
         "child_approval_mode": resolved_child_approval_mode,
     }
     fingerprint = request_fingerprint(fingerprint_payload)
@@ -2830,9 +3073,13 @@ def delegate_profile(
             "timeout_seconds": timeout, "workdir": str(cwd), "task_chars": len(task_text),
             "context_chars": len(context_text), "output_contract_chars": len(contract_text),
             "requested_output_mode": requested_output_mode, "resolved_output_mode": resolved_output_mode,
+            "require_terminal_verdict": resolved_output_mode in {"markdown", "text"},
             "session_title": title_text, "session_mode": mode, "requested_session_id": resume_id,
             "runs_root": str(get_runs_root()), "hermes_bin": hermes_bin, "delegate_depth": depth,
-            "parent_task_id": ensure_text(os.getenv("PROFILE_DELEGATE_PARENT_TASK_ID", ""))[:MAX_SESSION_ID_CHARS],
+            "parent_task_id": parent_task_id,
+            "root_task_id": ensure_text(os.getenv("PROFILE_DELEGATE_ROOT_TASK_ID", ""))[:MAX_SESSION_ID_CHARS] or parent_task_id or task_id,
+            "caller_home": str(get_hermes_home_path().resolve()),
+            "target_home": str(Path(validated.home).resolve()),
             "delegate_max_depth": max_depth, "child_approval_mode": resolved_child_approval_mode,
             "approval_policy": {"requested": ensure_text(child_approval_mode) or "config/default", "effective": resolved_child_approval_mode, "owner": "profile-delegate-child-bootstrap", "interactive": False},
             "capability_preset": effective_capabilities["preset"], "effective_capabilities": effective_capabilities,
@@ -2842,16 +3089,17 @@ def delegate_profile(
             "notify_on_complete": bool(notify_on_complete), "origin": normalized_origin,
             "origin_session_key": normalized_origin_session_key, "request_fingerprint": fingerprint,
             "owner_pid": os.getpid(), "effective_policy": profile_delegate_policy(policy),
+            "requested_transport": requested_transport,
+            "selected_transport": None if background and _background_mode() == "detached" else "simple",
+            "transport_selection_state": "selection_pending" if background and _background_mode() == "detached" else "selected",
             "transport": (
-                "tui_stdio"
-                if bool(background)
-                and _background_mode() == "detached"
-                and ensure_text(os.getenv("PROFILE_DELEGATE_BACKGROUND_TRANSPORT", "tui_stdio")).lower() != "cli"
-                else "cli"
+                "tui_stdio" if background and requested_transport != "simple"
+                and _background_mode() == "detached" else "cli"
             ),
         }
         status = {**request, "status": "running", "started_at": now_iso(), "ended_at": None,
                   "phase": "starting", "exit_code": None, "error_code": None, "concurrency_slot": None,
+                  "actual_transport": None,
                   "worker_pid": None, "worker_alive": None, "process_identity": None,
                   "latest_activity": None, "terminal_reason": None,
                   "cancellation_requested": False, "interrupted": False,
@@ -2867,22 +3115,20 @@ def delegate_profile(
                 _register_durable_notification(run_dir)
                 _start_background_run(run_dir)
             except ProfileDelegateError as exc:
-                merge_run_status(run_dir, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": exc.code}, terminal=True)
-                write_result_artifact(run_dir, {
+                publish_terminal_run(run_dir, {
                     "status": "failed", "summary": str(exc), "artifacts": [], "errors": [exc.code],
                     "next_steps": ["Wait for another background profile_delegate run to finish or raise max_async."],
                     "structured": True, "execution_status": "failed",
                     "contract_status": "not_evaluated", "error_code": exc.code,
-                })
+                }, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": exc.code})
                 raise
             except Exception as exc:
-                merge_run_status(run_dir, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": "background_start_failed"}, terminal=True)
-                write_result_artifact(run_dir, {
+                publish_terminal_run(run_dir, {
                     "status": "failed", "summary": f"Failed to start background profile_delegate run: {type(exc).__name__}: {exc}",
                     "artifacts": [], "errors": ["background_start_failed"], "next_steps": [],
                     "structured": True, "execution_status": "failed",
                     "contract_status": "not_evaluated", "error_code": "background_start_failed",
-                })
+                }, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": "background_start_failed"})
                 raise ProfileDelegateError(f"failed to start background run: {type(exc).__name__}: {exc}", "background_start_failed") from exc
             return {
                 "success": True, "mode": "async", "task_id": task_id, "profile": validated.canonical,
@@ -2894,6 +3140,13 @@ def delegate_profile(
                 "approval_policy": request["approval_policy"], "notify_on_complete": bool(notify_on_complete),
                 "origin_session_key_present": bool(normalized_origin_session_key), "run_created": True,
                 "deduplicated": False, "paths": base_paths(run_dir),
+                "requested_transport": requested_transport,
+                "selected_transport": None if request["transport_selection_state"] == "selection_pending" else request["selected_transport"],
+                "actual_transport": None,
+                "transport_selection_state": request["transport_selection_state"],
+                "steerability": "selection_pending" if request["transport_selection_state"] == "selection_pending" else (
+                    "unavailable" if request["transport"] == "cli" else "available"
+                ),
             }
 
     final = _execute_delegate_run(run_dir)
@@ -2926,16 +3179,34 @@ def _locked_run_status(run_dir: Path):
     flags = os.O_RDWR | os.O_CREAT
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    before = os.lstat(run_dir)
+    if not stat.S_ISDIR(before.st_mode) or before.st_uid != os.getuid():
+        raise ProfileDelegateError("unsafe run directory", "unsafe_artifact")
     fd = os.open(lock_path, flags, 0o600)
     try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ProfileDelegateError("unsafe status lock", "status_lock_unsafe")
         os.fchmod(fd, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
-        yield read_json_file(run_dir / "status.json")
-    finally:
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            try:
+                live_lock = os.lstat(lock_path)
+                live_dir = os.lstat(run_dir)
+            except FileNotFoundError as exc:
+                raise ProfileDelegateError("run vanished while waiting for status lock", "run_status_vanished") from exc
+            if (not stat.S_ISDIR(live_dir.st_mode) or
+                    (live_dir.st_dev, live_dir.st_ino) != (before.st_dev, before.st_ino) or
+                    (live_lock.st_dev, live_lock.st_ino) != (info.st_dev, info.st_ino)):
+                raise ProfileDelegateError("run identity changed while waiting for status lock", "run_identity_changed")
+            current = operator_read_json(run_dir / "status.json")
+            if current.get("task_id") != run_dir.name:
+                raise ProfileDelegateError("run status identity mismatch", "unsafe_artifact")
+            yield current
         finally:
-            os.close(fd)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _write_locked_status_snapshot(run_dir: Path, status: Dict[str, Any]) -> None:
@@ -2944,26 +3215,50 @@ def _write_locked_status_snapshot(run_dir: Path, status: Dict[str, Any]) -> None
 
 
 def _cancel_evidence(run_dir: Path) -> Tuple[bool, bool]:
-    commands_dir = run_dir / "control" / "commands"
-    acks_dir = run_dir / "control" / "acks"
-    pending = acknowledged = False
-    if not commands_dir.is_dir():
-        return pending, acknowledged
-    for command_path in sorted(commands_dir.glob("*.json")):
+    """Read bounded control evidence; ambiguity must not finalize a dead run."""
+    control_dir = run_dir / "control"
+    commands_dir = control_dir / "commands"
+    acks_dir = control_dir / "acks"
+
+    def directory_state(path: Path) -> bool:
         try:
-            command = read_json_file(command_path)
-        except ProfileDelegateError:
+            info = path.lstat()
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise ProfileDelegateError(f"unsafe control directory: {path.name}", "unsafe_artifact")
+        return True
+
+    if not directory_state(control_dir) or not directory_state(commands_dir):
+        return False, False
+    acks_present = directory_state(acks_dir)
+    pending = acknowledged = False
+    try:
+        # Count every directory entry, not just matching JSON; never materialize
+        # or sort an attacker-controlled directory before imposing the limit.
+        with os.scandir(commands_dir) as entries:
+            paths = []
+            for entry in entries:
+                if len(paths) >= 128:
+                    raise ProfileDelegateError("too many control commands", "unsafe_artifact")
+                paths.append(commands_dir / entry.name)
+    except OSError as exc:
+        raise ProfileDelegateError(f"cannot enumerate control commands: {exc}", "unsafe_artifact") from exc
+    for command_path in paths:
+        if command_path.suffix != ".json":
             continue
+        command = operator_read_json(command_path)
         if command.get("type") != "cancel":
             continue
         pending = True
+        if not acks_present:
+            continue
         ack_path = acks_dir / command_path.name
-        if not ack_path.is_file():
-            continue
         try:
-            ack = read_json_file(ack_path)
-        except ProfileDelegateError:
+            ack_path.lstat()
+        except FileNotFoundError:
             continue
+        ack = operator_read_json(ack_path)
         command_id = ensure_text(command.get("command_id"))
         ack_matches = (
             ack.get("type") == "cancel"
@@ -2981,20 +3276,18 @@ def _cancel_evidence(run_dir: Path) -> Tuple[bool, bool]:
 def _validated_terminal_result(run_dir: Path) -> Optional[Dict[str, Any]]:
     """Return a schema-valid terminal result artifact, otherwise fail closed."""
     result_path = run_dir / "result.json"
-    if not result_path.is_file():
-        return None
     try:
-        candidate = read_json_file(result_path)
-    except ProfileDelegateError:
+        result_path.lstat()
+    except FileNotFoundError:
         return None
-    if candidate.get("result_schema_version") != RESULT_SCHEMA_VERSION:
-        return None
-    if ensure_text(candidate.get("task_id")) != run_dir.name:
-        return None
-    if candidate.get("status") not in VALID_RESULT_STATUSES:
-        return None
-    if ensure_text(candidate.get("execution_status")).lower() not in TERMINAL_RUN_STATUSES:
-        return None
+    candidate = operator_read_json(result_path)
+    if (type(candidate.get("result_schema_version")) is not int
+            or candidate["result_schema_version"] != RESULT_SCHEMA_VERSION
+            or candidate.get("task_id") != run_dir.name
+            or candidate.get("status") not in VALID_RESULT_STATUSES
+            or candidate.get("execution_status") not in TERMINAL_RUN_STATUSES
+            or candidate.get("contract_status") not in VALID_CONTRACT_STATUSES):
+        raise ProfileDelegateError("invalid terminal result evidence", "unsafe_artifact")
     return candidate
 
 
@@ -3021,84 +3314,78 @@ def _reconciled_failure_result(run_dir: Path, lifecycle: str, reason: str) -> Di
     }
 
 
-def profile_delegate_reconcile(task_id: str) -> Dict[str, Any]:
-    """Conservatively finalize one stale run without signalling or deleting anything."""
+def _operator_reconcile(task_id: str) -> Dict[str, Any]:
+    """Repair a definitively dead detached run under the shared publication lock.
+
+    The result is authoritative after a result-first crash. A live/reused PID or
+    uncertain process probe is never permission to manufacture a terminal state.
+    """
     run_dir = resolve_run_dir(task_id)
+    # Keep the CLI preflight, but all decisions and artifact reads happen again
+    # under the same verified lock used by every cooperative terminal publisher.
+    operator_read_json(run_dir / "status.json")
     with _locked_run_status(run_dir) as status:
+        result = _validated_terminal_result(run_dir)
         lifecycle = ensure_text(status.get("status")).strip().lower()
         if lifecycle in TERMINAL_RUN_STATUSES:
-            return {
-                "success": True, "task_id": run_dir.name, "reconciled": False,
-                "status": lifecycle, "reason": "already_terminal",
-            }
-        if lifecycle not in {"running", "cancelling"}:
-            return {
-                "success": True, "task_id": run_dir.name, "reconciled": False,
-                "status": lifecycle or "unknown", "reason": "lifecycle_unverifiable",
-            }
-
-        if status.get("background_worker_mode") != "detached" or not isinstance(
-            status.get("worker_pid"), int
-        ):
-            return {
-                "success": True, "task_id": run_dir.name, "reconciled": False,
-                "status": lifecycle, "reason": "liveness_unverifiable",
-            }
-        worker_alive = probe_worker_alive(status.get("worker_pid"))
-        if worker_alive is True:
-            return {
-                "success": True, "task_id": run_dir.name, "reconciled": False,
-                "status": lifecycle, "reason": "worker_alive",
-            }
-        if worker_alive is not False:
-            return {
-                "success": True, "task_id": run_dir.name, "reconciled": False,
-                "status": lifecycle, "reason": "liveness_unverifiable",
-            }
-
-        result = _validated_terminal_result(run_dir)
-        if result is not None:
-            terminal_status = ensure_text(result.get("execution_status")).lower()
-            updates = {
-                "status": terminal_status, "phase": terminal_status, "ended_at": now_iso(),
-                "error_code": result.get("error_code"), "worker_alive": False,
-                "transport_alive": False, "terminal_reason": "terminal_result_authority",
-                "reconciled_at": now_iso(), "reconciliation_reason": "terminal_result_authority",
-            }
-            current = dict(status)
-            current.update(updates)
-            _write_locked_status_snapshot(run_dir, current)
-            return {
-                "success": True, "task_id": run_dir.name, "reconciled": True,
-                "status": terminal_status, "reason": "terminal_result_authority",
-            }
-
-        pending_cancel, acknowledged_cancel = _cancel_evidence(run_dir)
-        interrupted = bool(status.get("interrupted"))
-        if interrupted:
-            terminal_status, reason = "cancelled", "interrupted"
-        elif acknowledged_cancel:
-            terminal_status, reason = "cancelled", "cancel_acknowledged"
+            if result is not None and lifecycle != result["execution_status"]:
+                raise ProfileDelegateError("conflicting terminal evidence", "unsafe_artifact")
+            reason, reconciled = "already_terminal", False
+        elif lifecycle not in {"running", "cancelling"} or status.get("background_worker_mode") != "detached":
+            reason, reconciled = "liveness_unverifiable", False
         else:
-            terminal_status, reason = "failed", "worker_died"
-        result = _reconciled_failure_result(run_dir, terminal_status, reason)
-        write_result_artifact(run_dir, result)
-        ended_at = now_iso()
-        current = dict(status)
-        current.update({
-            "status": terminal_status, "phase": terminal_status, "ended_at": ended_at,
-            "error_code": reason, "worker_alive": False, "transport_alive": False,
-            "terminal_reason": reason, "cancellation_requested": acknowledged_cancel,
-            "interrupted": interrupted, "reconciled_at": ended_at,
-            "reconciliation_reason": reason,
-        })
-        _write_locked_status_snapshot(run_dir, current)
-        return {
-            "success": True, "task_id": run_dir.name, "reconciled": True,
-            "status": terminal_status, "reason": reason,
-            "pending_cancel": pending_cancel, "cancel_acknowledged": acknowledged_cancel,
-            "paths": base_paths(run_dir),
-        }
+            pid = status.get("worker_pid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                alive = None
+            else:
+                alive = probe_worker_alive(pid)
+            # A live PID with a different start identity is a reused PID, not
+            # proof of death. Missing identity is tolerable only for ESRCH.
+            if alive is True and isinstance(pid, int) and status.get("worker_identity"):
+                identity = _process_identity(pid)
+                if identity != status["worker_identity"]:
+                    alive = None
+            if alive is not False:
+                reason = "worker_alive" if alive is True else "liveness_unverifiable"
+                reconciled = False
+            else:
+                pending, acknowledged = _cancel_evidence(run_dir)
+                # Liveness probing and control inspection can race external
+                # artifact replacement; revalidate result before any write.
+                result = _validated_terminal_result(run_dir)
+                if result is not None:
+                    terminal = result["execution_status"]
+                    reason = "terminal_result_projected"
+                    # A valid result is already published; never re-serialize it.
+                    updates = {"status": terminal, "phase": terminal,
+                               "ended_at": result.get("ended_at") or now_iso(),
+                               "error_code": result.get("error_code"),
+                               "exit_code": result.get("exit_code"),
+                               "timed_out": terminal == "timed_out",
+                               "worker_alive": False, "transport_alive": False,
+                               "terminal_reason": "terminal_result_authority"}
+                    if "child_session_id" in result:
+                        updates["child_session_id"] = result["child_session_id"]
+                else:
+                    terminal = "cancelled" if pending and acknowledged else "failed"
+                    reason = "cancelled" if terminal == "cancelled" else "worker_died"
+                    proposed = _prepare_result_artifact(
+                        run_dir, _reconciled_failure_result(run_dir, terminal, reason)
+                    )
+                    # Result first: interruption here leaves a recoverable
+                    # nonterminal status rather than false terminal success.
+                    json_safe_write(run_dir / "result.json", proposed)
+                    updates = {"status": terminal, "phase": terminal,
+                               "ended_at": now_iso(), "error_code": reason,
+                               "worker_alive": False, "transport_alive": False,
+                               "terminal_reason": reason,
+                               "cancellation_requested": bool(pending)}
+                status.update(updates)
+                _write_locked_status_snapshot(run_dir, status)
+                reconciled = True
+        return {"success": True, "task_id": run_dir.name, "reconciled": reconciled,
+                "status": status.get("status", "unknown"), "reason": reason,
+                "mode": "operator_repair"}
 
 
 def _safe_event_metadata(status: Dict[str, Any]) -> Dict[str, Any]:
@@ -3112,18 +3399,30 @@ def _safe_event_metadata(status: Dict[str, Any]) -> Dict[str, Any]:
     return {public: status[source] for source, public in mapping.items() if source in status}
 
 
-def profile_delegate_status(
+def _read_run_status(
     task_id: str,
     tail_chars: Any = 4000,
     caller_origin: Optional[Dict[str, Any]] = None,
+    *, operator: bool = False,
 ) -> Dict[str, Any]:
     run_dir = resolve_run_dir(task_id)
     try:
         max_tail = max(0, min(int(tail_chars or 4000), 20_000))
     except Exception as exc:
         raise ProfileDelegateError("tail_chars must be an integer", "validation_error") from exc
-    status = read_json_file(run_dir / "status.json")
-    result = read_json_file(run_dir / "result.json") if (run_dir / "result.json").exists() else None
+    with _locked_run_status(run_dir) as status:
+        if not operator:
+            authorize_run("status", caller_origin, status)
+        result_path = run_dir / "result.json"
+        result = operator_read_json(result_path) if (result_path.exists() or result_path.is_symlink()) else None
+        verified_result = None
+        if result is not None and "result_schema_version" in result:
+            verified_result = _validated_terminal_result(run_dir)
+            if (status.get("status") in TERMINAL_RUN_STATUSES
+                    and status["status"] != verified_result["execution_status"]):
+                raise ProfileDelegateError("conflicting terminal evidence", "unsafe_artifact")
+        # Snapshot both under the same cooperative publication lock.
+        status = dict(status)
     persisted_origin = normalize_persisted_origin(status)
     normalized_caller = normalize_origin(caller_origin)
     belongs, matched_by = origin_match(persisted_origin, normalized_caller, "current_session")
@@ -3169,6 +3468,11 @@ def profile_delegate_status(
         "process_identity": status.get("process_identity"),
         "phase": status.get("phase"),
         "transport": status.get("transport"),
+        "requested_transport": status.get("requested_transport", "unknown"),
+        "selected_transport": status.get("selected_transport", "unknown"),
+        "actual_transport": status.get("actual_transport", "unknown"),
+        "transport_selection_state": status.get("transport_selection_state", "unknown"),
+        "steerability": status.get("steerability", "unknown"),
         "transport_alive": status.get("transport_alive"),
         "child_session_id": status.get("child_session_id"),
         "latest_activity": status.get("latest_activity"),
@@ -3185,10 +3489,24 @@ def profile_delegate_status(
             durable_notification.get("delivery_attempts") if durable_notification else None
         ),
         "result": result,
-        "stdout_tail": tail_text(run_dir / "stdout.txt", max_tail),
-        "stderr_tail": tail_text(run_dir / "stderr.txt", max_tail),
+        "result_verification": ("current_schema" if verified_result is not None else
+                                "legacy_unverified" if result is not None else "absent"),
+        "lookup_success": True,
+        "execution_status": status.get("status", "unknown"),
+        "task_status": verified_result["status"] if verified_result else "unknown",
+        "contract_status": verified_result["contract_status"] if verified_result else "not_evaluated",
+        "task_success": wrapper_success(status.get("status", "unknown"), verified_result or {}),
+        "stdout_tail": operator_tail_text(run_dir / "stdout.txt", max_tail) if operator else tail_text(run_dir / "stdout.txt", max_tail),
+        "stderr_tail": operator_tail_text(run_dir / "stderr.txt", max_tail) if operator else tail_text(run_dir / "stderr.txt", max_tail),
         "paths": base_paths(run_dir),
     }
+
+
+def profile_delegate_status(
+    task_id: str, tail_chars: Any = 4000,
+    caller_origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return _read_run_status(task_id, tail_chars, caller_origin)
 
 
 def profile_delegate_steer(
@@ -3197,6 +3515,10 @@ def profile_delegate_steer(
     caller_origin: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     run_dir = resolve_run_dir(task_id)
+    status = read_json_file(run_dir / "status.json")
+    authorize_run("steer", caller_origin, status)
+    if status.get("requested_transport") == "simple" or status.get("transport") == "cli":
+        raise ProfileDelegateError("steer is unavailable on simple transport", "control_unavailable_simple_transport")
     steer_text = bounded_text("text", text, MAX_STEER_CHARS).strip()
     if not steer_text:
         raise ProfileDelegateError("text must be non-empty", "validation_error")
@@ -3206,7 +3528,8 @@ def profile_delegate_steer(
         "success": True,
         "task_id": run_dir.name,
         "command_id": command["command_id"],
-        "state": ack.get("state") if ack else "pending",
+        "state": "queued" if ack and ack.get("state") == "accepted" else ack.get("state") if ack else "pending",
+        "delivery_state": "unknown" if ack and ack.get("state") in {"accepted", "delivery_unknown"} else "not_confirmed",
         "ack": ack,
     }
 
@@ -3218,13 +3541,7 @@ def profile_delegate_cancel(
     run_dir = resolve_run_dir(task_id)
     status = read_json_file(run_dir / "status.json")
     lifecycle = ensure_text(status.get("status")).lower()
-    allowed, matched_by = origin_match(
-        normalize_persisted_origin(status), normalize_origin(caller_origin), "current_session"
-    )
-    if not allowed or not matched_by:
-        raise ProfileDelegateError(
-            "control denied: caller is not the exact originating session", "origin_mismatch"
-        )
+    authorize_run("cancel", caller_origin, status)
     if lifecycle in TERMINAL_RUN_STATUSES:
         return {
             "success": True,
@@ -3261,7 +3578,7 @@ def profile_delegate_cancel(
         _, command = _write_control_command(
             run_dir, "cancel", {}, caller_origin, lock_held=True,
         )
-        if not status.get("background") and status.get("transport") == "cli":
+        if status.get("transport") == "cli":
             merge_run_status(run_dir, {
                 "phase": "cancellation_requested", "cancellation_requested": True,
             })
@@ -3283,18 +3600,21 @@ def iter_run_dirs() -> Iterable[Path]:
     return sorted((p for p in root.iterdir() if p.is_dir() and p.name.startswith("pd_")), key=lambda p: p.name, reverse=True)
 
 
-def profile_delegate_list(
+def _read_run_list(
     limit: Any = 20,
     scope: str = "current_session",
     statuses: Optional[List[str]] = None,
     profile: str = "",
     caller_origin: Optional[Dict[str, Any]] = None,
+    *, operator: bool = False,
 ) -> Dict[str, Any]:
     try:
         max_items = max(1, min(int(limit or 20), 100))
     except Exception as exc:
         raise ProfileDelegateError("limit must be an integer", "validation_error") from exc
     requested_scope = ensure_text(scope or "current_session").strip().lower()
+    if requested_scope != "current_session" and not operator:
+        raise ProfileDelegateError("model list is restricted to exact originating session", "origin_mismatch")
     if requested_scope not in VALID_INSPECTION_SCOPES:
         raise ProfileDelegateError(
             "scope must be one of: current_session, current_lane, all",
@@ -3338,8 +3658,10 @@ def profile_delegate_list(
     runs = []
     match_by_values: set[str] = set()
     for run_dir in iter_run_dirs():
+        if operator and run_dir.is_symlink():
+            continue
         try:
-            status = read_json_file(run_dir / "status.json")
+            status = operator_read_json(run_dir / "status.json") if operator else read_json_file(run_dir / "status.json")
         except ProfileDelegateError:
             status = {"task_id": run_dir.name, "status": "corrupt"}
         lifecycle = ensure_text(status.get("status") or "corrupt").strip().lower()
@@ -3349,6 +3671,12 @@ def profile_delegate_list(
             continue
         persisted_origin = normalize_persisted_origin(status)
         matches, matched_by = origin_match(persisted_origin, normalized_caller, requested_scope)
+        if not operator:
+            try:
+                matched_by = authorize_run("list", normalized_caller, status)
+                matches = True
+            except ProfileDelegateError:
+                matches = False
         if not matches:
             continue
         if matched_by:
@@ -3385,6 +3713,14 @@ def profile_delegate_list(
         "count": len(runs),
         "runs": runs,
     }
+
+
+def profile_delegate_list(
+    limit: Any = 20, scope: str = "current_session",
+    statuses: Optional[List[str]] = None, profile: str = "",
+    caller_origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return _read_run_list(limit, scope, statuses, profile, caller_origin)
 
 
 def _locked_prune_candidate(run_dir: Path, cutoff: datetime, *, dry_run: bool) -> Optional[Path]:
@@ -3446,7 +3782,7 @@ def _locked_prune_candidate(run_dir: Path, cutoff: datetime, *, dry_run: bool) -
     return tombstone
 
 
-def profile_delegate_prune(max_age_days: Any = 14, dry_run: bool = True) -> Dict[str, Any]:
+def _operator_prune(max_age_days: Any = 14, dry_run: bool = True) -> Dict[str, Any]:
     try:
         days = int(max_age_days if max_age_days is not None else 14)
     except Exception as exc:

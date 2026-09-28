@@ -23,7 +23,7 @@ Example uses:
 - Launches Hermes in-process through a plugin-owned bootstrap before agent construction. The bootstrap installs deterministic child approvals and optional schema filtering, then runs quiet single-query mode with a prompt file reference. `--yolo` is added only when `child_approval_mode: approve_yolo` is explicit.
 - Foreground mode waits synchronously and keeps the originating turn occupied. Short bounded specialist work can remain foreground. Prefer background mode for long, multi-stage, or independently monitorable work when the conversation should remain responsive. This is advisory only; the plugin does not auto-select, reject, or impose a new duration cap on either mode.
 - Explicit target-profile allowlist by default.
-- Recursion/depth guard via `PROFILE_DELEGATE_MAX_DEPTH`.
+- Recursion/depth guard via `PROFILE_DELEGATE_MAX_DEPTH`. A top-level self-target is permitted by profile policy; nested same-home calls are refused explicitly even when spare concurrency slots exist. Cross-home nesting remains subject to depth and the shared configured lock capacity.
 - Direct nested-delegation lineage and result surfacing: a child run created through `profile_delegate` is linked to its parent and returned under `result.nested_delegations`, so the controller can reuse a builder's reviewer result instead of paying for the same review twice.
 - Global concurrency guard via lock files and `PROFILE_DELEGATE_MAX_CONCURRENT`.
 - Bounded streaming stdout/stderr capture via `PROFILE_DELEGATE_MAX_STDOUT_CHARS` and `PROFILE_DELEGATE_MAX_STDERR_CHARS`.
@@ -39,7 +39,7 @@ Example uses:
 - A read-only compatibility circuit breaker runs before every background task with `notify_on_complete=true`. It opens `state.db` with SQLite `mode=ro` plus `PRAGMA query_only`, validates required native API signatures and minimum `async_delegations` columns, and fails before creating a run or writing the database if Hermes has become incompatible.
 - Stable error codes for common failures.
 - Tool preview patch so users see the target profile and one-line task summary.
-- Inspection/maintenance tools: read-only status/list, explicit conservative reconcile, and separate prune.
+- Model-facing read-only status/list with exact-origin checks; explicit reconciliation is operator CLI only. No prune tool is registered.
 - Read-only terminal spectator: `hermes profile-delegate watch <task_id>` and bounded `inspect --json`.
 
 ## What this is not
@@ -51,6 +51,7 @@ Example uses:
 - Not an exactly-once platform delivery system; Hermes records durable pending/delivered/failed delivery state, while `profile_delegate_status` and run artifacts remain the source of truth.
 - Not approval brokering between parent and target profile.
 - Not safe for untrusted users without explicit policy configuration.
+- The authorization boundary is the registered model-facing delegation tools, not arbitrary same-UID Python, terminal access, or importable plugin helpers. A same-UID operator CLI invocation is trusted local code and can inspect/reconcile other origins. Do not grant untrusted models general Python/terminal execution on this host; profiles provide no OS isolation.
 
 ## Requirements
 
@@ -158,7 +159,7 @@ Precedence is safe hardcoded bounds/defaults, then YAML, then explicitly present
 - `approve_yolo`: explicit trusted mode; adds `--yolo`, sets `HERMES_YOLO_MODE=1`, and auto-accepts hooks for the child. Hermes' hardline unconditional blocklist still applies.
 - `strip_only` migration: new tool calls reject it. A legacy YAML value is read as `deny` so existing installations fail closed; update configuration to `deny` explicitly.
 
-The `profile_delegate` tool also accepts `child_approval_mode` to override YAML for one call.
+Model-facing `child_approval_mode` cannot elevate approval; explicit per-call approval requests fail with an actionable preflight error. Configure trusted child approval through operator policy instead. This local working tree is not gateway-loaded or released.
 
 Local-power-user override, not recommended for shared installs:
 
@@ -267,21 +268,32 @@ negated verdicts remain `unknown`. Async notification status follows execution
 lifecycle: a completed run is announced as completed even when its task result is
 blocked, failed, or unknown; the compact result preserves that distinction.
 
+- `profile_delegate_cancel(task_id)` on a detached simple run is origin-authorized. Before an exact owned worker/child group identity is published, it refuses with `control_identity_pending` and creates no cancellation intent or ACK; retry after identity becomes verifiable. If that identity changes or the worker dies, `control_identity_unverifiable` likewise refuses without signalling any PID. Once verified, the worker terminates its owned group and reaps the direct child before ACK; `cancel_pending` is not a terminal cancellation claim.
+
+- TUI `session.steer` ACK means queued, not delivered. After an accepted or RPC-timeout-ambiguous steer, an observed completed and settled follow-up can complete the delegation promptly (while per-command delivery remains `unknown` without correlated proof); an observed unfinished follow-up uses the task deadline and times out. With no observed follow-up, monitoring ends after at most 1.2 seconds (bounded by the task deadline), and the delegation fails closed with `steer_outcome_uncertain` and wrapper `success=false`, preserving the last settled output. Silence does not rule out a later host requeue or prove delivery or a missed steer; waiting to the full task deadline would not resolve that uncertainty. `session.close` is not a delivery receipt.
+
 ### Reconciliation and retention
 
-`profile_delegate_reconcile(task_id)` is an explicit, per-run repair operation.
-It never signals a process and never deletes artifacts. It leaves live workers
-and legacy/unverifiable records unchanged, trusts a valid terminal `result.json`
-only after the detached worker is known dead, maps acknowledged cancellation or
-recorded interruption to `cancelled`, and otherwise finalizes a verifiably dead
-modern detached worker as `failed/worker_died` while preserving all evidence.
+`operator-reconcile` is an explicit **operator repair** command, not an ordinary
+status read. Under the verified per-run `status.lock`, it repairs only a
+nonterminal detached run whose worker PID is independently confirmed absent.
+A valid terminal result takes authority: its exact execution outcome is
+projected into status without rewriting the result, including after a crash
+between result and status renames. If no result exists, a dead worker produces
+a conservative task-`unknown` result and execution `failed/worker_died`;
+an acknowledged cancellation instead produces execution `cancelled`. Live,
+reused-PID, or unverifiable workers are not finalized. Conflicting, malformed,
+oversized, symlinked, or otherwise unsafe evidence fails closed. An existing
+terminal status remains immutable; repeated reconciliation is read-only.
 
-Ordinary `status` and `list` remain read-only. Duplicate/capacity checks may
-reconcile a dead modern worker so stale artifacts do not poison dispatch.
-Retention remains a separate operator action: `profile_delegate_prune` is dry-run
-by default, locked, age-based, and terminal-only. Reconciliation never implies
-deletion, and unresolved legacy evidence should be reviewed before any retention
-policy is applied.
+Terminal worker, startup, and failure publishers share the verified lock
+publication decision: a valid terminal result is written before terminal status,
+and later failure paths cannot overwrite it. Paired operator/model status reads use
+the lock; notification enrichment cannot replace terminal-owned fields. A crash
+between the two renames leaves a result-first intermediate that an operator can
+repair once its detached worker is definitively dead. Ordinary status/list and
+duplicate/capacity checks remain read-only. Retention remains separate,
+approval-gated, dry-run by default, locked, age-based, and terminal-only.
 
 Final results carry three orthogonal fields:
 

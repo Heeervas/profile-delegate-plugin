@@ -294,8 +294,10 @@ def test_plugin_registers_tools():
     names = {call["name"] for call in calls}
     assert {
         "profile_delegate", "profile_delegate_status", "profile_delegate_steer",
-        "profile_delegate_cancel", "profile_delegate_list", "profile_delegate_prune",
+        "profile_delegate_cancel", "profile_delegate_list", "profile_delegate_policy",
     }.issubset(names)
+    assert "profile_delegate_prune" not in names
+    assert "profile_delegate_reconcile" not in names
     first = next(call for call in calls if call["name"] == "profile_delegate")
     assert first["toolset"] == "delegation"
     assert first["emoji"] == "🤝"
@@ -351,8 +353,8 @@ def test_status_handler_tool_task_id_wins_over_internal_kwargs(tmp_path, monkeyp
     core.text_safe_write(run_dir / "stderr.txt", "")
 
     data = json.loads(plugin._status_handler({"task_id": task_id}, task_id=internal_id))
-    assert data["success"] is True
-    assert data["task_id"] == task_id
+    assert data["success"] is False
+    assert data["error_code"] == "origin_mismatch"
 
 
 def test_handler_passes_background_notify_and_origin_session(monkeypatch):
@@ -943,7 +945,7 @@ def test_delegate_reports_truncated_output(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     result = core.delegate_profile("reviewer", "task", session_title="smoke")
     assert result["stdout_truncated"] is True
-    status = core.profile_delegate_status(result["task_id"])
+    status = core._read_run_status(result["task_id"], operator=True)
     assert status["stdout_truncated"] is True
 
 
@@ -994,7 +996,7 @@ def test_delegate_background_returns_running_and_finishes(tmp_path, monkeypatch)
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True, "rename_exit_code": 0, "rename_error": None})
-    result = core.delegate_profile("reviewer", "task", session_title="async", background=True, origin_session_key="discord:guild:chan")
+    result = core.delegate_profile("reviewer", "task", session_title="async", background=True, origin_session_key="discord:guild:chan", transport_mode="simple")
     assert result["mode"] == "async"
     assert result["status"] == "running"
     run_dir = Path(result["paths"]["run_dir"])
@@ -1021,7 +1023,7 @@ def test_detached_background_worker_finalizes_completed_run(tmp_path, monkeypatc
     monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     monkeypatch.setenv("PROFILE_DELEGATE_HERMES_BIN", "/bin/echo")
 
-    result = core.delegate_profile("reviewer", "task", session_title="detached", background=True, notify_on_complete=True)
+    result = core.delegate_profile("reviewer", "task", session_title="detached", background=True, notify_on_complete=True, transport_mode="simple")
     assert result["mode"] == "async"
     run_dir = Path(result["paths"]["run_dir"])
 
@@ -1366,17 +1368,17 @@ def test_status_list_and_prune(tmp_path, monkeypatch):
     core.text_safe_write(run_dir / "stdout.txt", "hello stdout")
     core.text_safe_write(run_dir / "stderr.txt", "")
 
-    status = core.profile_delegate_status(task_id)
+    status = core._read_run_status(task_id, operator=True)
     assert status["task_id"] == task_id
     assert status["stdout_tail"] == "hello stdout"
 
-    listed = core.profile_delegate_list(scope="all")
+    listed = core._read_run_list(scope="all", operator=True)
     assert listed["count"] == 1
 
-    dry = core.profile_delegate_prune(max_age_days=1, dry_run=True)
+    dry = core._operator_prune(max_age_days=1, dry_run=True)
     assert dry["matched_count"] == 1
     assert run_dir.exists()
-    real = core.profile_delegate_prune(max_age_days=1, dry_run=False)
+    real = core._operator_prune(max_age_days=1, dry_run=False)
     assert real["removed_count"] == 1
     assert not run_dir.exists()
 
@@ -1396,7 +1398,7 @@ def test_status_surfaces_only_safe_event_metadata_and_legacy_missing_journal(tmp
     })
     core.json_safe_write(run_dir / "result.json", {"status": "ok", "summary": "canonical"})
 
-    inspected = core.profile_delegate_status(run_dir.name)
+    inspected = core._read_run_status(run_dir.name, operator=True)
     assert inspected["event_metadata"] == {
         "schema_version": 1, "seq": 17, "truncated": True, "degraded": True,
         "degradation_reason": "disk_full", "turn_count": 2, "api_calls": 3,
@@ -1422,7 +1424,7 @@ def test_prune_skips_every_nonterminal_or_unreadable_run(tmp_path, monkeypatch, 
             "status": lifecycle, "created_at": "2020-01-01T00:00:00+00:00",
         })
 
-    result = core.profile_delegate_prune(max_age_days=1, dry_run=False)
+    result = core._operator_prune(max_age_days=1, dry_run=False)
     assert result["matched_count"] == result["removed_count"] == 0
     assert run_dir.exists()
 
@@ -1446,7 +1448,7 @@ def test_prune_rereads_under_shared_lock_and_skips_terminal_race(tmp_path, monke
         return fd
 
     monkeypatch.setattr(core.os, "open", race_on_lock)
-    result = core.profile_delegate_prune(max_age_days=1, dry_run=False)
+    result = core._operator_prune(max_age_days=1, dry_run=False)
     assert result["removed_count"] == 0 and run_dir.exists()
 
 
@@ -1471,7 +1473,7 @@ def test_prune_renames_to_tombstone_before_deleting(tmp_path, monkeypatch):
         return real_rmtree(path, *args, **kwargs)
 
     monkeypatch.setattr(core.shutil, "rmtree", record_delete)
-    result = core.profile_delegate_prune(max_age_days=1, dry_run=False)
+    result = core._operator_prune(max_age_days=1, dry_run=False)
     assert result["removed_count"] == 1 and len(deleted) == 1
 
 
@@ -1527,7 +1529,7 @@ def test_prune_rejects_symlink_run_and_wrong_uid(tmp_path, monkeypatch):
         return info
 
     monkeypatch.setattr(core.os, "lstat", foreign_lstat)
-    result = core.profile_delegate_prune(max_age_days=1, dry_run=False)
+    result = core._operator_prune(max_age_days=1, dry_run=False)
     assert result["removed_count"] == 0
     assert target.exists() and wrong_uid.exists()
 
@@ -1659,10 +1661,11 @@ def test_delegate_resume_uses_resume_flag_and_skips_rename(tmp_path, monkeypatch
     assert result["session_renamed"] is False
 
 
-def test_delegate_approve_yolo_tool_arg_adds_yolo_flag(tmp_path, monkeypatch):
+def test_operator_configured_approve_yolo_adds_yolo_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
     monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core, "_plugin_entry", lambda: {"child_approval_mode": "approve_yolo"})
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
     monkeypatch.setattr(core.os, "access", lambda path, mode: True)
     monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
@@ -1678,7 +1681,7 @@ def test_delegate_approve_yolo_tool_arg_adds_yolo_flag(tmp_path, monkeypatch):
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True, "rename_exit_code": 0, "rename_error": None})
-    result = core.delegate_profile("reviewer", "task", session_title="yolo", child_approval_mode="approve_yolo")
+    result = core.delegate_profile("reviewer", "task", session_title="yolo")
     assert result["success"] is True
     assert result["child_approval_mode"] == "approve_yolo"
     assert "--yolo" in seen["cmd"]
@@ -1870,7 +1873,7 @@ def test_reasoning_override_without_scope_keeps_canonical_home_and_session(tmp_p
         },
     }
     core.json_safe_write(run_dir / "request.json", request)
-    core.json_safe_write(run_dir / "status.json", {**request, "status": "running"})
+    core.json_safe_write(run_dir / "status.json", {**request, "task_id": run_dir.name, "status": "running"})
     core.text_safe_write(run_dir / "prompt.txt", "prompt")
     seen = {}
     def fake_run(cmd, **kwargs):
@@ -2095,11 +2098,13 @@ def test_list_defaults_to_current_session_and_composes_scope_filters(tmp_path, m
     assert current["runs"][0]["activity"] == "finished"
     assert current["runs"][0]["origin"] == ORIGIN_A
 
-    lane = core.profile_delegate_list(scope="current_lane", caller_origin=ORIGIN_A)
+    with pytest.raises(core.ProfileDelegateError, match="restricted"):
+        core.profile_delegate_list(scope="current_lane", caller_origin=ORIGIN_A)
+    lane = core._read_run_list(scope="current_lane", caller_origin=ORIGIN_A, operator=True)
     assert [item["session_title"] for item in lane["runs"]] == ["same session", "same lane older session"]
 
-    all_running_reviewer = core.profile_delegate_list(
-        scope="all", statuses=["running"], profile="reviewer", caller_origin=ORIGIN_A,
+    all_running_reviewer = core._read_run_list(
+        scope="all", statuses=["running"], profile="reviewer", caller_origin=ORIGIN_A, operator=True,
     )
     assert [item["session_title"] for item in all_running_reviewer["runs"]] == ["other lane"]
 
@@ -2120,7 +2125,7 @@ def test_list_applies_limit_after_filter_and_reports_unresolved_scope(tmp_path, 
     assert unresolved["scope_effective"] == "unresolved"
     assert "scope='all'" in unresolved["warning"]
 
-    unresolved_lane = core.profile_delegate_list(scope="current_lane", caller_origin={})
+    unresolved_lane = core._read_run_list(scope="current_lane", caller_origin={}, operator=True)
     assert unresolved_lane["count"] == 0
     assert unresolved_lane["scope_effective"] == "unresolved"
 
@@ -2135,7 +2140,7 @@ def test_list_applies_limit_after_filter_and_reports_unresolved_scope(tmp_path, 
 )
 def test_list_rejects_invalid_scope_and_status_filters(kwargs):
     with pytest.raises(core.ProfileDelegateError) as exc_info:
-        core.profile_delegate_list(**kwargs)
+        core._read_run_list(**kwargs, operator=True)
     assert exc_info.value.code == "validation_error"
 
 
@@ -2146,7 +2151,7 @@ def test_list_preserves_corrupt_runs_for_explicit_global_inspection(tmp_path, mo
     corrupt.mkdir(parents=True)
     (corrupt / "status.json").write_text("not json", encoding="utf-8")
 
-    listed = core.profile_delegate_list(scope="all", statuses=["corrupt"])
+    listed = core._read_run_list(scope="all", statuses=["corrupt"], operator=True)
     assert listed["count"] == 1
     assert listed["runs"][0]["status"] == "corrupt"
 
@@ -2162,8 +2167,12 @@ def test_status_enriches_origin_ownership_worker_and_notification_without_mutati
     monkeypatch.setattr(core.os, "kill", lambda pid, signal: None)
 
     same = core.profile_delegate_status(run_dir.name, caller_origin=ORIGIN_A)
-    other = core.profile_delegate_status(run_dir.name, caller_origin={**ORIGIN_A, "ui_session_id": "ui-other"})
-    unavailable = core.profile_delegate_status(run_dir.name, caller_origin={})
+    with pytest.raises(core.ProfileDelegateError, match="originating"):
+        core.profile_delegate_status(run_dir.name, caller_origin={**ORIGIN_A, "ui_session_id": "ui-other"})
+    with pytest.raises(core.ProfileDelegateError, match="originating"):
+        core.profile_delegate_status(run_dir.name, caller_origin={})
+    other = core._read_run_status(run_dir.name, caller_origin={**ORIGIN_A, "ui_session_id": "ui-other"}, operator=True)
+    unavailable = core._read_run_status(run_dir.name, caller_origin={}, operator=True)
 
     assert same["session_title"] == "inspection run"
     assert same["origin"] == ORIGIN_A
@@ -2184,7 +2193,7 @@ def test_status_lock_merge_preserves_fields_and_terminal_is_immutable(tmp_path):
     run_dir.mkdir()
     core.json_safe_write(run_dir / "status.json", {"task_id": run_dir.name, "status": "running", "worker_pid": 12})
     core.merge_run_status(run_dir, {"phase": "model_running", "event_seq": 3})
-    completed = core.merge_run_status(run_dir, {"status": "completed", "ended_at": "now"}, terminal=True)
+    published, completed = core.publish_terminal_run(run_dir, {"status": "ok", "execution_status": "completed", "contract_status": "valid"}, {"status": "completed", "ended_at": "now"})
     assert completed["worker_pid"] == 12 and completed["event_seq"] == 3
     after = core.merge_run_status(run_dir, {"status": "cancelling", "notification_status": "queued"})
     assert after["status"] == "completed" and after["notification_status"] == "queued"
@@ -2203,7 +2212,7 @@ def test_base_paths_and_launch_freeze_event_contract(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
     monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     monkeypatch.setattr(core, "_start_background_run", lambda run_dir: None)
-    result = core.delegate_profile("reviewer", "task", session_title="journal", background=True)
+    result = core.delegate_profile("reviewer", "task", session_title="journal", background=True, transport_mode="simple")
     request = json.loads((Path(result["paths"]["run_dir"]) / "request.json").read_text())
     assert request["persist_message_text"] is True
 
@@ -2421,12 +2430,12 @@ def test_terminal_owned_fields_resist_stale_snapshot_but_notification_merges(tmp
     run_dir = tmp_path / "pd_20260721_120000_aaaaaa"
     run_dir.mkdir()
     core.json_safe_write(run_dir / "status.json", {"task_id": run_dir.name, "status": "running"})
-    core.merge_run_status(run_dir, {
+    core.publish_terminal_run(run_dir, {"status": "ok", "execution_status": "completed", "contract_status": "valid"}, {
         "status": "completed", "phase": "completed", "ended_at": "terminal",
         "error_code": None, "exit_code": 0, "timed_out": False,
         "child_session_id": "terminal-child", "transport_alive": False,
         "transport_pid": 99,
-    }, terminal=True)
+    })
     stale = core.merge_run_status(run_dir, {
         "status": "cancelling", "phase": "interrupting", "ended_at": "stale",
         "error_code": "stale", "exit_code": 9, "timed_out": True,
@@ -2450,7 +2459,7 @@ def test_locked_field_merges_prevent_deterministic_lost_update(tmp_path):
     stale_parent.update({"worker_pid": 123, "notification_status": "pending"})
     core.merge_run_status(run_dir, {"worker_pid": stale_parent["worker_pid"], "notification_status": stale_parent["notification_status"]})
     core.merge_run_status(run_dir, {"last_control": {"state": "accepted"}})
-    core.merge_run_status(run_dir, {"status": "completed", "phase": "completed", "ended_at": "now"}, terminal=True)
+    core.publish_terminal_run(run_dir, {"status": "ok", "execution_status": "completed", "contract_status": "valid"}, {"status": "completed", "phase": "completed", "ended_at": "now"})
     core.merge_run_status(run_dir, {"notification_status": "queued", "notified_at": "later"})
     final = core.read_json_file(run_dir / "status.json")
     assert final["worker_pid"] == 123 and final["event_seq"] == 5 and final["tool_calls"] == 2
@@ -2478,5 +2487,5 @@ def test_no_post_creation_direct_status_writes_remain():
     core_source = Path(core.__file__).read_text(encoding="utf-8")
     runner_source = Path(core.__file__).with_name("tui_runner.py").read_text(encoding="utf-8")
     assert core_source.count('json_safe_write(run_dir / "status.json"') == 2
-    assert core_source.count("_write_locked_status_snapshot(run_dir, current)") == 3
+    assert core_source.count("_write_locked_status_snapshot(run_dir, current)") == 2
     assert 'json_safe_write(run_dir / "status.json"' not in runner_source

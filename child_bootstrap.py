@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -16,7 +17,8 @@ from typing import Any, Callable
 def _event_writer(path: Path, policy: str) -> Callable[..., None]:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-    def write(*, detector: str, outcome: str, reason: str, value: str = "") -> None:
+    def write(*, detector: str, outcome: str, reason: str, value: str = "",
+              elapsed_ms: int | None = None) -> None:
         event: dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "effective_policy": policy,
@@ -27,6 +29,8 @@ def _event_writer(path: Path, policy: str) -> Callable[..., None]:
         if value:
             event["sha256"] = hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()
             event["value_chars"] = len(value)
+        if elapsed_ms is not None:
+            event["elapsed_ms"] = max(0, min(elapsed_ms, 600_000))
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
         try:
@@ -165,7 +169,7 @@ def _parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list
     return args, command
 
 
-def prepare_tui_runtime() -> None:
+def prepare_tui_runtime(stage_event: Callable[[str, str], None] | None = None) -> None:
     """Finish plugin registration before TUI starts concurrent discovery/build.
 
     The stdio gateway starts MCP discovery in one thread and lazily builds the
@@ -175,9 +179,14 @@ def prepare_tui_runtime() -> None:
     submitted prompt until the 600-second agent-build timeout. Serial discovery
     here makes the registry stable before either TUI thread exists.
     """
-    from hermes_cli.plugins import discover_plugins
-
-    discover_plugins()
+    if stage_event:
+        stage_event("discover_plugins", "enter")
+    try:
+        from hermes_cli.plugins import discover_plugins
+        discover_plugins()
+    finally:
+        if stage_event:
+            stage_event("discover_plugins", "exit")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -186,6 +195,17 @@ def main(argv: list[str] | None = None) -> int:
     # importing the full Hermes tool graph would be both incorrect and slow.
     if command and Path(command[0]).resolve().name != "hermes" and not args.tui_gateway:
         return subprocess.run(command, check=False).returncode
+    origin = time.monotonic()
+    write_stage_event = _event_writer(Path(args.events_path).expanduser().resolve(), args.approval_mode)
+
+    def stage_event(stage: str, edge: str) -> None:
+        # Fixed literals only: no environment, credential, plugin, or exception text.
+        write_stage_event(
+            detector="startup_stage", outcome=edge, reason=stage,
+            elapsed_ms=int((time.monotonic() - origin) * 1000),
+        )
+
+    stage_event("bootstrap_policy_filter", "enter")
     try:
         install_policy(
             args.approval_mode,
@@ -200,9 +220,15 @@ def main(argv: list[str] | None = None) -> int:
         if command:
             return subprocess.run(command, check=False).returncode
         raise
+    finally:
+        stage_event("bootstrap_policy_filter", "exit")
     if args.tui_gateway:
-        prepare_tui_runtime()
-        from tui_gateway.entry import main as tui_main
+        prepare_tui_runtime(stage_event)
+        stage_event("native_entry_import", "enter")
+        try:
+            from tui_gateway.entry import main as tui_main
+        finally:
+            stage_event("native_entry_import", "exit")
 
         result = tui_main()
         return int(result) if isinstance(result, int) else 0

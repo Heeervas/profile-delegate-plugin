@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from pathlib import Path
 from typing import NoReturn
 
 try:
@@ -86,14 +88,43 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     _add_location_options(inspect)
     inspect.add_argument("--json", action="store_true", help="Print bounded machine-readable JSON (recommended for agents).")
 
+    for name in ("operator-status", "operator-list", "operator-reconcile"):
+        op = subs.add_parser(name, help="Same-UID local operator recovery (not a model tool).")
+        if name != "operator-list":
+            op.add_argument("task_id")
+        op.add_argument("--runs-root", required=True, help="Explicit local runs root; no implicit scan.")
+
 
 def profile_delegate_cli(args: argparse.Namespace) -> NoReturn:
     """Dispatch a leaf command and always raise SystemExit with its code."""
     try:
         command = getattr(args, "profile_delegate_command", None)
-        if command not in {"watch", "inspect"}:
+        if command not in {"watch", "inspect", "operator-status", "operator-list", "operator-reconcile"}:
             print("error: choose watch or inspect; run 'hermes profile-delegate --help'", file=sys.stderr)
             raise SystemExit(2)
+        if command.startswith("operator-"):
+            try:
+                from . import core
+            except ImportError:
+                import core
+            raw_root = Path(args.runs_root).expanduser()
+            if raw_root.is_symlink():
+                raise SpectatorError("operator root must not be a symlink", 3)
+            root = raw_root.resolve(strict=True)
+            info = root.stat()
+            if not root.is_dir() or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise SpectatorError("operator root must be owned by current UID and private", 3)
+            os.environ["PROFILE_DELEGATE_RUNS_ROOT"] = str(root)
+            if command == "operator-list":
+                result = core._read_run_list(scope="all", operator=True)
+            elif command == "operator-reconcile":
+                resolve_spectator_run(args.task_id, runs_root=str(root))
+                result = core._operator_reconcile(args.task_id)
+            else:
+                resolve_spectator_run(args.task_id, runs_root=str(root))
+                result = core._read_run_status(args.task_id, operator=True)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            raise SystemExit(0)
         run_dir = resolve_spectator_run(
             args.task_id,
             runs_root=getattr(args, "runs_root", ""),
@@ -113,3 +144,11 @@ def profile_delegate_cli(args: argparse.Namespace) -> NoReturn:
     except SpectatorError as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(exc.exit_code) from None
+    except (OSError, ValueError) as exc:
+        print(f"error: operator path unavailable: {exc}", file=sys.stderr)
+        raise SystemExit(3) from None
+    except Exception as exc:
+        if getattr(exc, "code", None) is None:
+            raise
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(3 if getattr(exc, "code", None) == "unsafe_artifact" else 4) from None

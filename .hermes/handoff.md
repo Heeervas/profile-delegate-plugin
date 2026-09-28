@@ -1,27 +1,11 @@
 # Handoff
 
-Updated: 2026-08-20
+Updated: 2026-09-27
 
-## Current state
+The 2026-09-28 deslop audit retained all 466 cases after mapping distinct owner boundaries; the preflight tests now clear an inherited nested-parent marker. The complete frozen `-W error` suite, Ruff, compilation, lock/sync, release registration smoke, and diff check passed. After Alberto restarted the default gateway, loaded-tool preflight and Discord-origin detached interactive notification/status readback succeeded (`pd_20260927_183748_ynvczn`, `notification_status=delivered`). No tag, push, or public release; named-profile gateway parity and formal correlated steer-delivery receipt remain unverified. See `STATE.md` for bounded evidence and historical entries.
 
-The detached notification loss after origin-session expiry/reset is repaired locally. Profile Delegate now registers and completes notifications in Hermes' native durable async-delegation ledger, deliberately omits the expiring logical parent session id, routes by the durable Discord/Telegram lane key, relies on Hermes' existing boot restoration, and uses the Profile Delegate task id for delivery idempotency.
+F now has `test_recursion_integration.py`: top-level self-target admitted, nested cross-home admitted, nested same-home explicitly rejected, configured common locks reject capacity overflow, depth bound remains independent. Latest local steer correction gate: focused 117 and full 466 passed `-W error`, Ruff/compile/release registration/diff and frozen lock/sync green. Accepted/ambiguous steer without observed follow-up is bounded `steer_outcome_uncertain`, not success or a deadline-length wait; observed settled follow-up completes promptly and unfinished follow-up times out. No numerical test deletion goal; known duplicate removed earlier, no further safe consolidation identified from AST duplicate-body scan alone.
 
-An automatic compatibility circuit breaker checks required native API signatures and the minimum ledger schema through a read-only SQLite connection before each durable-notification run. It never initializes or migrates `state.db`; incompatibility fails with `native_async_ledger_incompatible` before creating run artifacts or writing native state.
+Fresh scratch `/opt/data/profile-delegate-accept-ICf9wA`: real-provider foreground `pd_20260927_172109_l4o3h6` completed ok. Interactive steer `pd_20260927_172249_j0j50h` was rejected during gateway startup because agent did not support steer yet; final output stayed INITIAL. Initial control response `pending` was not proof of acceptance or delivery. Interactive cancel `pd_20260927_172342_r9551h` ended cancelled and transport closed, with native interrupt delivery unknown. No notification lane tested; scratch used `notify_on_complete=false`. Prior isolated observed steer `pd_20260927_160653_mf1o98` predates this final gate. The test script lives only under scratch and is not a product artifact.
 
-The TUI control path now validates exact integer JSON-RPC correlation and strict response shapes across local timeouts, rejects id-bearing event hybrids, reports steer rejection/delivery uncertainty without killing healthy turns, and makes accepted local cancellation terminally authoritative by exiting event polling immediately and reserving the shared five-second deadline for TERM/KILL escalation and confirmed reaping. Two independent reviews found four edge defects in malformed late-response handling, hybrid frame classification, and cleanup budgeting; all are corrected with adversarial and runner-level stubborn-process regressions. The code is not loaded into any running gateway.
-
-The original pre-turn `agent=None` build stall is not fixed here. It reproduced twice for Builder with zero messages/API/tools. The strongest current boundary is unrestricted tool discovery: Reviewer runs using explicit `web,file` built successfully, while Builder's unfiltered build did not reach model-client creation. That is evidence for the next investigation, not a proven root cause.
-
-## Remaining release steps
-
-1. Restart/reload from outside the running gateway only with operator approval; the gateway correctly blocks self-restart commands issued through its own tool process.
-2. After activation, run a fresh-process interactive steer/cancel smoke with process-cleanup evidence, plus one credentialed detached task that outlives `/new` and confirms user-visible Discord delivery and durable `delivered` state.
-3. Commit/push only if explicitly requested.
-
-## Deferred product work
-
-See `TODO.md` for P2–P4. P3 remains evidence-gated; do not implement it from architecture preference alone.
-
-## Hard boundary
-
-No Hermes-core patches, plugin-owned durable outbox/message bus, compression-lineage router, or guaranteed post-restart delivery claim.
+Ready-turn steer `pd_20260927_172745_1tdxyn` showed observed child uptake (`READY_STEER_APPLIED`) after `tool.start`; the control ACK alone was not delivery proof. Consolidated independent review's late-follow-up blocker was repaired and the exact finding passed focused re-review. Next after Alberto restarts: inspect the gateway-loaded plugin schema and run scratch notification/status readback. Late host requeue remains unobservable from current public events, so no-follow-up is `steer_outcome_uncertain`, never success. No config or credential change, production run mutation, external send, commit/push, publication or gateway restart was performed.

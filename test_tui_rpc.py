@@ -451,6 +451,102 @@ def test_runner_publishes_ready_status_transitions_after_success(tmp_path, monke
     assert result["success"] is True
     assert transitions.index("transport_ready") < transitions.index("session_creating")
     assert transitions.index("session_ready") < transitions.index("agent_initializing")
+    status = json.loads((run / "status.json").read_text(encoding="utf-8"))
+    assert status["startup_readiness"]["state"] == "ready"
+    assert status["startup_readiness"]["elapsed_ms"] >= 0
+
+
+def test_bootstrap_stage_evidence_survives_native_import_failure(tmp_path, monkeypatch):
+    import child_bootstrap
+    import types
+
+    events = tmp_path / "approval_events.jsonl"
+    monkeypatch.setenv("PROVIDER_SECRET", "must-not-appear")
+    monkeypatch.setattr(child_bootstrap, "install_policy", lambda *_args: None)
+    plugins = types.ModuleType("hermes_cli.plugins")
+    plugins.discover_plugins = lambda: None
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+    gateway = types.ModuleType("tui_gateway")
+    monkeypatch.setitem(sys.modules, "tui_gateway", gateway)
+    monkeypatch.delitem(sys.modules, "tui_gateway.entry", raising=False)
+    with pytest.raises(ModuleNotFoundError):
+        child_bootstrap.main([
+            "--approval-mode", "deny", "--events-path", str(events), "--tui-gateway",
+        ])
+    records = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()]
+    assert [(record["reason"], record["outcome"]) for record in records] == [
+        ("bootstrap_policy_filter", "enter"), ("bootstrap_policy_filter", "exit"),
+        ("discover_plugins", "enter"), ("discover_plugins", "exit"),
+        ("native_entry_import", "enter"), ("native_entry_import", "exit"),
+    ]
+    elapsed = [record["elapsed_ms"] for record in records]
+    assert elapsed == sorted(elapsed)
+    assert all(0 <= value <= 600_000 for value in elapsed)
+    assert "must-not-appear" not in events.read_text(encoding="utf-8")
+
+
+def test_bootstrap_discovery_failure_preserves_entry_exit_evidence(tmp_path, monkeypatch):
+    import child_bootstrap
+    import types
+
+    events = tmp_path / "approval_events.jsonl"
+    monkeypatch.setattr(child_bootstrap, "install_policy", lambda *_args: None)
+    plugins = types.ModuleType("hermes_cli.plugins")
+
+    def fail_discovery():
+        raise RuntimeError("discovery stopped")
+
+    plugins.__dict__["discover_plugins"] = fail_discovery
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+    with pytest.raises(RuntimeError, match="discovery stopped"):
+        child_bootstrap.main([
+            "--approval-mode", "deny", "--events-path", str(events), "--tui-gateway",
+        ])
+    records = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()]
+    assert [(record["reason"], record["outcome"]) for record in records] == [
+        ("bootstrap_policy_filter", "enter"), ("bootstrap_policy_filter", "exit"),
+        ("discover_plugins", "enter"), ("discover_plugins", "exit"),
+    ]
+    assert "discovery stopped" not in events.read_text(encoding="utf-8")
+
+
+def test_runner_readiness_timeout_persists_stage_and_failure(tmp_path, monkeypatch):
+    run = tmp_path / "pd_20260721_120001_timeout"
+    run.mkdir()
+    (run / "request.json").write_text(json.dumps({
+        "task_id": run.name, "timeout_seconds": 10, "workdir": str(tmp_path),
+        "profile": "reviewer", "session_mode": "new", "profile_home": str(tmp_path),
+        "hermes_bin": sys.executable, "child_approval_mode": "deny",
+        "effective_policy": {"limits": {"max_concurrent": 8}},
+    }), encoding="utf-8")
+    (run / "status.json").write_text(json.dumps({"task_id": run.name, "status": "running"}), encoding="utf-8")
+    monkeypatch.setattr(tui_runner, "_environment", lambda *_args: {})
+
+    @contextmanager
+    def slot(_limit):
+        yield type("Slot", (), {"slot": 0})()
+
+    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", slot)
+
+    class Client:
+        stderr_tail = ""
+        process = type("Process", (), {"pid": os.getpid(), "poll": lambda self: 0})()
+
+        def wait_ready(self, **kwargs):
+            raise tui_rpc.TuiTransportError("TUI RPC response timed out")
+
+        def close(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", lambda **kwargs: Client())
+    result = tui_runner.execute(run)
+    status = json.loads((run / "status.json").read_text(encoding="utf-8"))
+    assert result["success"] is False
+    assert result["status"] == "failed"
+    assert status["startup_readiness"]["state"] == "failed"
+    assert status["startup_readiness"]["elapsed_ms"] >= 0
 
 
 def test_runner_nonzero_transport_exit_overrides_complete_ok(tmp_path, monkeypatch):
@@ -516,12 +612,12 @@ def test_runner_nonzero_transport_exit_overrides_complete_ok(tmp_path, monkeypat
 
 def _execute_with_control(
     tmp_path, monkeypatch, command_type, control_call, *, extra_command_type=None,
-    return_trace=False, client_factory=None,
+    return_trace=False, client_factory=None, timeout_seconds=10,
 ):
     run = tmp_path / f"pd_control_{command_type}"
     run.mkdir()
     request = {
-        "task_id": run.name, "timeout_seconds": 10, "workdir": str(tmp_path),
+        "task_id": run.name, "timeout_seconds": timeout_seconds, "workdir": str(tmp_path),
         "profile": "reviewer", "session_mode": "new", "requested_session_id": "",
         "session_title": "control", "profile_home": str(tmp_path), "hermes_bin": sys.executable,
         "child_approval_mode": "deny", "effective_execution": {}, "effective_capabilities": {},
@@ -613,7 +709,7 @@ def test_runner_steer_4010_is_rejected_without_failing_turn(tmp_path, monkeypatc
     assert ack["state"] == "rejected"
 
 
-def test_runner_steer_timeout_is_delivery_unknown_without_failing_turn(tmp_path, monkeypatch):
+def test_runner_steer_timeout_without_followup_fails_closed(tmp_path, monkeypatch):
     def arrange():
         monkeypatch.setattr(
             tui_runner.tui_rpc, "steer",
@@ -622,9 +718,160 @@ def test_runner_steer_timeout_is_delivery_unknown_without_failing_turn(tmp_path,
             ),
         )
 
-    result, ack = _execute_with_control(tmp_path, monkeypatch, "steer", arrange)
-    assert result["status"] == "completed"
+    result, ack = _execute_with_control(tmp_path, monkeypatch, "steer", arrange, timeout_seconds=1)
+    assert result["status"] == "failed"
+    assert result["error_code"] == "steer_outcome_uncertain"
+    assert result["success"] is False
     assert ack["state"] == "delivery_unknown"
+
+
+@pytest.mark.parametrize("followup", ["none", "complete", "incomplete"])
+def test_runner_queued_steer_never_turns_quiet_into_success(tmp_path, monkeypatch, followup):
+    def arrange():
+        monkeypatch.setattr(tui_runner.tui_rpc, "steer", lambda *args, **kwargs: {"status": "queued"})
+
+    class DelayedClient:
+        stderr_tail = ""
+
+        def __init__(self, complete):
+            self.process = type("Process", (), {"pid": os.getpid(), "poll": lambda self: 0})()
+            self.complete = complete
+            self.events = 0
+            self.calls = []
+
+        def wait_ready(self, **kwargs):
+            pass
+
+        def read_event(self, _timeout):
+            self.events += 1
+            if self.events == 1:
+                return self.complete
+            if self.events == 2:
+                return {"method": "event", "params": {"type": "session.info", "session_id": "ui-1", "payload": {}}}
+            if followup != "none" and self.events == 3:
+                time.sleep(0.6)  # A delayed native follow-up exceeds the old quiet oracle.
+                return {"method": "event", "params": {"type": "message.start", "session_id": "ui-1", "payload": {}}}
+            if followup == "complete" and self.events == 4:
+                return {"method": "event", "params": {"type": "message.complete", "session_id": "ui-1", "payload": {
+                    "status": "complete", "text": '{"status":"ok","summary":"follow-up"}',
+                }}}
+            if followup == "complete" and self.events == 5:
+                return {"method": "event", "params": {"type": "session.info", "session_id": "ui-1", "payload": {}}}
+            time.sleep(min(0.02, _timeout))
+            return None
+
+        def call(self, *args, **kwargs):
+            self.calls.append(args[0])
+            return {}
+
+        def close(self, **kwargs):
+            pass
+
+    published_at = []
+    real_publish = core.publish_terminal_run
+
+    def publish(run_dir, result, updates):
+        published_at.append(time.monotonic())
+        return real_publish(run_dir, result, updates)
+
+    monkeypatch.setattr(tui_runner.core, "publish_terminal_run", publish)
+    started = time.monotonic()
+    result, ack, trace = _execute_with_control(
+        tmp_path, monkeypatch, "steer", arrange,
+        client_factory=DelayedClient, return_trace=True, timeout_seconds=3,
+    )
+    elapsed = time.monotonic() - started
+    assert len(published_at) == 1
+    assert published_at[0] - started <= elapsed
+    if followup == "complete":
+        # A settled observed follow-up can complete without exhausting the run deadline.
+        assert 0.6 <= elapsed < 1.8
+        assert published_at[0] - started < 1.8
+    elif followup == "none":
+        # The 1.2s bound classifies uncertainty, never success or a missed steer.
+        assert 1.1 <= elapsed < 2.5
+        assert published_at[0] - started < 2.5
+    else:
+        # A started, unfinished turn remains under the actual task deadline.
+        assert 2.8 <= elapsed < 4.2
+        assert published_at[0] - started < 4.2
+    assert ack["state"] == "accepted"
+    assert result["success"] is (followup == "complete")
+    assert result["status"] == {"none": "failed", "complete": "completed", "incomplete": "timed_out"}[followup]
+    assert result["error_code"] == {
+        "none": "steer_outcome_uncertain", "complete": None, "incomplete": "timeout",
+    }[followup]
+    if followup == "incomplete":
+        assert result["result"]["raw_output_path"] == str(tmp_path / "pd_control_steer" / "stdout.txt")
+    else:
+        assert result["result"]["summary"] == ("follow-up" if followup == "complete" else "done")
+    assert trace["client"].calls == []
+    state = json.loads((tmp_path / "pd_control_steer" / "status.json").read_text(encoding="utf-8"))
+    assert state["followup_observed"] is (followup != "none")
+    assert state["followup_settled"] is (followup == "complete")
+    assert state["steer_delivery_state"] == "unknown"
+
+
+def test_runner_very_late_followup_is_unknown_not_missed(tmp_path, monkeypatch):
+    def arrange():
+        monkeypatch.setattr(tui_runner.tui_rpc, "steer", lambda *args, **kwargs: {"status": "queued"})
+
+    class LateClient:
+        stderr_tail = ""
+
+        def __init__(self, complete):
+            self.process = type("Process", (), {"pid": os.getpid(), "poll": lambda self: 0})()
+            self.complete = complete
+            self.reads = 0
+            self.observed_wait = 0.0
+            self.late_followup_at = 1.5
+            self.followup_emitted = False
+
+        def wait_ready(self, **kwargs):
+            pass
+
+        def read_event(self, timeout):
+            self.reads += 1
+            if self.reads == 1:
+                return self.complete
+            self.observed_wait += timeout
+            if self.observed_wait >= self.late_followup_at:
+                self.followup_emitted = True
+                return {"method": "event", "params": {
+                    "type": "message.start", "session_id": "ui-1", "payload": {},
+                }}
+            time.sleep(timeout)
+            return None
+
+        def close(self, **kwargs):
+            pass
+
+    published_at = []
+    real_publish = core.publish_terminal_run
+
+    def publish(run_dir, result, updates):
+        published_at.append(time.monotonic())
+        return real_publish(run_dir, result, updates)
+
+    monkeypatch.setattr(tui_runner.core, "publish_terminal_run", publish)
+    started = time.monotonic()
+    result, ack, trace = _execute_with_control(
+        tmp_path, monkeypatch, "steer", arrange, client_factory=LateClient,
+        return_trace=True, timeout_seconds=4,
+    )
+    elapsed = time.monotonic() - started
+    assert len(published_at) == 1
+    assert published_at[0] - started < 2.5
+    assert 1.1 <= elapsed < 2.5
+    assert trace["client"].reads > 2
+    assert trace["client"].observed_wait < trace["client"].late_followup_at
+    assert trace["client"].followup_emitted is False
+    assert ack["state"] == "accepted"
+    assert result["status"] == "failed"
+    assert result["error_code"] == "steer_outcome_uncertain"
+    assert result["success"] is False
+    assert result["result"]["summary"] == "done"
+    assert core.read_json_file(tmp_path / "pd_control_steer" / "status.json")["steer_delivery_state"] == "unknown"
 
 
 def test_runner_applies_steer_over_real_stdio_gateway(tmp_path, monkeypatch):
@@ -632,7 +879,7 @@ def test_runner_applies_steer_over_real_stdio_gateway(tmp_path, monkeypatch):
     run.mkdir()
     methods_path = tmp_path / "methods.txt"
     request = {
-        "task_id": run.name, "timeout_seconds": 10, "workdir": str(tmp_path),
+        "task_id": run.name, "timeout_seconds": 1, "workdir": str(tmp_path),
         "profile": "reviewer", "session_mode": "new", "requested_session_id": "",
         "session_title": "stdio steer", "profile_home": str(tmp_path),
         "hermes_bin": sys.executable, "child_approval_mode": "deny",
@@ -683,7 +930,16 @@ for line in sys.stdin:
     else:
         result = {}
     send({"jsonrpc": "2.0", "id": request["id"], "result": result})
+    if method == "prompt.submit":
+        send({"jsonrpc": "2.0", "method": "event", "params": {
+            "type": "message.complete", "session_id": "ui-stdio", "payload": {
+                "status": "complete", "text": json.dumps({"status": "ok", "summary": "initial"}),
+            },
+        }})
     if method == "session.steer":
+        send({"jsonrpc": "2.0", "method": "event", "params": {
+            "type": "message.start", "session_id": "ui-stdio", "payload": {},
+        }})
         send({"jsonrpc": "2.0", "method": "event", "params": {
             "type": "message.complete", "session_id": "ui-stdio", "payload": {
                 "status": "complete", "text": json.dumps({
@@ -691,6 +947,9 @@ for line in sys.stdin:
                     "artifacts": [], "errors": [], "next_steps": [],
                 }),
             },
+        }})
+        send({"jsonrpc": "2.0", "method": "event", "params": {
+            "type": "session.info", "session_id": "ui-stdio", "payload": {},
         }})
 '''
 
@@ -739,10 +998,11 @@ for line in sys.stdin:
     status = json.loads((run / "status.json").read_text(encoding="utf-8"))
     assert result["success"] is True
     assert result["status"] == "completed"
+    assert result["error_code"] is None
     assert result["result"]["summary"] == "STEER_STDIO_OK"
     assert command_written.is_set()
     assert ack["state"] == "accepted"
-    assert methods == ["session.create", "prompt.submit", "session.steer", "session.close"]
+    assert methods == ["session.create", "prompt.submit", "session.steer"]
     assert status["transport_alive"] is False
     process = holder["client"].process
     assert process.returncode == 0

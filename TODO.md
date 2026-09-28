@@ -2,6 +2,53 @@
 
 Canonical design: [`docs/plans/2026-07-22-plugin-only-reliability-reset-p0-p4.md`](docs/plans/2026-07-22-plugin-only-reliability-reset-p0-p4.md)
 
+Current review: [`docs/audits/2026-09-27-multi-pov-reliability-review.md`](docs/audits/2026-09-27-multi-pov-reliability-review.md)
+
+## 2026-09-27 local F/G acceptance follow-up
+
+- [x] Add request-admission tests for top-level self-target, nested cross-home, nested same-home refusal, configured shared lock capacity and depth.
+- [x] Run frozen full `-W error` suite, lock/sync, Ruff, compilation, registration/release and diff checks; vary hash seeds for concurrency/control races. Evidence in `STATE.md`.
+- [x] Retry isolated real-provider steer only after genuine TUI agent/turn readiness: `pd_20260927_172745_1tdxyn` observed `tool.start` before queued steer and final `READY_STEER_APPLIED`; delivery state remains unknown. Earlier pre-ready rejection `pd_20260927_172249_j0j50h` is not uptake proof.
+- [x] Verify actual process reaping/identity after isolated cancel: recorded worker/transport PIDs 56515/56517 absent from `/proc`, transport closed. Subsequent default-gateway Discord-origin notification/status readback passed (`pd_20260927_183748_ynvczn`).
+- [x] Consolidated independent diff review found a late-follow-up false-success blocker; focused correction independently re-reviewed PASS. Alberto restarted the default gateway; loaded-tool preflight and one Discord-origin detached completion/notification/status readback passed (`pd_20260927_183748_ynvczn`). Named-profile parity and formal correlated steer delivery remain unverified. No tag, push, or publication.
+
+## 2026-09-27 reliability roadmap
+
+### v1.11 — Deterministic execution and honest introspection
+
+- [ ] Replace broad child `os.environ.copy()` semantics with an allowlisted or fully scrubbed Hermes execution environment; preserve only documented host credentials/proxy inputs and record non-secret provenance.
+- [ ] Represent capabilities as inherit/override/preset with requested, resolved, and observed values; stop calling unresolved empty arrays effective.
+- [ ] Make session input a discriminated contract: `new` forbids `session_id`; `resume` requires it.
+- [ ] Validate schema-local fields before Hermes config/plugin imports and add a real plugin-loader installation smoke.
+- [ ] Classify provider/session realm mismatch separately with actionable non-retry guidance.
+- [ ] Disambiguate lookup, execution, task, contract, notification, transport, and task-success fields.
+- [ ] Add hostile-parent-environment regressions for toolsets, skills, turn limits, managed scope, model, and provider overlays.
+
+### v1.12 — Steer-first interactive transport
+
+- [ ] Implement and persist/fingerprint `transport_mode=auto|simple|interactive`.
+- [ ] Keep background/live-steerable delegation interactive by default; allow simple only when explicitly requested or when interactive bootstrap fails before prompt acceptance.
+- [ ] Port the native subagent steering contract: exact owner session/transport/generation authority, lock-linearized `accepting_steer`, queue acceptance distinct from delivery, and terminal `missed_steer` evidence.
+- [ ] Persist bounded steering lifecycle evidence: request/accept/deliver/miss timestamps, state, and text hash; never claim `delivered` from a `queued` ACK.
+- [ ] Define simple-transport cancellation and explicit no-steer behavior before launch; never switch transports after prompt or ambiguous acceptance.
+- [ ] Measure CLI/TUI startup latency, RSS, completion, cancellation, and notification behavior before release.
+
+### v1.13 — Schema v2 and request preflight
+
+- [ ] Add request-specific preflight returning normalized input, resolved target-profile capabilities, all conflicts, and a complete retry payload without creating a run.
+- [ ] Replace coupled flat controls with versioned discriminated session/execution/capability/authority objects; retain a compatibility adapter.
+- [ ] Remove provider-facing JSON Schema defaults from conditionally inherited fields.
+- [ ] Use a structured terminal envelope for JSON, Markdown, and text content so transport completion cannot erase task outcome.
+- [ ] Replace the advanced primary README example with a minimal inheriting call.
+
+### v1.14 — Authorization and delegation graph
+
+- [ ] Centralize action authorization; exact-origin model access by default for status/control/continue/reconcile.
+- [ ] Restrict global list/reconcile/prune to operator CLI or explicit non-model policy.
+- [ ] Disable model-callable approval elevation by default; design immutable run-bound operator grants before exposing `approve_yolo` again.
+- [ ] Persist root task, parent task, caller/target profile, depth, and resolved home identity.
+- [ ] Initially reject same-home recursive delegation explicitly; add lineage-aware permits only if a measured use case justifies recursion.
+
 ## Completed release gate
 
 - [x] P0 — Separate execution, task, and contract outcomes; prevent false success.
@@ -30,8 +77,8 @@ Implemented without a plugin-owned outbox; Hermes remains the durable delivery o
 ### P3 — Simpler background transport
 
 - [ ] Collect post-repair failure-rate and startup-latency evidence by transport; the 2026-08-24 incident is one strong data point, not a complete rollout sample.
-- [x] Architecture decision: preserve TUI for native cross-process steer/cancel, but do not require it for every run. Target `transport_mode=auto|simple|interactive`, where `auto` uses simple CLI unless interactive control is explicitly requested.
-- [ ] If justified, add validation, persistence, fingerprinting, and transport-selection cancellation/steer semantics. Explicit dead-worker reconciliation is implemented independently and does not change transport defaults.
+- [x] Architecture decision revised after inspecting Hermes' native subagent harness: preserve TUI/interactive as the normal background path because steer is a core capability. Target `transport_mode=auto|simple|interactive`; `auto` prefers interactive for background/live-steerable runs and may fall back to simple only before prompt acceptance.
+- [ ] Add validation, persistence, fingerprinting, native-compatible steering lifecycle (`accepting_steer`, queued vs delivered, `missed_steer`), and transport-selection cancellation semantics. Explicit dead-worker reconciliation remains independent and does not change transport defaults.
 
 Hermes' native `delegate_task(action=list|steer|stop)` is the reference control-plane design for ownership and lineage, but not a replacement: it is an in-process same-profile registry, while Profile Delegate owns cross-profile process isolation, resumable profile sessions, approval policy, durable artifacts, reconciliation, and notification state.
 

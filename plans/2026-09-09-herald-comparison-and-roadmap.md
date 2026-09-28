@@ -147,14 +147,15 @@ Objetivo: unir modelos/salud y continuar una tarea sin buscar sesiones manualmen
 
 ### T5 — Hito: transporte adecuado sin degradar controles
 
-Objetivo: habilitar simple/interactive explícitos y decidir auto con mediciones.
+Objetivo: conservar steer como capacidad central, habilitar simple/interactive explícitos y decidir los fallbacks de auto con mediciones.
 - Depende: T4. Modo: secuencial.
 - Escritura: `core.py`, `__init__.py`, `tui_runner.py`, `tui_rpc.py` solo si necesario, `test_sync_lifecycle.py`, `test_tui_rpc.py`, README.
-- API propuesta: `transport_mode=auto|simple|interactive`. En primera compatibilidad, omitirlo conserva comportamiento actual; modo simple usa camino CLI existente; interactive TUI. Auto no cambia el predeterminado global hasta demostrar beneficio y adaptar instrucciones de consumidores con autorización.
+- API propuesta: `transport_mode=auto|simple|interactive`. En primera compatibilidad, omitirlo conserva comportamiento actual; interactive/TUI sigue siendo el camino normal de background porque mantiene steer. Auto elige interactive para runs background o live-steerable y solo puede degradar a simple antes de que el prompt sea aceptado; modo simple usa el camino CLI existente como fire-and-forget explícito.
+- Contrato steer tomado del harness nativo de subagentes: ownership exacto de sesión/transporte/generación, `accepting_steer` cerrado atómicamente antes de completar, ACK `queued` distinto de entrega, entrega en el siguiente boundary seguro y `missed_steer` terminal si el run acaba antes. Persistir request/accept/deliver/miss sin guardar texto sensible fuera de la política existente.
 - No construir una jerarquía genérica de adapters para dos caminos existentes. No reintentar por el otro transporte después de una aceptación ambigua: antes de lanzar puede elegirse otro, después solo reconciliar o reanudar la misma sesión bajo contrato existente.
-- Simple rechaza steer explícitamente; cancellation sigue limpiando/reaping el proceso y no debe reportar ACK interactivo inexistente.
+- Simple declara antes del lanzamiento que no soporta steer; cancellation sigue limpiando/reaping el proceso y no debe reportar ACK interactivo inexistente. Nunca cambiar de transporte tras aceptación o aceptación ambigua.
 - Aceptación: mismos prompts inocuos/perfil/modelo comparados por arranque, éxito técnico, calidad de resultado, RSS y cancelación; repeticiones acordes con variabilidad observada, sin número de conveniencia. Native notifications comprobadas en ambos. Test real detached: originador termina, resultado persiste y entrega se recupera por Hermes en entorno autorizado.
-- Gate: si no hay beneficio medido, dejar interactive predeterminado y conservar simple opt-in. No es un fracaso del plan: evita un cambio no justificado.
+- Gate: interactive sigue predeterminado mientras steer sea requisito clave. Las mediciones deciden si simple merece fallback pre-aceptación u opt-in, no si se elimina steer del camino normal.
 - Rollback: restaurar selector previo; no migrar ni reejecutar runs activos; activar solo para runs nuevos.
 
 ### T6 — Release/rollout del núcleo completo

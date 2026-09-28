@@ -9,7 +9,5 @@ provides_tools:
   - profile_delegate_steer
   - profile_delegate_cancel
   - profile_delegate_list
-  - profile_delegate_reconcile
-  - profile_delegate_prune
   - profile_delegate_policy
 provides_hooks: []

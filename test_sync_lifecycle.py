@@ -278,7 +278,7 @@ def test_sync_status_is_throttled_atomic_and_contains_no_output(tmp_path, monkey
     assert status["worker_alive"] is False
     assert status["latest_activity"]
     assert status["process_identity"]
-    public = core.profile_delegate_status(run_dir.name, tail_chars=0)
+    public = core._read_run_status(run_dir.name, tail_chars=0, operator=True)
     assert public["worker_pid"] == result["worker_pid"]
     assert public["process_identity"] == status["process_identity"]
     assert public["activity"] == "stale"
@@ -314,10 +314,11 @@ def test_activity_and_status_helpers_are_defensive_without_hermes(monkeypatch):
 def test_terminal_cancel_status_cannot_be_overwritten(tmp_path):
     run_dir = tmp_path / "pd_20260724_120000_abcdef"
     _status_fixture(run_dir)
-    core.merge_run_status(run_dir, {
+    core.publish_terminal_run(run_dir, {"status": "failed", "execution_status": "cancelled",
+                                        "contract_status": "not_evaluated"}, {
         "status": "cancelled", "phase": "cancelled", "ended_at": core.now_iso(),
         "terminal_reason": "parent_interrupt", "exit_code": -15,
-    }, terminal=True)
+    })
     core.merge_run_status(run_dir, {
         "status": "completed", "phase": "completed", "ended_at": core.now_iso(),
         "terminal_reason": "natural_exit", "exit_code": 0,
@@ -422,3 +423,32 @@ def test_interrupt_during_transient_retry_delay_prevents_resume(tmp_path, monkey
     assert attempts == 1
     assert final["status"] == "cancelled"
     assert final["result"]["execution_status"] == "cancelled"
+
+
+def test_provider_realm_mismatch_fails_without_session_retry(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core.shutil, "which", lambda _name: "/usr/bin/hermes")
+    monkeypatch.setattr(core.os, "access", lambda _path, _mode: True)
+    attempts = 0
+    diagnostic = "HTTP 409: Reasoning chain belongs to a different provider realm; start a new session or branch"
+
+    def fake_run(_cmd, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        core.text_safe_write(kwargs["stdout_path"], diagnostic)
+        core.text_safe_write(kwargs["stderr_path"], "")
+        return {"exit_code": 1, "timed_out": False, "cancelled": False,
+                "interrupted": False, "stop_reason": "exited",
+                "stdout_truncated": False, "stderr_truncated": False,
+                "stdout_chars": len(diagnostic), "stderr_chars": 0,
+                "stdout_limit": 200000, "stderr_limit": 100000,
+                "stdout_diagnostic_tail": diagnostic, "stderr_diagnostic_tail": ""}
+
+    monkeypatch.setattr(core, "run_capped_subprocess", fake_run)
+    final = core.delegate_profile("reviewer", "task", session_title="provider mismatch")
+    assert attempts == 1
+    assert final["status"] == "failed"
+    assert final["error_code"] == "provider_session_incompatible"
+    assert "new target-profile session" in final["result"]["next_steps"][-1]
