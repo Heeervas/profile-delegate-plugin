@@ -97,6 +97,8 @@ Already absorbed into P0/P1: portable fixtures, README/schema alignment, lifecyc
 
 ## Explicit non-goals
 
+Native approval-source milestone completed locally: `docs/plans/2026-10-01-native-approval-modes/ACCEPTANCE.md`. No implementation TODO remains for this bounded scope; activation requires Alberto's separate decision. Incoming unrelated TODOs remain unchanged.
+
 - No Hermes-core patches.
 - No plugin-owned durable message bus/outbox.
 - No compression-lineage router.

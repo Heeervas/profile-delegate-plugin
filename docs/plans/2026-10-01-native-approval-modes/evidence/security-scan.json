@@ -1,0 +1,6 @@
+{
+  "files_scanned": 91,
+  "secret_pattern_findings": [],
+  "forbidden_paths": [],
+  "limitations": "Pattern scan, not proof of absence of secrets. No sensitive matches printed."
+}

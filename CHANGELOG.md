@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- Local native approval-source candidate adds `deny|profile|inherit|yolo`, per-target operator selection and frozen snapshots; preserves historical selectors, checks resumed ancestry and decouples hook consent. Activation remains separately authorized.
+
 - Deterministic child environment and request preflight now separate inherited, resolved, and observed capabilities; schema-local validation and provider/session mismatch diagnostics fail before unsafe execution or retry.
 - Model-facing status, list, and control enforce exact origin; approval elevation and global maintenance remain operator-only. Same-home nested delegation is refused while cross-home nesting retains the configured depth and shared capacity.
 - Detached transport selection records requested/selected/actual modes; interactive remains the auto background default, with explicit simple mode and identity-checked cancellation. Steer ACK acceptance is not delivery proof: unobserved late follow-up fails closed as `steer_outcome_uncertain`.

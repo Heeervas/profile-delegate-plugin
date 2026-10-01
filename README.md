@@ -20,7 +20,7 @@ Example uses:
 - Model-callable `profile_delegate` tool.
 - Runs the target profile with its normal Hermes context, memory, rules, tools, and model defaults unless a temporary per-call override is requested.
 - Supports requested per-call `model`, `provider`, `reasoning_effort`, `max_turns`, `toolsets`, preloaded `skills`, and `review`/`build` capability presets; omitted values inherit profile defaults.
-- Launches Hermes in-process through a plugin-owned bootstrap before agent construction. The bootstrap installs deterministic child approvals and optional schema filtering, then runs quiet single-query mode with a prompt file reference. `--yolo` is added only when `child_approval_mode: approve_yolo` is explicit.
+- Launches Hermes in-process through a plugin-owned bootstrap before agent construction. The bootstrap binds frozen native approval-source policy and optional schema filtering, then runs quiet single-query mode with a prompt file reference. Operator `yolo` (legacy `approve_yolo`) enables ordinary bypass; hooks remain separately authorized.
 - Foreground mode waits synchronously and keeps the originating turn occupied. Short bounded specialist work can remain foreground. Prefer background mode for long, multi-stage, or independently monitorable work when the conversation should remain responsive. This is advisory only; the plugin does not auto-select, reject, or impose a new duration cap on either mode.
 - Explicit target-profile allowlist by default.
 - Recursion/depth guard via `PROFILE_DELEGATE_MAX_DEPTH`. A top-level self-target is permitted by profile policy; nested same-home calls are refused explicitly even when spare concurrency slots exist. Cross-home nesting remains subject to depth and the shared configured lock capacity.
@@ -132,7 +132,8 @@ Delegated child processes are forced non-interactive by stripping inherited gate
 plugins:
   entries:
     profile-delegate:
-      child_approval_mode: deny  # deny | approve_yolo
+      child_approval_mode: profile  # deny | profile | inherit | yolo; approve_yolo alias
+      child_approval_modes_by_profile: {builder: profile, reviewer: deny}
       allowed_profiles: [builder, reviewer]
       allow_all_profiles: false
       allowed_workdirs: [/opt/data]
@@ -155,8 +156,10 @@ plugins:
 
 Precedence is safe hardcoded bounds/defaults, then YAML, then explicitly present `PROFILE_DELEGATE_*` environment variables, then permitted per-call values. Missing YAML preserves the previous fail-closed capability policy. Empty allowlists deny overrides. Malformed YAML/config/env values fail with `configuration_error` before a run is created; they are not replaced by broader defaults.
 
-- `deny` (default): immediately deny dangerous terminal commands and host-access `execute_code` inside the child. Safe terminal commands still use normal Hermes guards. Decisions are recorded in `approval_events.jsonl` using hashes and character counts, never raw command/code text.
-- `approve_yolo`: explicit trusted mode; adds `--yolo`, sets `HERMES_YOLO_MODE=1`, and auto-accepts hooks for the child. Hermes' hardline unconditional blocklist still applies.
+- New omitted configuration selects `profile`; historical stored requests with omitted selectors retain legacy `deny`. Explicit `deny` immediately refuses dangerous terminal commands and host-access `execute_code`.
+- `profile` freezes target native posture/grants; `inherit` freezes caller posture/permanent grants with target and ancestor denies. Transient session grants are excluded.
+- `yolo` (`approve_yolo` alias) bypasses ordinary consent while native terminal floors remain. Approval bypass no longer implicitly consents to hooks.
+- Operator target-map entries take precedence over global YAML. See [native approval operator contract](docs/plans/2026-10-01-native-approval-modes/OPERATOR.md) for snapshot/resume, nested restrictions, unattended smart limitations and activation consequences. This is a local candidate, not production activation.
 - `strip_only` migration: new tool calls reject it. A legacy YAML value is read as `deny` so existing installations fail closed; update configuration to `deny` explicitly.
 
 Model-facing `child_approval_mode` cannot elevate approval; explicit per-call approval requests fail with an actionable preflight error. Configure trusted child approval through operator policy instead. This local working tree is not gateway-loaded or released.
