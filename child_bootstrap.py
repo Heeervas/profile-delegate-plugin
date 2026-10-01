@@ -49,10 +49,48 @@ def _tool_name(definition: Any) -> str:
     return str(definition.get("name") or "")
 
 
-def install_policy(mode: str, events_path: Path, blocked_tools: list[str]) -> None:
+def _decision(result: dict, mode: str) -> str:
+    if result.get("approved", False):
+        return "allowed"
+    if mode == "deny" or result.get("user_deny") or result.get("hardline"):
+        return "policy_denied"
+    return "approval_required"
+
+
+def _install_capability_filter(blocked_tools: list[str], write_event) -> None:
+    blocked = {name for name in blocked_tools if name}
+    if not blocked:
+        return
+    import model_tools
+    original_definitions = model_tools.get_tool_definitions
+
+    def filtered_definitions(*args, **kwargs):
+        definitions = original_definitions(*args, **kwargs)
+        filtered = [item for item in definitions if _tool_name(item) not in blocked]
+        model_tools._last_resolved_tool_names = [_tool_name(item) for item in filtered if _tool_name(item)]
+        return filtered
+
+    model_tools.get_tool_definitions = filtered_definitions
+    for module in ("run_agent", "cli"):
+        try:
+            __import__(module).get_tool_definitions = filtered_definitions
+        except ImportError:
+            pass
+    write_event(detector="capability_filter", outcome="installed",
+                reason="blocked_tools=" + ",".join(sorted(blocked)))
+
+
+def install_policy(mode: str, events_path: Path, blocked_tools: list[str], envelope: dict | None = None) -> None:
     """Install policy in this process before Hermes constructs the child agent."""
-    if mode not in {"deny", "approve_yolo"}:
+    if mode not in {"deny", "approve_yolo", "yolo", "profile", "inherit"}:
         raise ValueError(f"unsupported child approval mode: {mode}")
+    if envelope is not None:
+        import native_approval
+        native_approval.bind(envelope)
+    elif mode in {"profile", "inherit", "yolo"}:
+        raise ValueError("native approval mode requires frozen envelope")
+    if envelope is not None and envelope["effective"] != ("yolo" if mode == "approve_yolo" else mode):
+        raise ValueError("approval selector/envelope mismatch")
     write_event = _event_writer(events_path, mode)
     write_event(detector="bootstrap", outcome="installed", reason="plugin_owned_child_policy")
 
@@ -86,10 +124,13 @@ def install_policy(mode: str, events_path: Path, blocked_tools: list[str]) -> No
                 command, env_type, approval_callback=callback,
                 has_host_access=has_host_access,
             )
+        decision = _decision(result, mode)
+        if not result.get("approved", False):
+            result["error_code"] = decision
         if hardline or dangerous or not result.get("approved", False):
             write_event(
                 detector="hardline" if hardline else (str(pattern_key or "command_guard")),
-                outcome="allowed" if result.get("approved", False) else "denied",
+                outcome=decision,
                 reason=str(hardline_reason or dangerous_reason or result.get("message") or "guard_decision"),
                 value=command,
             )
@@ -107,9 +148,12 @@ def install_policy(mode: str, events_path: Path, blocked_tools: list[str]) -> No
             }
         else:
             result = original_execute_guard(code, env_type, has_host_access=has_host_access)
+        decision = "allowed" if result.get("approved", False) else ("policy_denied" if mode == "deny" else "approval_required")
+        if not result.get("approved", False):
+            result["error_code"] = decision
         write_event(
             detector="execute_code",
-            outcome="allowed" if result.get("approved", False) else "denied",
+            outcome=decision,
             reason=str(result.get("description") or result.get("message") or "execute_code_guard"),
             value=code,
         )
@@ -121,43 +165,14 @@ def install_policy(mode: str, events_path: Path, blocked_tools: list[str]) -> No
     terminal_tool._check_all_guards_impl = terminal_guard
     terminal_tool.set_approval_callback(lambda *_args, **_kwargs: "deny" if mode == "deny" else "once")
 
-    blocked = {name for name in blocked_tools if name}
-    if blocked:
-        import model_tools
-
-        original_definitions = model_tools.get_tool_definitions
-
-        def filtered_definitions(*args, **kwargs):
-            definitions = original_definitions(*args, **kwargs)
-            filtered = [item for item in definitions if _tool_name(item) not in blocked]
-            model_tools._last_resolved_tool_names = [
-                _tool_name(item) for item in filtered if _tool_name(item)
-            ]
-            return filtered
-
-        model_tools.get_tool_definitions = filtered_definitions
-        # AIAgent resolves schemas through run_agent's imported alias. Patch
-        # both aliases in case either module was imported before installation.
-        try:
-            run_agent_module = __import__("run_agent")
-            run_agent_module.get_tool_definitions = filtered_definitions
-        except ImportError:
-            pass
-        try:
-            cli_module = __import__("cli")
-            cli_module.get_tool_definitions = filtered_definitions
-        except ImportError:
-            pass
-        write_event(
-            detector="capability_filter",
-            outcome="installed",
-            reason="blocked_tools=" + ",".join(sorted(blocked)),
-        )
+    _install_capability_filter(blocked_tools, write_event)
 
 
 def _parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(description="Profile Delegate child bootstrap")
-    parser.add_argument("--approval-mode", required=True, choices=["deny", "approve_yolo"])
+    parser.add_argument("--approval-mode", required=True, choices=["deny", "approve_yolo", "profile", "inherit", "yolo"])
+    parser.add_argument("--request-path")
+    parser.add_argument("--test-shim", action="store_true")
     parser.add_argument("--events-path", required=True)
     parser.add_argument("--blocked-tools", default="")
     parser.add_argument("--tui-gateway", action="store_true")
@@ -194,7 +209,12 @@ def main(argv: list[str] | None = None) -> int:
     # Non-Hermes commands are test/compatibility shims. Execute them directly;
     # importing the full Hermes tool graph would be both incorrect and slow.
     if command and Path(command[0]).resolve().name != "hermes" and not args.tui_gateway:
+        if not args.test_shim:
+            raise RuntimeError("non-Hermes executable requires explicit test shim")
         return subprocess.run(command, check=False).returncode
+    os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
+    if args.request_path:
+        os.environ["PROFILE_DELEGATE_APPROVAL_REQUEST"] = args.request_path
     origin = time.monotonic()
     write_stage_event = _event_writer(Path(args.events_path).expanduser().resolve(), args.approval_mode)
 
@@ -211,15 +231,10 @@ def main(argv: list[str] | None = None) -> int:
             args.approval_mode,
             Path(args.events_path).expanduser().resolve(),
             [item for item in args.blocked_tools.split(",") if item],
+            __import__("native_approval").read_request(Path(args.request_path)) if args.request_path else None,
         )
     except ModuleNotFoundError as exc:
-        # Compatibility for test shims or non-Python Hermes executables. Real
-        # Hermes installs provide tools/hermes_cli and therefore stay in-process.
-        if exc.name not in {"tools", "hermes_cli"}:
-            raise
-        if command:
-            return subprocess.run(command, check=False).returncode
-        raise
+        raise RuntimeError("native approval installation failed; delegated launch refused") from exc
     finally:
         stage_event("bootstrap_policy_filter", "exit")
     if args.tui_gateway:

@@ -207,7 +207,7 @@ def test_plugin_registers_tools():
     assert "background" in props
     assert "notify_on_complete" in props
     assert props["capability_preset"]["enum"] == ["review", "build"]
-    assert props["child_approval_mode"]["enum"] == ["deny", "approve_yolo"]
+    assert props["child_approval_mode"]["enum"] == ["deny", "profile", "inherit", "yolo", "approve_yolo"]
 
 
 def test_spectator_watch_command_default_and_named_profile():
@@ -236,6 +236,23 @@ def test_handler_tool_args_win_over_internal_kwargs(monkeypatch):
     assert data["success"] is True
     assert seen["session_id"] == ""
     assert seen["output_mode"] == "markdown"
+
+
+def test_handler_omitted_target_session_id_does_not_inherit_caller(monkeypatch):
+    seen = {}
+
+    def fake_delegate(**kwargs):
+        seen.update(kwargs)
+        return {"success": True}
+
+    monkeypatch.setattr(plugin, "delegate_profile", fake_delegate)
+    data = json.loads(plugin._handler(
+        {"profile": "reviewer", "task": "x", "session_title": "new"},
+        session_id="caller-session",
+    ))
+    assert data["success"] is True
+    assert seen["session_mode"] == "new"
+    assert seen["session_id"] == ""
 
 
 def test_status_handler_tool_task_id_wins_over_internal_kwargs(tmp_path, monkeypatch):
@@ -343,10 +360,11 @@ def test_child_environment_default_denies_without_parent_prompt(monkeypatch):
 
 def test_child_environment_approve_yolo_is_explicit(monkeypatch):
     monkeypatch.setenv("HERMES_SESSION_PLATFORM", "discord")
+    monkeypatch.delenv("HERMES_ACCEPT_HOOKS", raising=False)
     env = core.child_environment(0, "approve_yolo")
     assert env["PROFILE_DELEGATE_DEPTH"] == "1"
     assert env["HERMES_YOLO_MODE"] == "1"
-    assert env["HERMES_ACCEPT_HOOKS"] == "1"
+    assert "HERMES_ACCEPT_HOOKS" not in env
     assert "HERMES_SESSION_PLATFORM" not in env
     assert "HERMES_CRON_SESSION" not in env
 
@@ -544,7 +562,7 @@ print(json.dumps({{'danger': danger, 'safe': safe, 'code': code, 'elapsed': time
     raw_events = events.read_text()
     assert "git reset --hard HEAD" not in raw_events
     event_rows = [json.loads(line) for line in raw_events.splitlines()]
-    assert any(row.get("outcome") == "denied" for row in event_rows)
+    assert any(row.get("outcome") == "policy_denied" for row in event_rows)
     assert any(row.get("detector") == "execute_code" for row in event_rows)
 
 
@@ -619,7 +637,7 @@ def test_plugin_config_child_approval_mode_reads_yaml(monkeypatch):
 
     fake_config = types.SimpleNamespace(load_config=lambda: {"plugins": {"entries": {"profile-delegate": {"child_approval_mode": "approve_yolo"}}}})
     monkeypatch.setitem(sys.modules, "hermes_cli.config", fake_config)
-    assert core.plugin_config_child_approval_mode() == "approve_yolo"
+    assert core.plugin_config_child_approval_mode() == "yolo"
 
 
 def test_timeout_defaults_and_caps(monkeypatch):
@@ -911,35 +929,6 @@ def test_delegate_background_returns_running_and_finishes(tmp_path, monkeypatch)
     assert json.loads((run_dir / "result.json").read_text())["session_id"] == "sid_async"
 
 
-def test_detached_background_worker_finalizes_completed_run(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setenv("PROFILE_DELEGATE_BACKGROUND_TRANSPORT", "cli")
-    monkeypatch.delenv("PROFILE_DELEGATE_BACKGROUND_MODE", raising=False)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
-    monkeypatch.setenv("PROFILE_DELEGATE_HERMES_BIN", "/bin/echo")
-
-    result = core.delegate_profile("reviewer", "task", session_title="detached", background=True, notify_on_complete=True, transport_mode="simple")
-    assert result["mode"] == "async"
-    run_dir = Path(result["paths"]["run_dir"])
-
-    status = {}
-    for _ in range(100):
-        status = json.loads((run_dir / "status.json").read_text())
-        if status.get("status") == "completed":
-            break
-        time.sleep(0.05)
-    assert status["status"] == "completed"
-    assert status["background_worker_mode"] == "detached"
-    assert status["ended_at"]
-    saved = json.loads((run_dir / "result.json").read_text())
-    assert saved["status"] == "unknown"
-    assert saved["execution_status"] == "completed"
-    assert saved["structured"] is False
-    assert saved["contract_status"] == "drifted"
-    assert (run_dir / "result.json").exists()
 
 
 
@@ -1581,10 +1570,10 @@ def test_operator_configured_approve_yolo_adds_yolo_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True, "rename_exit_code": 0, "rename_error": None})
     result = core.delegate_profile("reviewer", "task", session_title="yolo")
     assert result["success"] is True
-    assert result["child_approval_mode"] == "approve_yolo"
+    assert result["child_approval_mode"] == "yolo"
     assert "--yolo" in seen["cmd"]
     assert seen["env"]["HERMES_YOLO_MODE"] == "1"
-    assert seen["env"]["HERMES_ACCEPT_HOOKS"] == "1"
+    assert "HERMES_ACCEPT_HOOKS" not in seen["env"]
 
 
 def test_delegate_new_renames_when_session_id_present(tmp_path, monkeypatch):

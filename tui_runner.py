@@ -78,6 +78,7 @@ def _gateway_command(request: Dict[str, Any], run_dir: Path) -> list[str]:
         str(run_dir / "approval_events.jsonl"),
         "--blocked-tools",
         ",".join(core.ensure_text(item) for item in blocked),
+        "--request-path", str(run_dir / "request.json"),
         "--tui-gateway",
     ]
 
@@ -112,7 +113,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
     title = core.ensure_text(request.get("session_title") or "")
     client: Optional[tui_rpc.TuiRpcClient] = None
     ui_session_id = ""
-    child_session_id = resume_id
+    child_session_id = ""
     final_text = ""
     message_status = ""
     terminal_event = False
@@ -124,6 +125,8 @@ def execute(run_dir: Path) -> Dict[str, Any]:
     cancelled = False
     cancel_deadline: Optional[float] = None
     cancel_transport_diagnostic = ""
+    cancel_interrupt_accepted = False
+    cancel_identity_observed = False
     timed_out = False
     final_status = "failed"
     error_code: Optional[str] = None
@@ -134,6 +137,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
     )
     last_snapshot = 0.0
     last_observed_event = "none"
+    startup_identity_events: list[Dict[str, Any]] = []
 
     def merge_status(updates: Dict[str, Any], *, force: bool = False, terminal: bool = False) -> None:
         nonlocal last_snapshot
@@ -148,13 +152,45 @@ def execute(run_dir: Path) -> Dict[str, Any]:
 
     def persist_event(frame: Dict[str, Any]) -> None:
         nonlocal final_text, message_status, terminal_event, turn_settled, last_observed_event
-        nonlocal followup_started, followup_completed
+        nonlocal followup_started, followup_completed, child_session_id
         raw_params = frame.get("params")
         params: Dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
+        if frame.get("method") != "event":
+            return
         last_observed_event = core.ensure_text(params.get("type") or "unknown")
         event_sid = params.get("session_id")
-        if event_sid and ui_session_id and event_sid != ui_session_id:
+        if not ui_session_id:
+            # Retain only the identity portion before response correlation, with
+            # the journal's existing startup-event budget, not a new depth cap.
+            if params.get("type") == "session.info":
+                if len(startup_identity_events) >= journal.max_pre_session_events:
+                    raise tui_rpc.TuiProtocolError("startup identity evidence overflow")
+                payload = params.get("payload")
+                if isinstance(payload, dict):
+                    startup_identity_events.append({"method": "event", "params": {
+                        "type": "session.info", "session_id": event_sid,
+                        "payload": {k: payload[k] for k in ("stored_session_id", "profile_name") if k in payload},
+                    }})
+            journal.ingest(frame)
             return
+        if event_sid != ui_session_id:
+            return
+        if params.get("type") == "session.info":
+            payload = params.get("payload")
+            if isinstance(payload, dict) and "stored_session_id" in payload:
+                if "profile_name" in payload and payload["profile_name"] != profile:
+                    raise tui_rpc.TuiProtocolError("contradictory child profile identity")
+                proposed = payload["stored_session_id"]
+                if not core.valid_session_identity(proposed):
+                    raise tui_rpc.TuiProtocolError("malformed stored child session identity")
+                if proposed != child_session_id:
+                    if not core.compression_continuation(
+                        Path(request["profile_home"]), child_session_id, proposed,
+                        profile=profile, ui_correlated=True,
+                    ):
+                        raise tui_rpc.TuiProtocolError("unproven child compression identity")
+                    child_session_id = proposed
+                    core.merge_run_status(run_dir, {"child_session_id": proposed})
         try:
             journal.ingest(frame)
             merge_status(journal.snapshot_fields())
@@ -177,7 +213,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             turn_settled = True
 
     def process_controls() -> None:
-        nonlocal cancelled, cancel_deadline, cancel_transport_diagnostic, accepted_steer
+        nonlocal cancelled, cancel_deadline, cancel_transport_diagnostic, accepted_steer, cancel_interrupt_accepted
         nonlocal steer_response_uncertain
         if client is None or not ui_session_id or cancelled:
             return
@@ -242,6 +278,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                             timeout=interrupt_budget,
                             on_event=persist_event,
                         )
+                        cancel_interrupt_accepted = True
                     except tui_rpc.TuiRemoteError as exc:
                         detail = (
                             "native interrupt rejected; local cancellation authoritative: "
@@ -341,7 +378,41 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                 on_event=persist_event,
             )
             ui_session_id = identities["ui_session_id"]
-            child_session_id = identities["child_session_id"]
+            resumed_identity = identities["child_session_id"]
+            if (resume_id and resumed_identity != resume_id
+                    and not core.compression_continuation(Path(request["profile_home"]),
+                                                        resume_id, resumed_identity, profile=profile, ui_correlated=True)):
+                raise tui_rpc.TuiProtocolError("unproven resumed child identity")
+            child_session_id = resumed_identity
+            # The reply can be older OR newer than callbacks read while waiting
+            # for it. Anchor at the first correlated observation, then replay in
+            # wire order; the reply must lie on the same forward-only chain.
+            correlated = [f for f in startup_identity_events
+                          if f["params"]["session_id"] == ui_session_id
+                          and "stored_session_id" in f["params"]["payload"]]
+            if correlated:
+                initial = correlated[0]["params"]["payload"]["stored_session_id"]
+                if not core.valid_session_identity(initial):
+                    raise tui_rpc.TuiProtocolError("malformed startup child identity")
+                if initial != resumed_identity and not core.compression_continuation(
+                    Path(request["profile_home"]), initial, resumed_identity, profile=profile, ui_correlated=True,
+                ):
+                    # A later callback than the reply is also legitimate.
+                    if not core.compression_continuation(
+                        Path(request["profile_home"]), resumed_identity, initial, profile=profile, ui_correlated=True,
+                    ):
+                        raise tui_rpc.TuiProtocolError("unproven startup child identity")
+                child_session_id = initial
+            for startup_frame in startup_identity_events:
+                persist_event(startup_frame)
+            startup_identity_events.clear()
+            if child_session_id != resumed_identity:
+                if core.compression_continuation(Path(request["profile_home"]), child_session_id,
+                                                resumed_identity, profile=profile, ui_correlated=True):
+                    child_session_id = resumed_identity
+                elif not core.compression_continuation(Path(request["profile_home"]), resumed_identity,
+                                                      child_session_id, profile=profile, ui_correlated=True):
+                    raise tui_rpc.TuiProtocolError("contradictory startup response identity")
             journal.set_session(ui_session_id)
             core.merge_run_status(run_dir, {
                 "ui_child_session_id": ui_session_id,
@@ -416,6 +487,8 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                         "session.close", {"session_id": ui_session_id}, timeout=5,
                         on_event=persist_event,
                     )
+                except tui_rpc.TuiProtocolError:
+                    raise
                 except Exception:
                     pass
         if timed_out:
@@ -449,6 +522,27 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             if cancelled:
                 if cancel_deadline is None:
                     cancel_deadline = time.monotonic()
+                if cancel_interrupt_accepted:
+                    # Observe trailing identity after ACK, never spend the reap
+                    # reserve or restart normal controls/turn polling.
+                    observation_end = min(cancel_deadline, time.monotonic() + min(
+                        0.15, max(0.0, cancel_deadline - time.monotonic()) * 0.1))
+                    try:
+                        for _ in range(journal.max_pre_session_events):
+                            remaining = observation_end - time.monotonic()
+                            if remaining <= 0:
+                                break
+                            frame = _poll_event(client, remaining, journal)
+                            if frame is None:
+                                break
+                            persist_event(frame)
+                            params = frame.get("params") or {}
+                            if (params.get("session_id") == ui_session_id
+                                    and params.get("type") == "session.info"
+                                    and "stored_session_id" in (params.get("payload") or {})):
+                                cancel_identity_observed = True
+                    except Exception as exc:
+                        cancel_transport_diagnostic = cancel_transport_diagnostic or f"identity observation unavailable: {exc}"
                 client.close(deadline=cancel_deadline)
             else:
                 client.close()
@@ -533,7 +627,12 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             "recovery_history": [],
         }
     )
+    if cancelled:
+        result["session_identity_evidence"] = "post_interrupt_observed" if cancel_identity_observed else "last_observed_only"
+        if cancel_transport_diagnostic:
+            result["identity_diagnostic"] = cancel_transport_diagnostic
     terminal_updates = {
+        "session_identity_evidence": result.get("session_identity_evidence"),
         "status": final_status,
         "phase": final_status,
         "ended_at": core.now_iso(),

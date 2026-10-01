@@ -40,7 +40,7 @@ def test_operator_approval_policy_not_model_request(monkeypatch):
         "allow_child_approval_override": True, "child_approval_mode": "approve_yolo",
     })
     policy = core.load_effective_policy()
-    assert policy.values["child_approval_mode"] == "approve_yolo"
+    assert policy.values["child_approval_mode"] == "yolo"
     assert policy.values["allow_child_approval_override"] is False
 
 

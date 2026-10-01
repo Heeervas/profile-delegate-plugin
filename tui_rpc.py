@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import queue
 import select
@@ -245,8 +246,15 @@ class TuiRpcClient:
                 raise TuiRemoteError(error["code"], error["message"])
             return frame["result"]
 
-    def close(self, *, grace: float = 2.0, deadline: Optional[float] = None) -> None:
-        """Close and reap the owned process without exceeding an optional deadline."""
+    def close(self, *, grace: float = 10.0, deadline: Optional[float] = None) -> None:
+        """Close stdin and await gateway session teardown before forced reaping.
+
+        A real Builder turn produced a complete result, then gateway teardown
+        exceeded the old 2s grace and our SIGTERM made its exit -15. Keep the
+        nonzero-exit safety check: if teardown exceeds this bounded reserve it
+        remains a failure, rather than relabelling a killed process as success.
+        Cancellation still supplies its shorter explicit deadline.
+        """
         if self._closed:
             return
         self._closed = True
@@ -272,7 +280,9 @@ class TuiRpcClient:
                     self.process.stdin.close()
             except Exception:
                 pass
-            if wait_bounded(fraction=0.25):
+            # An explicit cancellation deadline must leave time to signal and
+            # reap a stubborn child; normal completion gets the full grace.
+            if wait_bounded(fraction=0.5 if deadline is not None else 1.0):
                 return
             try:
                 os.killpg(self.process.pid, signal.SIGTERM)
@@ -329,7 +339,7 @@ def start_session(client: Any, *, profile: str, mode: str, session_id: str,
             "session.resume", {**common, "session_id": session_id}, timeout=timeout,
             on_event=on_event, stage="session_creating",
         )
-        durable = str(response.get("resumed") or session_id)
+        durable = response.get("resumed", session_id)
     else:
         params = {**common, "title": title, "close_on_disconnect": True}
         if model:
@@ -342,9 +352,12 @@ def start_session(client: Any, *, profile: str, mode: str, session_id: str,
             "session.create", params, timeout=timeout, on_event=on_event,
             stage="session_creating",
         )
-        durable = str(response.get("stored_session_id") or response.get("session_key") or "")
-    ui_id = str(response.get("session_id") or "")
-    if not ui_id or not durable:
+        durable = response.get("stored_session_id", response.get("session_key", ""))
+    ui_id = response.get("session_id", "")
+    if (not isinstance(ui_id, str) or not isinstance(durable, str)
+            or not ui_id or not durable
+            or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", ui_id)
+            or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", durable)):
         raise TuiProtocolError("session response omitted session identity")
     return {"ui_session_id": ui_id, "child_session_id": durable}
 

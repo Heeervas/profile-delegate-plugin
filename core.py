@@ -74,7 +74,7 @@ VALID_RESULT_STATUSES = {"ok", "blocked", "failed", "unknown"}
 VALID_CONTRACT_STATUSES = {"valid", "recovered", "drifted", "empty", "not_evaluated"}
 VALID_OUTPUT_MODES = {"auto", "json", "markdown", "text"}
 VALID_SESSION_MODES = {"new", "resume"}
-VALID_CHILD_APPROVAL_MODES = {"deny", "approve_yolo"}
+VALID_CHILD_APPROVAL_MODES = {"deny", "profile", "inherit", "yolo", "approve_yolo"}
 LEGACY_CHILD_APPROVAL_MODES = {"strip_only"}
 VALID_CAPABILITY_PRESETS = {"review", "build"}
 REVIEW_TOOLSETS = ["web", "file"]
@@ -250,16 +250,157 @@ def origin_match(
     return False, None
 
 
+def valid_session_identity(value: Any) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", value))
+
+
+def compression_continuation(
+    home: Path, predecessor: str, candidate: str, *, lane: str = "", source: str = "",
+    profile: str = "", platform: str = "", ui_correlated: bool = False,
+    cli_footer: bool = False,
+) -> bool:
+    """Directional permission proof; no writes, resume resolution, or lineage state.
+
+    All edge and uniqueness reads share one native SQLite snapshot. The walk's
+    visited set bounds traversal by existing rows, including corrupt cycles.
+    """
+    if not valid_session_identity(predecessor) or not valid_session_identity(candidate):
+        return False
+    db_path = Path(home) / "state.db"
+    if not db_path.is_file() or db_path.is_symlink():
+        return False
+    try:
+        with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro" , uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
+            def record(sid: str) -> Optional[Dict[str, Any]]:
+                value = db.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+                return dict(value) if value is not None else None
+
+            first = record(predecessor)
+            target = record(candidate)
+            if not first or not target:
+                return False
+            namespace = ("source", "session_key", "chat_id", "chat_type", "thread_id", "user_id", "profile_name")
+
+            def metadata(value: Dict[str, Any], key: str) -> Dict[str, Any]:
+                raw = value.get(key)
+                parsed = json.loads("{}" if raw is None else raw)
+                if not isinstance(parsed, dict):
+                    raise ValueError("malformed native metadata")
+                return parsed
+
+            def compatible(value: Dict[str, Any]) -> bool:
+                if not value.get("source") or value["source"] == "tool":
+                    return False
+                if source and value["source"] != source:
+                    return False
+                if profile and value.get("profile_name") != profile:
+                    return False
+                if lane and value.get("session_key") != lane:
+                    return False
+                # Only exact UI correlation on native UI sources permits stored
+                # keys to rotate. Messaging lanes must never disappear/change.
+                keys = tuple(k for k in namespace if not (
+                    k == "session_key" and ui_correlated and first["source"] in {"tui", "desktop", "profile-delegate"}))
+                # Native CLI compression rotates its launch source to cli. This
+                # exception is only for child footer validation, never caller auth.
+                cli_source = bool(cli_footer and not (source or platform or lane or ui_correlated)
+                                  and first["source"] in {"profile-delegate", "cli"}
+                                  and not any(first.get(k) for k in ("session_key", "chat_id", "chat_type", "thread_id", "user_id"))
+                                  and value["source"] in {first["source"], "cli"})
+                if any((first.get(k) or None) != (value.get(k) or None)
+                       for k in keys if not (k == "source" and cli_source)):
+                    return False
+                origin = metadata(value, "origin_json")
+                if platform and platform != value["source"]:
+                    return False
+                expected = {"platform": value["source"], "profile": value.get("profile_name"),
+                            **{k: value.get(k) for k in ("chat_id", "chat_type", "thread_id", "user_id")}}
+                if any(origin.get(k) and expected[k] and origin[k] != expected[k] for k in expected):
+                    return False
+                routing_keys = ("platform", "profile", "scope_id", "guild_id", "workspace_id", "parent_chat_id", "chat_id", "chat_type", "thread_id", "user_id")
+                first_origin = metadata(first, "origin_json")
+                return all(first_origin.get(k) == origin.get(k) for k in routing_keys)
+
+            def eligible(child: Dict[str, Any], parent: str, predecessor: Optional[Dict[str, Any]] = None) -> bool:
+                config = metadata(child, "model_config")
+                inherited = metadata(predecessor, "model_config") if predecessor is not None else None
+                for key in ("_branched_from", "_delegate_from", "_reset_from"):
+                    marker = config.get(key)
+                    if key in config and not valid_session_identity(marker):
+                        raise ValueError("malformed native boundary marker")
+                    if marker == parent:
+                        return False
+                    if inherited is not None and ((key in config) != (key in inherited)
+                                                  or marker != inherited.get(key)):
+                        raise ValueError("non-inherited native boundary marker")
+                return child.get("source") != "tool"
+
+            if not compatible(first) or not compatible(target):
+                return False
+            current = first
+            visited: set[str] = set()
+            found = False
+            while current:
+                sid = current["id"]
+                if not valid_session_identity(sid) or sid in visited or not compatible(current):
+                    return False
+                # Validate even a root/tip's marker metadata. A legitimate
+                # branch/reset conversation may itself later compress.
+                eligible(current, current.get("parent_session_id") or "")
+                visited.add(sid)
+                found = found or sid == candidate
+                if current.get("end_reason") != "compression":
+                    return found
+                if current.get("ended_at") is None:
+                    return False
+                children = [dict(r) for r in db.execute(
+                    "SELECT * FROM sessions WHERE parent_session_id=?", (sid,))]
+                continuations = [r for r in children if eligible(r, sid, current)]
+                if len(continuations) != 1:
+                    return False
+                current = continuations[0]
+            return False
+    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
+        return False
+
+
 def authorize_run(action: str, caller_origin: Any, status: Dict[str, Any]) -> str:
-    """Model access requires positive, exact origin correlation, including legacy runs."""
+    """Exact origin first; only native compression evidence may extend it."""
     run = normalize_persisted_origin(status)
     caller = normalize_origin(caller_origin)
     field = next((key for key in ("ui_session_id", "session_id", "session_key") if caller[key] and run[key]), None)
-    if field is None or not run[field] or run[field] != caller[field]:
-        raise ProfileDelegateError(
-            f"{action} denied: caller is not the exact originating session", "origin_mismatch"
-        )
-    return field
+    durable_changed = bool(run["session_id"] and caller["session_id"]
+                           and run["session_id"] != caller["session_id"])
+    namespace_ok = all(not run[k] or not caller[k] or run[k] == caller[k]
+                       for k in ("profile", "source", "platform"))
+    stored_home = status.get("caller_home")
+    home = get_hermes_home_path()
+    try:
+        home_ok = not stored_home or (isinstance(stored_home, str) and Path(stored_home).resolve() == home)
+    except (OSError, ValueError):
+        home_ok = False
+    if field and run[field] == caller[field] and not durable_changed and namespace_ok and home_ok:
+        return field
+    ui_ok = not (run["ui_session_id"] and caller["ui_session_id"]
+                 and run["ui_session_id"] != caller["ui_session_id"])
+    ui_correlated = bool(caller["ui_session_id"] and run["ui_session_id"] == caller["ui_session_id"])
+    ui_source = (caller["source"] or run["source"]) in {"tui", "desktop", "profile-delegate"}
+    lane = "" if ui_correlated and ui_source else run["session_key"]
+    lane_ok = (ui_correlated and ui_source) or (bool(lane) and lane == caller["session_key"])
+    if (namespace_ok and ui_ok and home_ok and lane_ok
+            and run["session_id"] and caller["session_id"]
+            and compression_continuation(home, run["session_id"], caller["session_id"],
+                                        lane=lane, source=caller["source"] or run["source"],
+                                        profile=caller["profile"] or run["profile"],
+                                        platform=caller["platform"] or run["platform"], ui_correlated=ui_correlated)):
+        return "compression"
+    raise ProfileDelegateError(
+        f"{action} denied: caller is not the exact originating session and native compression continuity is unproven; "
+        "use the originating session or operator CLI", "origin_mismatch"
+    )
 
 
 def probe_worker_alive(pid: Any) -> Optional[bool]:
@@ -660,7 +801,8 @@ def load_effective_policy() -> EffectivePolicy:
         "allowed_profiles": [], "allow_all_profiles": False, "allowed_workdirs": [],
         "allowed_toolsets": [], "allowed_skills": [], "allow_model_override": True,
         "allow_provider_override": True, "allow_reasoning_override": True,
-        "allow_child_approval_override": False, "child_approval_mode": DEFAULT_CHILD_APPROVAL_MODE,
+        "allow_child_approval_override": False, "child_approval_mode": "profile",
+        "child_approval_modes_by_profile": {},
         "max_depth": DEFAULT_MAX_DEPTH, "max_concurrent": DEFAULT_MAX_CONCURRENT,
         "max_async": DEFAULT_MAX_ASYNC, "default_timeout_seconds": 1200,
         "max_timeout_seconds": 1800, "max_transient_resumes": DEFAULT_MAX_TRANSIENT_RESUMES,
@@ -686,9 +828,7 @@ def load_effective_policy() -> EffectivePolicy:
         "duplicate_guard_enabled": ("bool", duplicate.get("enabled")),
         "duplicate_active_window_seconds": ("window", duplicate.get("active_window_seconds")),
     }
-    if "child_approval_mode" in entry:
-        values["child_approval_mode"] = coerce_child_approval_mode(entry["child_approval_mode"], allow_legacy_config=True)
-        sources["child_approval_mode"] = "yaml"
+    __import__("native_approval").configure_selector(entry, values, sources, coerce_child_approval_mode)
     for key, (kind, raw) in yaml_specs.items():
         if raw is None:
             continue
@@ -739,6 +879,7 @@ def load_effective_policy() -> EffectivePolicy:
             bounds = {"max_depth": (0, 20), "max_concurrent": (1, 100), "max_async": (1, 100), "default_timeout_seconds": (10, 604800)}
             values[key] = _config_int(raw, env_name, *bounds[key])
         sources[key] = "env"
+    values["child_approval_modes_by_profile"] = __import__("native_approval").configured_target_modes(entry)
     # Historical config may contain this key; it is no longer a request grant.
     values["allow_child_approval_override"] = False
     maximum = values["max_timeout_seconds"]
@@ -1144,16 +1285,7 @@ def coerce_session_mode(value: Any) -> str:
 
 def coerce_child_approval_mode(value: Any, *, allow_legacy_config: bool = False) -> str:
     mode = (ensure_text(value) or DEFAULT_CHILD_APPROVAL_MODE).strip().lower().replace("-", "_")
-    aliases = {
-        "approve": "approve_yolo",
-        "yolo": "approve_yolo",
-        "off": "approve_yolo",
-        "auto": "approve_yolo",
-        "block": "deny",
-        "blocked": "deny",
-        "strip": "strip_only",
-        "none": "strip_only",
-    }
+    aliases = {"approve_yolo": "yolo"}
     mode = aliases.get(mode, mode)
     if mode in LEGACY_CHILD_APPROVAL_MODES:
         if allow_legacy_config:
@@ -1164,10 +1296,33 @@ def coerce_child_approval_mode(value: Any, *, allow_legacy_config: bool = False)
         )
     if mode not in VALID_CHILD_APPROVAL_MODES:
         raise ProfileDelegateError(
-            "child_approval_mode must be one of: deny, approve_yolo",
+            "child_approval_mode must be one of: deny, profile, inherit, yolo (approve_yolo alias)",
             "validation_error",
         )
     return mode
+
+
+def _resume_record_matches(request, status, target, session_id):
+    from native_resolution import _resume_record_matches as resolve
+    return resolve(request, status, target, session_id)
+
+
+def resume_native_approval(policy, target, session_id):
+    from native_resolution import resume_native_approval as resolve
+    return resolve(policy, target, session_id)
+
+
+
+def resolve_native_approval(policy, target):
+    from native_resolution import resolve_native_approval as resolve
+    return resolve(policy, target)
+
+
+
+def resolve_request_approval(policy, target, mode, resume_id):
+    if mode == "resume":
+        return resume_native_approval(policy, target, resume_id)
+    return resolve_native_approval(policy, target)
 
 
 def plugin_config_child_approval_mode() -> str:
@@ -1234,14 +1389,29 @@ def request_fingerprint(payload: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _active_matching_run(fingerprint: str, window_seconds: int) -> Optional[Dict[str, Any]]:
+def _active_matching_run(
+    fingerprint: str, window_seconds: int, *, payload: Optional[Dict[str, Any]] = None,
+    caller_origin: Any = None,
+) -> Optional[Dict[str, Any]]:
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
     for run_dir in iter_run_dirs():
         try:
             status = read_json_file(run_dir / "status.json")
         except ProfileDelegateError:
             continue
-        if status.get("request_fingerprint") != fingerprint or status.get("status") != "running":
+        if status.get("status") != "running":
+            continue
+        expected = fingerprint
+        if payload is not None:
+            try:
+                authorize_run("duplicate reuse", caller_origin, status)
+            except ProfileDelegateError:
+                continue
+            stored_origin = normalize_persisted_origin(status)
+            old_identity = next((stored_origin[k] for k in ("ui_session_id", "session_id", "session_key")
+                                 if stored_origin[k]), "")
+            expected = request_fingerprint({**payload, "origin": old_identity})
+        if status.get("request_fingerprint") != expected:
             continue
         created = parse_iso(ensure_text(status.get("created_at")))
         if created is None or created < cutoff:
@@ -1300,53 +1470,9 @@ def prepare_reasoning_config(run_dir: Path, reasoning_effort: str) -> Path:
     return managed_dir
 
 
-def build_child_command(
-    request: Dict[str, Any], run_dir: Path, *,
-    prompt_path: Optional[Path] = None,
-    resume_session_id: Optional[str] = None,
-) -> List[str]:
-    requested = request.get("effective_execution") or request.get("requested_execution") or {}
-    hermes_cmd = [ensure_text(request.get("hermes_bin")), "-p", ensure_text(request.get("profile")),
-                  "chat", "-q", f"@file:{prompt_path or (run_dir / 'prompt.txt')}", "-Q"]
-    approval_mode = ensure_text(request.get("child_approval_mode")) or DEFAULT_CHILD_APPROVAL_MODE
-    if approval_mode == "approve_yolo":
-        hermes_cmd.append("--yolo")
-    if requested.get("model"):
-        hermes_cmd += ["--model", ensure_text(requested["model"])]
-    if requested.get("provider"):
-        hermes_cmd += ["--provider", ensure_text(requested["provider"])]
-    if requested.get("max_turns") is not None:
-        hermes_cmd += ["--max-turns", str(requested["max_turns"])]
-    if requested.get("toolsets"):
-        hermes_cmd += ["--toolsets", ",".join(requested["toolsets"])]
-    if requested.get("skills"):
-        hermes_cmd += ["--skills", ",".join(requested["skills"])]
-    effective_resume_id = resume_session_id
-    if effective_resume_id is None and ensure_text(request.get("session_mode") or "new") == "resume":
-        effective_resume_id = ensure_text(request.get("requested_session_id"))
-    if effective_resume_id:
-        hermes_cmd += ["--resume", effective_resume_id]
-    hermes_cmd += ["--pass-session-id", "--source", "profile-delegate"]
-
-    capabilities = request.get("effective_capabilities") or {}
-    blocked_tools = capabilities.get("blocked_tools") or []
-    hermes_path = Path(ensure_text(request.get("hermes_bin"))).resolve()
-    sibling_python = hermes_path.parent / "python"
-    # Only trust a sibling interpreter for the real Hermes launcher. Test
-    # doubles and system utilities such as /bin/echo may sit beside a Python
-    # installation that lacks Hermes dependencies.
-    if hermes_path.name == "hermes" and sibling_python.is_file():
-        child_python = str(sibling_python)
-    else:
-        runtime_python = Path("/opt/hermes/.venv/bin/python")
-        child_python = str(runtime_python if runtime_python.is_file() else Path(sys.executable))
-    return [
-        child_python, str(CHILD_BOOTSTRAP),
-        "--approval-mode", approval_mode,
-        "--events-path", str(run_dir / "approval_events.jsonl"),
-        "--blocked-tools", ",".join(ensure_text(item) for item in blocked_tools),
-        "--", *hermes_cmd,
-    ]
+def build_child_command(request, run_dir, *, prompt_path=None, resume_session_id=None):
+    from child_launch import build_child_command as build
+    return build(request, run_dir, prompt_path=prompt_path, resume_session_id=resume_session_id)
 
 
 def capped_text(text: str, limit: int) -> Tuple[str, bool]:
@@ -2134,20 +2260,22 @@ def _ack_control(run_dir: Path, command_path: Path, command: Dict[str, Any], sta
     return ack
 
 
-def split_session_id_footer(text: str) -> Tuple[str, str]:
+def split_session_id_footer(text: str) -> Tuple[str, Optional[str]]:
+    """Return body and identity: empty means absent, None means invalid footer."""
     lines = (text or "").splitlines()
     idx = len(lines) - 1
     while idx >= 0 and not lines[idx].strip():
         idx -= 1
     if idx < 0:
         return "", ""
-    match = re.match(r"^session_id:\s*(\S+)\s*$", lines[idx].strip())
-    if not match:
+    line = lines[idx].strip()
+    if not line.startswith("session_id:"):
         return (text or "").strip(), ""
-    return "\n".join(lines[:idx]).strip(), match.group(1)
+    identity = line[len("session_id:"):].strip()
+    return "\n".join(lines[:idx]).strip(), identity if valid_session_identity(identity) else None
 
 
-def extract_session_id_footer(text: str) -> str:
+def extract_session_id_footer(text: str) -> Optional[str]:
     return split_session_id_footer(text)[1]
 
 
@@ -2288,10 +2416,10 @@ def child_environment(
         }:
             env.pop(key, None)
 
-    if mode == "approve_yolo":
-        # Explicit trusted mode: match Hermes -z/script semantics.
+    if mode in {"approve_yolo", "yolo"}:
         env["HERMES_YOLO_MODE"] = "1"
-        env["HERMES_ACCEPT_HOOKS"] = "1"
+    # Hook consent is target-owned (its existing native allowlist), never inferred
+    # from caller bypass or a bootstrap-generated HERMES_ACCEPT_HOOKS marker.
     # Approval is owned by child_bootstrap.py in both modes. Do not simulate a
     # cron run: quiet chat may re-enable interactivity, and cron state is not an
     # approval contract for delegated subprocesses.
@@ -2616,7 +2744,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     max_resumes = int(persisted_limits.get("max_transient_resumes", DEFAULT_MAX_TRANSIENT_RESUMES))
     max_concurrent = int(persisted_limits.get("max_concurrent", DEFAULT_MAX_CONCURRENT))
     history: List[Dict[str, Any]] = []
-    stable_session_id = resume_id
+    stable_session_id, observed_session_id = resume_id, ""
     run_meta: Dict[str, Any] = {}
     exit_code: Optional[int] = None
     timed_out = False
@@ -2646,12 +2774,21 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
             stop_reason = ensure_text(run_meta.get("stop_reason") or "exited")
             stdout_attempt = tail_text(stdout_path, run_meta["stdout_limit"])
             stderr_attempt = tail_text(stderr_path, run_meta["stderr_limit"])
-            footer_id = extract_session_id_footer(stdout_attempt) or extract_session_id_footer(stderr_attempt)
-            if footer_id:
-                if stable_session_id and footer_id != stable_session_id:
+            stdout_footer = extract_session_id_footer(stdout_attempt)
+            stderr_footer = extract_session_id_footer(stderr_attempt)
+            footer_id = stdout_footer or stderr_footer
+            if stdout_footer is None or stderr_footer is None:
+                integrity_error = "resume_session_mismatch"
+            elif footer_id:
+                if (not valid_session_identity(footer_id)
+                        or (stdout_footer and stderr_footer and stdout_footer != stderr_footer)
+                        or (stable_session_id and footer_id != stable_session_id
+                            and not compression_continuation(Path(request["profile_home"]),
+                                                            stable_session_id, footer_id,
+                                                            profile=profile, cli_footer=True))):
                     integrity_error = "resume_session_mismatch"
                 else:
-                    stable_session_id = footer_id
+                    stable_session_id = observed_session_id = footer_id
             parsed_attempt = extract_json_object(strip_session_id_footer(stdout_attempt))
             transient = None if integrity_error else classify_transient_failure(
                 exit_code=exit_code, timed_out=timed_out,
@@ -2730,7 +2867,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
         final_status = "completed" if exit_code == 0 else "failed"
         apply_execution_status(result, final_status)
 
-    child_session_id = stable_session_id
+    child_session_id = observed_session_id
     rename_meta: Dict[str, Any] = {"session_renamed": False}
     if mode == "new" and final_status == "completed" and result.get("status") != "failed":
         remaining = int(deadline - time.monotonic())
@@ -2895,7 +3032,10 @@ def _start_detached_background_worker(run_dir: Path) -> None:
             # Artifact persistence is owned by the detached worker; notification is best effort.
             pass
 
-    threading.Thread(target=_watch_for_notification, name=f"profile-delegate-notify-{run_dir.name}", daemon=True).start()
+    from contextvars import copy_context
+    notification_context = copy_context()
+    threading.Thread(target=lambda: notification_context.run(_watch_for_notification),
+                     name=f"profile-delegate-notify-{run_dir.name}", daemon=True).start()
 
 
 def _start_background_run(run_dir: Path) -> None:
@@ -2983,9 +3123,6 @@ def delegate_profile(
     contract_text = bounded_text("output_contract", output_contract, MAX_OUTPUT_CONTRACT_CHARS)
     requested_output_mode, resolved_output_mode = resolve_output_mode(output_mode, contract_text)
     child_approval_explicit = child_approval_mode not in {None, ""}
-    resolved_child_approval_mode = coerce_child_approval_mode(
-        child_approval_mode if child_approval_explicit else policy.values["child_approval_mode"]
-    )
     reasoning_mode_value, normalized_reasoning = normalize_reasoning_request(reasoning_mode, reasoning_effort)
     timeout = coerce_timeout(timeout_seconds, policy)
     requested_execution = normalize_requested_execution(
@@ -2998,6 +3135,8 @@ def delegate_profile(
         capability_preset=capability_preset, target_profile=validated.canonical,
         child_approval_explicit=child_approval_explicit,
     )
+    native_envelope = resolve_request_approval(policy, validated, mode, resume_id)
+    resolved_child_approval_mode = native_envelope["effective"]
     effective_execution, effective_capabilities = resolve_capability_preset(
         capability_preset, requested_execution
     )
@@ -3028,8 +3167,7 @@ def delegate_profile(
             "runtime_observed_execution": "unknown",
             "preflight_capabilities": effective_capabilities,
             "runtime_observed_capabilities": "unknown",
-            "approval_policy": {"effective": resolved_child_approval_mode,
-                                "source": "operator_policy"},
+            "approval_policy": native_envelope,
             "retry_shape": None,
         }
     fingerprint_payload = {
@@ -3045,14 +3183,21 @@ def delegate_profile(
         "capability_preset": effective_capabilities["preset"],
         "transport_mode": requested_transport,
         "child_approval_mode": resolved_child_approval_mode,
+        "native_approval": native_envelope,
     }
     fingerprint = request_fingerprint(fingerprint_payload)
     guard_enabled = bool(policy.values["duplicate_guard_enabled"] and fingerprint_payload["origin"] and duplicate_mode == "reuse")
 
-    lock_context = FingerprintLock(fingerprint)
-    with lock_context:
+    admission_identity = normalized_origin["ui_session_id"] or normalized_origin["session_key"] or fingerprint_payload["origin"]
+    admission_key = request_fingerprint({"caller_home": str(get_hermes_home_path()),
+                                         "conversation": admission_identity})
+    lock_context = FingerprintLock("admission-" + admission_key)
+    with lock_context, FingerprintLock(fingerprint):
         if guard_enabled:
-            existing = _active_matching_run(fingerprint, policy.values["duplicate_active_window_seconds"])
+            existing = _active_matching_run(
+                fingerprint, policy.values["duplicate_active_window_seconds"],
+                payload=fingerprint_payload, caller_origin=normalized_origin,
+            )
             if existing:
                 existing_id = ensure_text(existing.get("task_id"))
                 return {
@@ -3081,7 +3226,8 @@ def delegate_profile(
             "caller_home": str(get_hermes_home_path().resolve()),
             "target_home": str(Path(validated.home).resolve()),
             "delegate_max_depth": max_depth, "child_approval_mode": resolved_child_approval_mode,
-            "approval_policy": {"requested": ensure_text(child_approval_mode) or "config/default", "effective": resolved_child_approval_mode, "owner": "profile-delegate-child-bootstrap", "interactive": False},
+            "native_approval": native_envelope,
+            "approval_policy": native_envelope,
             "capability_preset": effective_capabilities["preset"], "effective_capabilities": effective_capabilities,
             "requested_execution": requested_execution, "effective_execution": effective_execution,
             "reasoning_mode": reasoning_mode_value, "background": bool(background),
@@ -3425,10 +3571,14 @@ def _read_run_status(
         status = dict(status)
     persisted_origin = normalize_persisted_origin(status)
     normalized_caller = normalize_origin(caller_origin)
-    belongs, matched_by = origin_match(persisted_origin, normalized_caller, "current_session")
+    try:
+        matched_by = authorize_run("ownership", normalized_caller, status)
+        belongs = True
+    except ProfileDelegateError:
+        belongs, matched_by = False, None
     caller_available = any(normalized_caller.values())
     run_available = any(persisted_origin.values())
-    ownership: Optional[bool] = belongs if caller_available and run_available and matched_by else None
+    ownership: Optional[bool] = belongs if caller_available and run_available else None
     activity = derive_activity(status)
     durable_notification = None
     try:

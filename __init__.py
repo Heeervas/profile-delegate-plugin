@@ -165,7 +165,7 @@ def _schema() -> Dict[str, Any]:
                 },
                 "child_approval_mode": {
                     "type": "string",
-                    "enum": ["deny", "approve_yolo"],
+                    "enum": ["deny", "profile", "inherit", "yolo", "approve_yolo"],
                     "description": "Deprecated model-supplied approval override: rejected. Configure child_approval_mode in operator-owned target policy instead; no request can elevate approval.",
                 },
                 "transport_mode": {
@@ -347,10 +347,11 @@ def _current_origin() -> Dict[str, str]:
 
 def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     payload = args if isinstance(args, dict) else {}
-    # Hermes may pass internal kwargs such as session_id/task_id to handlers.
-    # Model/tool arguments must win so profile_delegate.session_id is not
-    # accidentally replaced by the caller's own Hermes session id.
+    # Hermes injects its caller session_id in kwargs. It is not the target
+    # profile's session_id: only an explicit model argument may set that field.
     payload = {**kwargs, **payload}
+    if isinstance(args, dict) and "session_id" not in args:
+        payload.pop("session_id", None)
     try:
         origin = _current_origin()
         result = delegate_profile(

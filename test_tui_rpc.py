@@ -543,6 +543,18 @@ def test_runner_readiness_timeout_persists_stage_and_failure(tmp_path, monkeypat
     assert status["startup_readiness"]["elapsed_ms"] >= 0
 
 
+def test_client_close_allows_bounded_graceful_gateway_teardown():
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import sys,time; sys.stdin.read(); time.sleep(3)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    client = tui_rpc.TuiRpcClient(proc)
+    client.close()
+    assert proc.returncode == 0
+    assert all(stream is not None and stream.closed for stream in (proc.stdin, proc.stdout, proc.stderr))
+
+
 def test_runner_nonzero_transport_exit_overrides_complete_ok(tmp_path, monkeypatch):
     run = tmp_path / "pd_20260721_120001_cccccc"
     run.mkdir()
