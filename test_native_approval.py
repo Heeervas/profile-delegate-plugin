@@ -119,7 +119,7 @@ def test_nested_policy_cannot_hop_or_gain_bypass():
 def test_installed_native_guards_in_fresh_child(tmp_path, mode, unattended, selection):
     script = tmp_path / "probe.py"
     script.write_text('''import sys, os, json
-sys.path[:0] = ['/opt/hermes', REPO]
+sys.path[:0] = [os.environ.get('PROFILE_DELEGATE_TEST_RUNTIME', '/opt/hermes'), REPO]
 from native_approval import snapshot
 from child_bootstrap import install_policy
 native={'approvals':{'mode':MODE,'single_query_mode':POSTURE,'unattended_mode':POSTURE,'deny':['git push*']},'command_allowlist':['rm -rf /tmp/permanent-grant*','git push*']}
@@ -133,7 +133,7 @@ assert approval.check_all_command_guards('rm -rf /tmp/permanent-grant-never-exec
 '''.replace('REPO', repr(str(Path(__file__).parent))).replace('MODE', repr(mode)).replace('POSTURE', repr(unattended)).replace('SELECTION', repr(selection)).replace('EVENTS', "__import__('pathlib').Path("+repr(str(tmp_path/'events.jsonl'))+")"))
     env = dict(os.environ)
     env.pop("HERMES_YOLO_MODE", None)
-    observed = subprocess.run(["/opt/hermes/.venv/bin/python", str(script)], env=env, text=True, capture_output=True, timeout=30)
+    observed = subprocess.run([str(Path(os.environ.get("PROFILE_DELEGATE_TEST_RUNTIME", "/opt/hermes")) / ".venv/bin/python"), str(script)], env=env, text=True, capture_output=True, timeout=30)
     assert observed.returncode == 0, observed.stderr
     result = json.loads(observed.stdout.splitlines()[-1])
     allowed = selection != "deny" and (mode == "off" or unattended == "approve")

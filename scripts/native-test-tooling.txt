@@ -1,0 +1,3 @@
+# Native-only YAML test helper; pytest uses Hermes's frozen --group dev.
+# Ubuntu x86_64 cp314 wheel hash from pinned Hermes uv.lock. No cross-ABI path.
+PyYAML==6.0.3 --hash=sha256:c458b6d084f9b935061bc36216e8a69a7e293a2f1e68bf956dcd9e6cbcd143f5

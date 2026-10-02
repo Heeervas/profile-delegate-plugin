@@ -43,7 +43,7 @@ jobs:
         run: uv run --frozen python scripts/validate_release.py
       - name: Run tests
         run: |
-          uv run --frozen python -m pytest . -q -o 'addopts=' -W error \
+          uv run --frozen python -m pytest . -m 'not integration' -q -o 'addopts=' -W error \
             --junitxml=pytest-results.xml 2>&1 | tee pytest-output.log
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
@@ -64,21 +64,33 @@ jobs:
             pytest-output.log
             pytest-results.xml
       - name: Secret pattern scan
+        run: uv run --frozen python scripts/scan_secrets.py
+
+  installed-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PROFILE_DELEGATE_TEST_RUNTIME: ${{ github.workspace }}/../hermes-runtime
+      PYTHONPATH: ${{ github.workspace }}/../hermes-runtime
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: NousResearch/hermes-agent
+          ref: e8c97320ac8691d4de92af49f98459f9ef9ddb08
+          path: hermes-runtime-source
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          version: "0.11.6"
+      - name: Provision pinned native runtime (Python 3.14 runtime contract)
         run: |
-          python - <<'PY'
-          import os, re, sys
-          patterns=[r'github_pat_[A-Za-z0-9_]+', r'ghp_[A-Za-z0-9]{20,}', r'sk-[A-Za-z0-9]{20,}', r'AKIA[0-9A-Z]{16}', r'BEGIN (?:RSA|OPENSSH|EC|DSA)? ?PRIVATE KEY']
-          hits=[]
-          for dp, dns, fns in os.walk('.'):
-              dns[:] = [d for d in dns if d not in {'.git','__pycache__','.pytest_cache'}]
-              for fn in fns:
-                  p=os.path.join(dp, fn)
-                  try: data=open(p,'rb').read()
-                  except Exception: continue
-                  if b'\0' in data[:4096]: continue
-                  text=data.decode('utf-8','ignore')
-                  if any(re.search(x,text) for x in patterns): hits.append(p)
-          print('secret_hits=', len(hits))
-          for h in hits: print(h)
-          sys.exit(1 if hits else 0)
-          PY
+          mv hermes-runtime-source "$PROFILE_DELEGATE_TEST_RUNTIME"
+          uv sync --frozen --group dev --python 3.14 --project "$PROFILE_DELEGATE_TEST_RUNTIME"
+          uv pip install --python "$PROFILE_DELEGATE_TEST_RUNTIME/.venv/bin/python" --require-hashes --only-binary :all: -r scripts/native-test-tooling.txt
+      - name: Verify native interpreter and real dependency closure
+        run: '"$PROFILE_DELEGATE_TEST_RUNTIME/.venv/bin/python" scripts/native_prerequisite.py'
+      - name: Native integration (missing prerequisite fails, no skips)
+        run: '"$PROFILE_DELEGATE_TEST_RUNTIME/.venv/bin/python" -m pytest -m integration -q -o "addopts=" -W error'
