@@ -1,5 +1,29 @@
 # Profile Delegate project state
 
+## Latest historical resume closure candidate
+
+Missing/unknown frozen-envelope resumes now refuse with actionable new-session approval_policy_error, never reading current grants/posture. Valid frozen resumes unchanged; narrowly affected continuity/transport fixtures seed frozen records. Final canonical gate **651 passed in 102.85s**, lock/sync/Ruff/compile/registration and staged/unstaged diff checks green. Real 64-case CLI/TUI matrix `.artifacts/task-approval-runtime-5zkkraa1` independently verified by Reviewer `pd_20261001_231809_b80ll9`; earlier runtime pending claims below are superseded. That review's HIGH historical refresh finding is locally fixed; bounded re-review still pending, no final acceptance/activation claim. See PER_TASK_REPAIR.md. No future audit/refactor or production changes.
+
+## Latest same-session minimal repair receipt
+
+Authorized Ruff `.artifacts` extend-exclude preserves generated artifacts and existing lint rules. Minimal harness parser resolves bounded own-run `@file:.../prompt.txt` references proven in failed probe request dump; existing resume operations now cover CLI/TUI with frozen envelope and same-session assertions. Harness not executed under delegated ancestry. Exact canonical gate **640 passed in 102.24s**, lock/sync, whole-tree Ruff, compilation, registration/handler and diff checks passed. Real resume run `pd_20261001_224447_dxcm0b` retained child `20261001_223934_2050fe`, schema-v2 profile authority and repository cwd. Controller still owns narrow probe/matrix and independent review; no complete runtime acceptance claim. See PER_TASK_REPAIR.md and RUNTIME_HARNESS.md.
+
+## Latest bounded post-restart repair receipt (earlier)
+
+Preflight conflict fixture now has explicit isolated refusal policy; assertions unchanged. Full frozen `-W error`: **640 passed in 103.70s**, focused preflight/selection **26 passed**; lock/sync, canonical compilation, registration/handler and diff checks passed. Exact whole-tree Ruff **failed with 24 errors in incoming `.artifacts` copied skills**; diagnostic `--exclude .artifacts` passed. Artifacts preserved, complete canonical release gate not green. See `docs/plans/2026-10-01-native-approval-modes/PER_TASK_REPAIR.md` for exact scope and receipt.
+
+Post-restart real Builder run `pd_20261001_223924_8qzx00` reached ready installed `tui_stdio` with task-selected profile and native envelope schema 2, bypass false; durable child session `20261001_223934_2050fe`. Native reads/patch/terminal validation succeeded; no terminal-exit/notification claim while running. Controller owns four-mode contrast, resume, artifact lint disposition and independent review. No production configuration/core change, restart, staging/commit or harness edits.
+
+## Current per-task approval repair (supersedes operator-only acceptance; earlier receipt)
+
+Task selectors now reach frozen snapshots and launch argv; explicit caller YAML grant authorizes profile/inherit/yolo, deny narrowing needs no grant. Defaults remain compatible; frozen nesting/resume and target/ancestor denies retained. Full final local gate **619 passed in 88.28s**, frozen lock/sync, Ruff, compilation, registration/handler and diff check passed. Incoming package isolation preserved. `docs/plans/2026-10-01-native-approval-modes/PER_TASK_REPAIR.md` records contract, examples and incomplete expected/observed matrix.
+
+**BLOCKED for complete acceptance:** first runtime execute_code probe returned `BLOCKED: execute_code is disabled by profile-delegate child approval policy.` No workaround or live frozen-authority change. Controller needs to run authorized isolated four-mode public-handler + installed CLI/TUI tool/filesystem validation; independent repair review pending. Earlier operator-only activation-ready/quality/review statements are historical and do not establish this requested contract. No production config, restart, core/credential write, commit/push/publication, nested delegation or DRIFT.md change by Builder.
+
+## Current post-update import repair
+
+Gateway check still failed after Alberto's restart: native helpers imported `core` from alberto-tools. Package entrypoint and native helper imports now use package-relative resolution; direct CLI/test imports remain supported without swallowing package import failures. Regression preloads foreign helper modules and exercises policy loading without replacing those modules. Latest complete gate: 600 passed, Ruff/registration/diff checks green; real-runtime package policy and Builder preflight succeeded with a foreign `core` loaded. Permissions remain deny. Gateway has not loaded this newest fix yet; live tool verification after reload is still required. Evidence: `/opt/data/cache/profile-delegate-package-fix.log`. No config widening, gateway restart, commit or publication performed.
+
 ## Authorized scoped work — native approval modes
 
 Alberto authorized complete local implementation and verification of `deny/profile/inherit/yolo`, without mandatory deletion bans. Canonical package: [PLAN](docs/plans/2026-10-01-native-approval-modes/PLAN.md), [feature state](docs/plans/2026-10-01-native-approval-modes/STATE.md), [design reviews](docs/plans/2026-10-01-native-approval-modes/REVIEWS.md). Builder owns this feature after dispatch; preserve all existing continuity edits. No production config widening, gateway restart, Hermes-core write, commit/push/publication authorized.

@@ -1,5 +1,7 @@
 # Independent design reviews and synthesis
 
+> Historical reviews below evaluated operator-only/model-rejection contract. They are not independent approval for the per-task repair. Controller-owned independent Reviewer and actual runtime matrix remain pending; see PER_TASK_REPAIR.md.
+
 ## Final implementation closure
 
 Focused safety `deleg_96275bb8/task-0`: PASS strict historical observation evidence, deny containment and source extraction. Final differential review `deleg_44a4026d/task-0`: PASS argv/config-helper safety and model override refusal. Interrupted `deleg_0084765a` ended with upstream HTTP 503, not approval; its inspection was reused. Full final gate 599 passed; TOP feature quality PASS relative immutable incoming snapshot. Exact matrix/evidence: ACCEPTANCE.md. Earlier failing reviews below are historical inputs, superseded only for findings explicitly closed in final receipts. No activation authorized.

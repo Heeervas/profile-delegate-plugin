@@ -8,13 +8,14 @@ No production change has been applied. After Alberto explicitly approves activat
 plugins:
   entries:
     profile-delegate:
-      child_approval_mode: profile
+      child_approval_mode: profile  # omission default, NOT an authority ceiling
+      allow_child_approval_override: true  # explicit caller grant for task selection
       child_approval_modes_by_profile:
         builder: profile
         reviewer: deny
 ```
 
-The named targets must already exist and be permitted by target admission. `approve_yolo` remains an alias for `yolo`; operator map choices are not model selectors. New omitted configuration defaults profile; existing explicit production deny remains deny until approved.
+The named targets must already exist and be permitted by target admission. `approve_yolo` remains an alias for `yolo`. Operator map choices are omission defaults; admitted explicit task selectors take precedence. `allow_child_approval_override` is real caller-side authority, false by default, and does not override frozen ancestry. New omitted configuration defaults profile; existing explicit production deny remains deny until approved. The previous operator-only acceptance is superseded for per-task selection by `PER_TASK_REPAIR.md`; runtime repair acceptance remains pending.
 
 Optional separately approved native Builder posture:
 

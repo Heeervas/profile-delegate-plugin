@@ -1,5 +1,11 @@
 # Native approval modes — feature state
 
+## Per-task repair supersedes operator-only acceptance
+
+Local candidate implemented task selection with explicit caller grant, deny narrowing/permanent-grant semantics, frozen nesting/resume and strict inputs. Complete current gate: **619 passed in 88.28s**, frozen lock/sync, Ruff, compilation, six-tool registration/handler and diff check green. Incoming package-loading isolation regression retained. See [PER_TASK_REPAIR.md](PER_TASK_REPAIR.md).
+
+**BLOCKED for actual four-mode runtime acceptance and independent repair review.** Early runtime execute_code probe was refused by the live frozen deny envelope; no workaround or authority mutation. Controller must run authorized isolated public-handler CLI/TUI tool/filesystem matrix or provide scoped redispatch authority. Historical approval and quality verdicts below do not cover this repair. No deployment/activation ready claim.
+
 **READY_FOR_REVIEW — activation-ready local candidate; production activation pending Alberto's separate approval.** Same Builder implementation session `20261001_092528_6cb685` retained.
 
 Final evidence and A1–A11 reconciliation: [ACCEPTANCE.md](ACCEPTANCE.md). Exact candidate keys, activation and rollback: [OPERATOR.md](OPERATOR.md).

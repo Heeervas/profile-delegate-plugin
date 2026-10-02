@@ -1,5 +1,7 @@
 # Native approval modes — final acceptance
 
+> Historical operator-only acceptance, superseded for per-task selection. A8's blanket model-selector rejection contradicts the authoritative repair scope and is not a repair PASS. Current candidate/expected-observed matrix: [PER_TASK_REPAIR.md](PER_TASK_REPAIR.md). Actual four-mode public launch and independent repair review remain pending.
+
 Status: **READY_FOR_REVIEW / activation-ready local candidate**. No production activation authorized or performed. Builder implementation session retained: `20261001_092528_6cb685`.
 
 ## Acceptance matrix

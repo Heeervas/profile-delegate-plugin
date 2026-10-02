@@ -156,13 +156,13 @@ plugins:
 
 Precedence is safe hardcoded bounds/defaults, then YAML, then explicitly present `PROFILE_DELEGATE_*` environment variables, then permitted per-call values. Missing YAML preserves the previous fail-closed capability policy. Empty allowlists deny overrides. Malformed YAML/config/env values fail with `configuration_error` before a run is created; they are not replaced by broader defaults.
 
-- New omitted configuration selects `profile`; historical stored requests with omitted selectors retain legacy `deny`. Explicit `deny` immediately refuses dangerous terminal commands and host-access `execute_code`.
+- New omitted configuration selects `profile`; historical stored requests with omitted selectors retain legacy `deny`. Explicit `deny` refuses fresh ordinary approval, retains permanent command grants and forces non-bypass deny unattended posture.
 - `profile` freezes target native posture/grants; `inherit` freezes caller posture/permanent grants with target and ancestor denies. Transient session grants are excluded.
 - `yolo` (`approve_yolo` alias) bypasses ordinary consent while native terminal floors remain. Approval bypass no longer implicitly consents to hooks.
 - Operator target-map entries take precedence over global YAML. See [native approval operator contract](docs/plans/2026-10-01-native-approval-modes/OPERATOR.md) for snapshot/resume, nested restrictions, unattended smart limitations and activation consequences. This is a local candidate, not production activation.
 - `strip_only` migration: new tool calls reject it. A legacy YAML value is read as `deny` so existing installations fail closed; update configuration to `deny` explicitly.
 
-Model-facing `child_approval_mode` cannot elevate approval; explicit per-call approval requests fail with an actionable preflight error. Configure trusted child approval through operator policy instead. This local working tree is not gateway-loaded or released.
+Model-facing `child_approval_mode` selects the mode **per task**. `profile`, `inherit`, and `yolo` require the trusted caller plugin entry's `allow_child_approval_override: true`; its default is false. This is delegated authority, independent of the configured omission default and native approval posture. `deny` is available as narrowing without that grant. Task selection overrides the target default map, never target admission, explicit denies or frozen ancestry. Nested calls permit exact frozen inheritance or deny narrowing; incomparable source switches refuse. Resume cannot change its frozen selector. See [repair contract and pending runtime matrix](docs/plans/2026-10-01-native-approval-modes/PER_TASK_REPAIR.md). This local working tree is not gateway-loaded or released.
 
 Local-power-user override, not recommended for shared installs:
 
