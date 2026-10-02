@@ -104,26 +104,16 @@ def install_policy(mode: str, events_path: Path, blocked_tools: list[str], envel
                        has_host_access: bool = False) -> dict[str, Any]:
         hardline, hardline_reason = approval.detect_hardline_command(command)
         dangerous, pattern_key, dangerous_reason = approval.detect_dangerous_command(command)
-        if mode == "deny" and dangerous and not hardline:
-            result = {
-                "approved": False,
-                "message": f"BLOCKED by profile-delegate deny policy: {dangerous_reason}",
-                "pattern_key": pattern_key,
-                "description": dangerous_reason,
-                "outcome": "denied",
-                "user_consent": False,
-            }
-        else:
-            callback = approval_callback
-            if mode == "deny":
-                def immediate_deny(*_args, **_kwargs):
-                    return "deny"
+        callback = approval_callback
+        if mode == "deny":
+            def immediate_deny(*_args, **_kwargs):
+                return "deny"
 
-                callback = immediate_deny
-            result = original_guard(
-                command, env_type, approval_callback=callback,
-                has_host_access=has_host_access,
-            )
+            callback = immediate_deny
+        result = original_guard(
+            command, env_type, approval_callback=callback,
+            has_host_access=has_host_access,
+        )
         decision = _decision(result, mode)
         if not result.get("approved", False):
             result["error_code"] = decision

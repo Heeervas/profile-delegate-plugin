@@ -26,8 +26,9 @@ def test_resume_rejects_broad_frozen_policy_under_restricted_ancestor(tmp_path, 
     assert json.loads((run / "request.json").read_text())["native_approval"] == frozen
 
 
-@pytest.mark.parametrize("stored,expected", [(None, "deny"), ("approve_yolo", "yolo"), ("deny", "deny")])
-def test_historical_resume_preserves_stored_selector(tmp_path, monkeypatch, stored, expected):
+@pytest.mark.parametrize("stored", [None, "approve_yolo", "yolo", "profile", "inherit", "deny"])
+@pytest.mark.parametrize("current_grants", [[], ["newly granted command"]])
+def test_historical_resume_without_envelope_refuses_current_authority(tmp_path, monkeypatch, stored, current_grants):
     monkeypatch.delenv("PROFILE_DELEGATE_APPROVAL_REQUEST", raising=False)
     target = core.ValidatedProfile("worker", "worker", str(tmp_path / "worker"))
     run = tmp_path / "runs" / "old"
@@ -38,10 +39,28 @@ def test_historical_resume_preserves_stored_selector(tmp_path, monkeypatch, stor
     (run / "request.json").write_text(json.dumps(request))
     (run / "status.json").write_text(json.dumps({"child_session_id": "old_session"}))
     monkeypatch.setattr(core, "get_runs_root", lambda: run.parent)
-    monkeypatch.setattr(core, "resolve_native_approval", lambda policy, target: native_approval.snapshot(
-        policy.values["child_approval_mode"], "legacy", "caller", target.home, {}, {}))
-    resolved = core.resume_native_approval(core.EffectivePolicy({}, {}), target, "old_session")
-    assert resolved["effective"] == expected
+    monkeypatch.setattr(core, "resolve_native_approval", lambda *args: pytest.fail("must not read current authority"))
+    from hermes_cli import config
+    monkeypatch.setattr(config, "load_config_readonly", lambda: pytest.fail("must not read current config"))
+    target_home = tmp_path / "worker"
+    target_home.mkdir()
+    (target_home / "config.yaml").write_text(json.dumps({
+        "command_allowlist": current_grants,
+        "approvals": {"mode": "off", "single_query_mode": "approve"},
+    }))
+    with pytest.raises(core.ProfileDelegateError, match="create a new session") as error:
+        core.resume_native_approval(core.EffectivePolicy({}, {}), target, "old_session")
+    assert error.value.code == "approval_policy_error"
+    assert json.loads((run / "request.json").read_text()) == request
+
+
+def test_unknown_resume_without_envelope_never_resolves_current_authority(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "get_runs_root", lambda: tmp_path / "missing-runs")
+    monkeypatch.setattr(core, "resolve_native_approval", lambda *args: pytest.fail("must not recompute"))
+    target = core.ValidatedProfile("worker", "worker", str(tmp_path / "worker"))
+    with pytest.raises(core.ProfileDelegateError, match="create a new session") as error:
+        core.resume_native_approval(core.EffectivePolicy({}, {}), target, "unknown")
+    assert error.value.code == "approval_policy_error"
 
 
 def test_non_hermes_executable_does_not_implicitly_authorize_test_shim(tmp_path):

@@ -11,13 +11,18 @@ from pathlib import Path
 from typing import Any
 
 MODES = {"deny", "profile", "inherit", "yolo"}
-VERSION = 1
+# v2 identifies deny's native permanent-grant semantics. v1 deny refused
+# dangerous commands even when permanently granted: posture alone cannot
+# distinguish it from a normalized candidate envelope. Never migrate on resume.
+VERSION = 2
 
 
 def selector(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("approval selector must be deny, profile, inherit, or yolo")
     if value == "approve_yolo":
         return "yolo"
-    if not isinstance(value, str) or value not in MODES:
+    if value not in MODES:
         raise ValueError("approval selector must be deny, profile, inherit, or yolo")
     return value
 
@@ -57,7 +62,9 @@ def snapshot(mode: str, provenance: str, caller: str, target: str,
     native = subset(caller_config if mode == "inherit" else target_config)
     target_native = subset(target_config)
     denies = list(dict.fromkeys(native["approvals"]["deny"] + target_native["approvals"]["deny"]))
-    bypass = mode == "yolo" or (mode == "inherit" and caller_yolo) or native["approvals"]["mode"] == "off"
+    bypass = mode != "deny" and (mode == "yolo" or (mode == "inherit" and caller_yolo) or native["approvals"]["mode"] == "off")
+    if mode == "deny":
+        native["approvals"].update(mode="manual", single_query_mode="deny", unattended_mode="deny")
     if ancestor:
         validate(ancestor)
         # No inference of incomparable policies or glob containment. Nested
@@ -65,11 +72,16 @@ def snapshot(mode: str, provenance: str, caller: str, target: str,
         if ancestor["effective"] == "deny":
             if mode != "deny":
                 raise ValueError("deny ancestry requires deny")
-        elif mode != "inherit":
+            native = copy.deepcopy(ancestor["native"])
+            bypass = False
+            native["approvals"].update(mode="manual", single_query_mode="deny", unattended_mode="deny")
+        elif mode not in {"inherit", "deny"}:
             raise ValueError("nested delegation must inherit the frozen ancestor policy")
         else:
             native = copy.deepcopy(ancestor["native"])
-            bypass = ancestor["bypass"]
+            bypass = ancestor["bypass"] if mode == "inherit" else False
+            if mode == "deny":
+                native["approvals"].update(mode="manual", single_query_mode="deny", unattended_mode="deny")
         denies = list(dict.fromkeys(denies + ancestor["native"]["approvals"]["deny"]))
     native["approvals"]["deny"] = denies
     payload = {"schema_version": VERSION, "effective": mode, "source": provenance,
@@ -81,7 +93,7 @@ def snapshot(mode: str, provenance: str, caller: str, target: str,
 
 
 def validate(envelope: dict) -> dict:
-    if not isinstance(envelope, dict) or envelope.get("schema_version") != VERSION:
+    if not isinstance(envelope, dict) or envelope.get("schema_version") not in {1, VERSION}:
         raise ValueError("unsupported native approval envelope")
     expected = {"schema_version", "effective", "source", "caller", "target", "native", "bypass",
                 "unattended_context", "lineage_admission", "fingerprint"}
@@ -95,6 +107,13 @@ def validate(envelope: dict) -> dict:
     unsigned = {key: value for key, value in envelope.items() if key != "fingerprint"}
     if fingerprint(unsigned) != envelope["fingerprint"]:
         raise ValueError("native approval fingerprint mismatch")
+    if envelope["effective"] == "deny":
+        if envelope["schema_version"] == 1:
+            raise ValueError("historical schema-v1 deny authority cannot be resumed safely; create a new session (frozen authority is not migrated)")
+        posture = envelope["native"]["approvals"]
+        if envelope["bypass"] or any(posture[key] != value for key, value in (
+                ("mode", "manual"), ("single_query_mode", "deny"), ("unattended_mode", "deny"))):
+            raise ValueError("unsafe deny authority; create a new session")
     return copy.deepcopy(envelope)
 
 
@@ -110,7 +129,10 @@ def configure_selector(entry, values, sources, coerce) -> None:
 
 
 def configured_target_modes(entry: dict) -> dict:
-    from core import ProfileDelegateError
+    if __package__:
+        from .core import ProfileDelegateError
+    else:
+        from core import ProfileDelegateError
     try:
         return target_modes(entry)
     except Exception as exc:
@@ -145,8 +167,12 @@ def admit_resume(frozen: dict, ancestor: dict | None) -> dict:
     required = set(inherited["approvals"].pop("deny"))
     if not required <= denies:
         raise ValueError("frozen resume conflicts with current ancestry")
-    if ancestor["effective"] == "deny":
-        admitted = frozen["effective"] == "deny"
+    if frozen["effective"] == "deny":
+        narrowed = copy.deepcopy(inherited)
+        narrowed["approvals"].update(mode="manual", single_query_mode="deny", unattended_mode="deny")
+        admitted = not frozen["bypass"] and ordinary == narrowed
+    elif ancestor["effective"] == "deny":
+        admitted = False
     else:
         admitted = (frozen["effective"] == "inherit" and
                     frozen["bypass"] == ancestor["bypass"] and ordinary == inherited)

@@ -20,6 +20,7 @@ def _plugin():
 def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch):
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
     monkeypatch.delenv("PROFILE_DELEGATE_PARENT_TASK_ID", raising=False)
+    monkeypatch.delenv("PROFILE_DELEGATE_APPROVAL_REQUEST", raising=False)
     plugin = _plugin()
     payload = {"profile": "builder", "task": "Return JSON", "session_title": "dry run",
                "background": True, "preflight": True}
@@ -35,8 +36,14 @@ def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch):
 
 
 def test_preflight_conflicts_return_actionable_patch_without_run(tmp_path, monkeypatch):
+    # This refusal contract must not inherit the invoking caller's live grant.
+    monkeypatch.setattr(core, "_plugin_entry", lambda: {
+        "allow_child_approval_override": False,
+        "allow_reasoning_override": False,
+    })
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
     monkeypatch.delenv("PROFILE_DELEGATE_PARENT_TASK_ID", raising=False)
+    monkeypatch.delenv("PROFILE_DELEGATE_APPROVAL_REQUEST", raising=False)
     plugin = _plugin()
     observed = json.loads(plugin._handler({"profile": "builder", "task": "Return JSON",
                                             "session_title": "dry run", "preflight": True,

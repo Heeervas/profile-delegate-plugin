@@ -5,8 +5,9 @@ import json
 import os
 import sys
 from typing import Any, Dict, Optional
+from pathlib import Path
 
-try:
+if __package__ and __package__ in sys.modules:
     from .core import (
         DEFAULT_TIMEOUT_SECONDS,
         MAX_TIMEOUT_SECONDS,
@@ -18,7 +19,7 @@ try:
         profile_delegate_status,
         profile_delegate_steer as profile_delegate_steer,
     )
-except ImportError:  # direct import / pytest from plugin directory
+else:  # direct import / pytest from plugin directory
     import sys
     from pathlib import Path
 
@@ -166,7 +167,7 @@ def _schema() -> Dict[str, Any]:
                 "child_approval_mode": {
                     "type": "string",
                     "enum": ["deny", "profile", "inherit", "yolo", "approve_yolo"],
-                    "description": "Deprecated model-supplied approval override: rejected. Configure child_approval_mode in operator-owned target policy instead; no request can elevate approval.",
+                    "description": "Per-task ordinary approval selection: deny refuses fresh consent, profile uses target posture/grants, inherit uses caller posture/grants, yolo bypasses ordinary prompts. Only profile, inherit and yolo require caller-side allow_child_approval_override=true; deny narrowing is exempt. Target/ancestor denies and frozen resume authority remain. Omission uses configured default; approve_yolo aliases yolo.",
                 },
                 "transport_mode": {
                     "type": "string", "enum": ["auto", "interactive", "simple"],

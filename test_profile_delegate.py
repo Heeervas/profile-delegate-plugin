@@ -1536,6 +1536,12 @@ def test_delegate_resume_uses_resume_flag_and_skips_rename(tmp_path, monkeypatch
         core.text_safe_write(kwargs["stderr_path"], "")
         return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 92, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
 
+    import native_approval
+    previous = tmp_path / "runs" / "frozen-seed"
+    previous.mkdir(parents=True)
+    core.text_safe_write(previous / "request.json", json.dumps({"profile_home": str(tmp_path / "reviewer"), "native_approval":
+                         native_approval.snapshot("deny", "task", "caller", str(tmp_path / "reviewer"), {}, {})}))
+    core.text_safe_write(previous / "status.json", json.dumps({"child_session_id": "sid123"}))
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     monkeypatch.setattr(core, "rename_session", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not rename resume")))
     result = core.delegate_profile("reviewer", "task", session_title="seguir tests", session_mode="resume", session_id="sid123")

@@ -2,8 +2,13 @@
 from pathlib import Path
 import os
 from typing import Any, Dict
-import core
-from core import EffectivePolicy, ValidatedProfile, ProfileDelegateError
+if __package__:
+    from . import core, native_approval
+    from .core import EffectivePolicy, ValidatedProfile, ProfileDelegateError
+else:
+    import core
+    import native_approval
+    from core import EffectivePolicy, ValidatedProfile, ProfileDelegateError
 
 def _resume_record_matches(request, status, target, session_id):
     if request.get("profile_home") != target.home:
@@ -30,7 +35,6 @@ def _resume_record_matches(request, status, target, session_id):
 
 def resume_native_approval(policy: EffectivePolicy, target: ValidatedProfile, session_id: str) -> Dict[str, Any]:
     """Read-only resume lookup: reuse one unambiguous frozen source snapshot."""
-    import native_approval
     matches = []
     root = core.get_runs_root()
     if root.is_dir():
@@ -44,12 +48,13 @@ def resume_native_approval(policy: EffectivePolicy, target: ValidatedProfile, se
                     if "native_approval" in request:
                         matches.append(native_approval.validate(request["native_approval"]))
                     else:
-                        legacy = EffectivePolicy(dict(policy.values), dict(policy.sources))
-                        legacy.values["child_approval_mode"] = native_approval.selector(request.get("child_approval_mode") or "deny")
-                        legacy.values["child_approval_modes_by_profile"] = {}
-                        matches.append(core.resolve_native_approval(legacy, target))
+                        raise ValueError("resume has no trustworthy frozen approval envelope; create a new session")
             except ProfileDelegateError:
                 continue
+            except ValueError as exc:
+                # A matching frozen envelope must fail closed, never disappear
+                # into the unknown-session fallback or get recomputed.
+                raise ProfileDelegateError(str(exc), "approval_policy_error") from exc
     if matches:
         if any(value != matches[0] for value in matches):
             raise ProfileDelegateError("resume approval snapshots conflict; create a new session", "approval_policy_error")
@@ -62,15 +67,12 @@ def resume_native_approval(policy: EffectivePolicy, target: ValidatedProfile, se
                 except ValueError as exc:
                     raise ProfileDelegateError(str(exc), "approval_policy_error") from exc
             return frozen
-    # Unknown or historical persisted session never acquires the new default.
-    legacy_policy = EffectivePolicy(dict(policy.values), dict(policy.sources))
-    legacy_policy.values["child_approval_mode"] = "deny"
-    legacy_policy.values["child_approval_modes_by_profile"] = {}
-    return core.resolve_native_approval(legacy_policy, target)
+    raise ProfileDelegateError(
+        "resume has no trustworthy frozen approval envelope; create a new session", "approval_policy_error",
+    )
 
 
 def resolve_native_approval(policy: EffectivePolicy, target: ValidatedProfile) -> Dict[str, Any]:
-    import native_approval
     try:
         from hermes_cli.config import load_config_readonly
         from hermes_constants import set_hermes_home_override, reset_hermes_home_override
@@ -81,7 +83,7 @@ def resolve_native_approval(policy: EffectivePolicy, target: ValidatedProfile) -
         finally:
             reset_hermes_home_override(token)
         target_modes = policy.values["child_approval_modes_by_profile"]
-        target_selected = target.canonical in target_modes and policy.sources["child_approval_mode"] != "env"
+        target_selected = target.canonical in target_modes and policy.sources["child_approval_mode"] not in {"env", "task"}
         mode = target_modes[target.canonical] if target_selected else policy.values["child_approval_mode"]
         source = "operator_target" if target_selected else policy.sources["child_approval_mode"]
         ancestor_path = os.getenv("PROFILE_DELEGATE_APPROVAL_REQUEST")
@@ -89,7 +91,7 @@ def resolve_native_approval(policy: EffectivePolicy, target: ValidatedProfile) -
         from tools import approval
         return native_approval.snapshot(
             mode, source, str(core.get_hermes_home_path()), target.home,
-            caller_config, target_config, approval.is_approval_bypass_active(), ancestor,
+            caller_config, target_config, approval._YOLO_MODE_FROZEN, ancestor,
         )
     except Exception as exc:
         raise ProfileDelegateError(f"native approval snapshot refused: {exc}", "approval_policy_error") from exc

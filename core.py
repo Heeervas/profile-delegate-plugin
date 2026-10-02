@@ -819,6 +819,7 @@ def load_effective_policy() -> EffectivePolicy:
         "allow_model_override": ("bool", entry.get("allow_model_override")),
         "allow_provider_override": ("bool", entry.get("allow_provider_override")),
         "allow_reasoning_override": ("bool", entry.get("allow_reasoning_override")),
+        "allow_child_approval_override": ("bool", entry.get("allow_child_approval_override")),
         "max_depth": ("int", entry.get("max_depth")),
         "max_concurrent": ("int", entry.get("max_concurrent")),
         "max_async": ("int", entry.get("max_async")),
@@ -828,7 +829,11 @@ def load_effective_policy() -> EffectivePolicy:
         "duplicate_guard_enabled": ("bool", duplicate.get("enabled")),
         "duplicate_active_window_seconds": ("window", duplicate.get("active_window_seconds")),
     }
-    __import__("native_approval").configure_selector(entry, values, sources, coerce_child_approval_mode)
+    if __package__:
+        from . import native_approval
+    else:
+        import native_approval
+    native_approval.configure_selector(entry, values, sources, coerce_child_approval_mode)
     for key, (kind, raw) in yaml_specs.items():
         if raw is None:
             continue
@@ -879,9 +884,12 @@ def load_effective_policy() -> EffectivePolicy:
             bounds = {"max_depth": (0, 20), "max_concurrent": (1, 100), "max_async": (1, 100), "default_timeout_seconds": (10, 604800)}
             values[key] = _config_int(raw, env_name, *bounds[key])
         sources[key] = "env"
-    values["child_approval_modes_by_profile"] = __import__("native_approval").configured_target_modes(entry)
-    # Historical config may contain this key; it is no longer a request grant.
-    values["allow_child_approval_override"] = False
+    if __package__:
+        from . import native_approval
+    else:
+        import native_approval
+    values["child_approval_modes_by_profile"] = native_approval.configured_target_modes(entry)
+    # This trusted caller-side grant authorizes task selection, not native defaults.
     maximum = values["max_timeout_seconds"]
     if maximum and values["default_timeout_seconds"] > maximum:
         raise ProfileDelegateError("default_timeout_seconds must not exceed max_timeout_seconds", "configuration_error")
@@ -1028,12 +1036,12 @@ def validate_preflight(
         if "toolsets" not in unsupported:
             unsupported.append("toolsets")
         retry_patch["toolsets"] = []
-    if child_approval_explicit:
+    if child_approval_explicit and not values["allow_child_approval_override"]:
         unsupported.append("child_approval_mode")
         retry_patch["child_approval_mode"] = None
     if unsupported:
         raise PreflightError(
-            "requested overrides conflict with effective policy or inheritance state; remove child_approval_mode and configure approval in operator-owned target policy",
+            "requested overrides conflict with effective policy; task approval selection requires caller-side allow_child_approval_override=true (frozen ancestry still applies)",
             unsupported, retry_patch, allowed_values=allowed_values,
         )
 
@@ -1303,25 +1311,41 @@ def coerce_child_approval_mode(value: Any, *, allow_legacy_config: bool = False)
 
 
 def _resume_record_matches(request, status, target, session_id):
-    from native_resolution import _resume_record_matches as resolve
+    if __package__:
+        from .native_resolution import _resume_record_matches as resolve
+    else:
+        from native_resolution import _resume_record_matches as resolve
     return resolve(request, status, target, session_id)
 
 
 def resume_native_approval(policy, target, session_id):
-    from native_resolution import resume_native_approval as resolve
+    if __package__:
+        from .native_resolution import resume_native_approval as resolve
+    else:
+        from native_resolution import resume_native_approval as resolve
     return resolve(policy, target, session_id)
 
 
 
 def resolve_native_approval(policy, target):
-    from native_resolution import resolve_native_approval as resolve
+    if __package__:
+        from .native_resolution import resolve_native_approval as resolve
+    else:
+        from native_resolution import resolve_native_approval as resolve
     return resolve(policy, target)
 
 
 
-def resolve_request_approval(policy, target, mode, resume_id):
+def resolve_request_approval(policy, target, mode, resume_id, requested=None):
     if mode == "resume":
-        return resume_native_approval(policy, target, resume_id)
+        frozen = resume_native_approval(policy, target, resume_id)
+        if requested is not None and requested != frozen["effective"]:
+            raise ProfileDelegateError("resume cannot change frozen child_approval_mode; create a new session", "approval_policy_error")
+        return frozen
+    if requested is not None:
+        policy = EffectivePolicy(dict(policy.values), dict(policy.sources))
+        policy.values["child_approval_mode"] = requested
+        policy.sources["child_approval_mode"] = "task"
     return resolve_native_approval(policy, target)
 
 
@@ -1471,7 +1495,10 @@ def prepare_reasoning_config(run_dir: Path, reasoning_effort: str) -> Path:
 
 
 def build_child_command(request, run_dir, *, prompt_path=None, resume_session_id=None):
-    from child_launch import build_child_command as build
+    if __package__:
+        from .child_launch import build_child_command as build
+    else:
+        from child_launch import build_child_command as build
     return build(request, run_dir, prompt_path=prompt_path, resume_session_id=resume_session_id)
 
 
@@ -3122,7 +3149,16 @@ def delegate_profile(
     context_text = bounded_text("context", context, MAX_CONTEXT_CHARS)
     contract_text = bounded_text("output_contract", output_contract, MAX_OUTPUT_CONTRACT_CHARS)
     requested_output_mode, resolved_output_mode = resolve_output_mode(output_mode, contract_text)
-    child_approval_explicit = child_approval_mode not in {None, ""}
+    child_approval_explicit = child_approval_mode is not None
+    if child_approval_explicit:
+        if __package__:
+            from . import native_approval
+        else:
+            import native_approval
+        try:
+            child_approval_mode = native_approval.selector(child_approval_mode)
+        except ValueError as exc:
+            raise ProfileDelegateError(str(exc), "validation_error") from exc
     reasoning_mode_value, normalized_reasoning = normalize_reasoning_request(reasoning_mode, reasoning_effort)
     timeout = coerce_timeout(timeout_seconds, policy)
     requested_execution = normalize_requested_execution(
@@ -3133,9 +3169,9 @@ def delegate_profile(
     validate_preflight(
         requested_execution, policy, reasoning_mode=reasoning_mode_value,
         capability_preset=capability_preset, target_profile=validated.canonical,
-        child_approval_explicit=child_approval_explicit,
+        child_approval_explicit=child_approval_explicit and child_approval_mode != "deny",
     )
-    native_envelope = resolve_request_approval(policy, validated, mode, resume_id)
+    native_envelope = resolve_request_approval(policy, validated, mode, resume_id, child_approval_mode)
     resolved_child_approval_mode = native_envelope["effective"]
     effective_execution, effective_capabilities = resolve_capability_preset(
         capability_preset, requested_execution

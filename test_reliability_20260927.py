@@ -41,7 +41,7 @@ def test_operator_approval_policy_not_model_request(monkeypatch):
     })
     policy = core.load_effective_policy()
     assert policy.values["child_approval_mode"] == "yolo"
-    assert policy.values["allow_child_approval_override"] is False
+    assert policy.values["allow_child_approval_override"] is True
 
 
 def test_strict_origin_rejects_legacy_and_weaker_key_fallback(tmp_path, monkeypatch):
@@ -92,8 +92,8 @@ def test_model_callable_surfaces_cannot_request_operator_bypass(tmp_path, monkey
     assert "profile_delegate_prune" not in calls
 
 
-def test_approval_elevation_forbidden_even_with_legacy_allow_flag(monkeypatch):
-    monkeypatch.setattr(core, "_plugin_entry", lambda: {"allow_child_approval_override": True})
+def test_task_selection_requires_explicit_caller_grant(monkeypatch):
+    monkeypatch.setattr(core, "_plugin_entry", lambda: {"allow_child_approval_override": False})
     policy = core.load_effective_policy()
     requested = core.normalize_requested_execution(policy=policy, validate_policy=False)
     with pytest.raises(core.PreflightError) as error:

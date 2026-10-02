@@ -182,6 +182,12 @@ def test_cli_resume_footer_requires_native_compression(tmp_path, monkeypatch, fo
     monkeypatch.setattr(core, 'validate_profile', lambda p, policy=None: core.ValidatedProfile(p, p, str(target)))
     monkeypatch.setattr(core, 'resolve_workdir', lambda workdir='', policy=None: tmp_path)
     monkeypatch.setattr(core, 'resolve_hermes_bin', lambda: '/usr/bin/hermes')
+    import native_approval
+    previous = tmp_path / 'runs' / 'frozen-seed'
+    previous.mkdir(parents=True)
+    core.text_safe_write(previous / 'request.json', json.dumps({'profile_home': str(target), 'native_approval':
+                         native_approval.snapshot('deny', 'task', 'caller', str(target), {}, {})}))
+    core.text_safe_write(previous / 'status.json', json.dumps({'child_session_id': 'a'}))
     def run(cmd, **kwargs):
         core.text_safe_write(kwargs['stdout_path'], '{"status":"ok","summary":"done"}\nsession_id: '+footer)
         core.text_safe_write(kwargs['stderr_path'], '')
@@ -265,6 +271,12 @@ def dispatch_fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(core, 'validate_profile', lambda p, policy=None: core.ValidatedProfile(p, p, str(tmp_path / 'target')))
     monkeypatch.setattr(core, 'resolve_workdir', lambda workdir='', policy=None: tmp_path)
     monkeypatch.setattr(core, 'resolve_hermes_bin', lambda: '/usr/bin/hermes')
+    import native_approval
+    previous = tmp_path / 'runs' / 'frozen-seed'
+    previous.mkdir(parents=True)
+    core.text_safe_write(previous / 'request.json', json.dumps({'profile_home': str(tmp_path / 'target'), 'native_approval':
+                         native_approval.snapshot('deny', 'task', 'caller', str(tmp_path / 'target'), {}, {})}))
+    core.text_safe_write(previous / 'status.json', json.dumps({'child_session_id': 'a'}))
     monkeypatch.setattr(core, '_start_background_run', lambda run_dir: None)
     monkeypatch.setattr(core, '_wait_control_ack', lambda *args: None)
     return lambda origin, **options: core.delegate_profile(

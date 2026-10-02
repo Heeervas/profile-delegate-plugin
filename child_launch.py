@@ -2,9 +2,13 @@
 from pathlib import Path
 import sys
 from typing import Any, Dict, List, Optional
-import core
-import native_approval
-from core import ensure_text, CHILD_BOOTSTRAP
+if __package__:
+    from . import core, native_approval
+    from .core import ensure_text, CHILD_BOOTSTRAP
+else:
+    import core
+    import native_approval
+    from core import ensure_text, CHILD_BOOTSTRAP
 
 def _hermes_command(request, run_dir, prompt_path, resume_session_id):
     requested = request.get("effective_execution") or request.get("requested_execution") or {}
