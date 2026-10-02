@@ -1,6 +1,7 @@
 """Focused newline-delimited JSON-RPC client for Hermes TUI Gateway stdio."""
 from __future__ import annotations
 
+import io
 import json
 import re
 import os
@@ -11,7 +12,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, BinaryIO, Callable, Optional
+from typing import Any, Callable, Optional
 
 
 class TuiRpcError(RuntimeError):
@@ -37,40 +38,13 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _readline_with_timeout(stream: BinaryIO, timeout: float) -> bytes:
-    try:
-        fd = stream.fileno()
-    except (AttributeError, OSError):
-        fd = None
-    if fd is not None:
-        ready, _, _ = select.select([fd], [], [], max(0.001, timeout))
-        if not ready:
-            raise TuiTransportError("TUI RPC response timed out")
-        return stream.readline()
-    result: queue.Queue[bytes | BaseException] = queue.Queue(maxsize=1)
-
-    def read() -> None:
-        try:
-            result.put(stream.readline())
-        except BaseException as exc:  # surfaced on the caller thread
-            result.put(exc)
-
-    thread = threading.Thread(target=read, name="profile-delegate-tui-read", daemon=True)
-    thread.start()
-    try:
-        item = result.get(timeout=max(0.001, timeout))
-    except queue.Empty as exc:
-        raise TuiTransportError("TUI RPC response timed out") from exc
-    if isinstance(item, BaseException):
-        raise TuiTransportError(f"TUI stdout read failed: {item}") from item
-    return item
-
-
 class TuiRpcClient:
     """Single-owner synchronous RPC client with interleaved event delivery."""
 
     def __init__(self, process: subprocess.Popen[bytes], *, max_frame_bytes: int = 2_000_000,
                  max_diagnostic_chars: int = 100_000) -> None:
+        if max_frame_bytes < 1 or max_diagnostic_chars < 0:
+            raise ValueError("frame bound must be positive and diagnostic bound nonnegative")
         self.process = process
         self.max_frame_bytes = max_frame_bytes
         self.max_diagnostic_chars = max_diagnostic_chars
@@ -78,6 +52,8 @@ class TuiRpcClient:
         self._writer_lock = threading.Lock()
         self._closed = False
         self._stderr_tail = ""
+        self._stdout_buffer = bytearray()
+        self._stderr_eof = False
         self.last_event_type = "none"
         # Single-owner client: a locally timed-out RPC may still answer later.
         # Remember that exact id so one late response can be discarded without
@@ -90,28 +66,63 @@ class TuiRpcClient:
         return self._stderr_tail
 
     def _drain_stderr(self) -> None:
+        """Bound each poll so a continuous diagnostic producer cannot starve RPC."""
         stream = self.process.stderr
-        if stream is None:
+        if stream is None or self._stderr_eof:
             return
         try:
-            if isinstance(stream, __import__("io").BytesIO):
-                data = stream.read()
+            for _ in range(8):
+                if isinstance(stream, io.BytesIO):
+                    chunk = stream.read(8192)
+                else:
+                    fd = stream.fileno()
+                    if not select.select([fd], [], [], 0)[0]:
+                        break
+                    chunk = os.read(fd, 8192)
+                if not chunk:
+                    self._stderr_eof = True
+                    break
+                text = chunk.decode("utf-8", "replace")
+                self._stderr_tail = (self._stderr_tail + text)[-self.max_diagnostic_chars:] if self.max_diagnostic_chars > 0 else ""
+        except (OSError, ValueError):
+            self._stderr_eof = True
+
+    def _readline(self, timeout: float) -> bytes:
+        stream = self.process.stdout
+        if stream is None:
+            raise TuiTransportError("TUI stdout unavailable")
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            self._drain_stderr()
+            newline = self._stdout_buffer.find(b"\n")
+            if newline >= 0:
+                if newline + 1 > self.max_frame_bytes:
+                    raise TuiProtocolError("TUI frame exceeds configured bound")
+                raw = bytes(self._stdout_buffer[:newline + 1])
+                del self._stdout_buffer[:newline + 1]
+                return raw
+            if len(self._stdout_buffer) > self.max_frame_bytes:
+                raise TuiProtocolError("TUI frame exceeds configured bound")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TuiTransportError("TUI RPC response timed out")
+            size = min(8192, self.max_frame_bytes + 1 - len(self._stdout_buffer))
+            if isinstance(stream, io.BytesIO):
+                chunk = stream.read(size)
             else:
-                data = b""
                 fd = stream.fileno()
-                while True:
-                    try:
-                        chunk = os.read(fd, 8192)
-                    except BlockingIOError:
-                        break
-                    if not chunk:
-                        break
-                    data += chunk
-            if data:
-                text = data.decode("utf-8", "replace")
-                self._stderr_tail = (self._stderr_tail + text)[-self.max_diagnostic_chars:]
-        except Exception:
-            pass
+                fds = [fd]
+                if self.process.stderr is not None and not self._stderr_eof:
+                    fds.append(self.process.stderr.fileno())
+                ready = select.select(fds, [], [], remaining)[0]
+                if fd not in ready:
+                    continue
+                chunk = os.read(fd, size)
+            if not chunk:
+                if self._stdout_buffer:
+                    raise TuiProtocolError("TUI stdout EOF with partial frame")
+                raise TuiTransportError("TUI stdout EOF")
+            self._stdout_buffer.extend(chunk)
 
     def _write(self, frame: dict[str, Any]) -> None:
         if self._closed or self.process.stdin is None:
@@ -127,7 +138,7 @@ class TuiRpcClient:
     def _read_raw_frame(self, timeout: float) -> dict[str, Any]:
         if self.process.stdout is None:
             raise TuiTransportError("TUI stdout unavailable")
-        raw = _readline_with_timeout(self.process.stdout, timeout)
+        raw = self._readline(timeout)
         if not raw:
             self._drain_stderr()
             raise TuiTransportError("TUI stdout EOF")

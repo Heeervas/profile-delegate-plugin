@@ -321,7 +321,7 @@ def test_session_flow_uses_create_resume_submit_and_native_controls():
     # The plugin's minimal venv deliberately lacks Hermes' pydantic dependency.
     # Validate actual emitted params with the installed runtime's interpreter.
     check = subprocess.run(
-        ["/opt/hermes/.venv/bin/python", "-c",
+        [str(Path(os.environ.get("PROFILE_DELEGATE_TEST_RUNTIME", "/opt/hermes")) / ".venv/bin/python"), "-c",
          "import json,sys; from tui_gateway.contracts.sessions import SessionCreateParams,SessionResumeParams; "
          "create,resume=json.load(sys.stdin); SessionCreateParams.model_validate(create); "
          "SessionResumeParams.model_validate(resume); print('installed_contracts_ok')"],
@@ -711,9 +711,13 @@ def _execute_with_control(
     )
     monkeypatch.setattr(tui_runner.tui_rpc, "submit", lambda *args, **kwargs: {})
     control_call()
+    # All fixture/process setup and command publication are complete here.
+    prepared_at = time.monotonic()
     result = tui_runner.execute(run)
+    finished_at = time.monotonic()
     ack = json.loads((acks / command_path.name).read_text(encoding="utf-8"))
-    trace = {"client": client, "extra_path": extra_path, "acks": acks}
+    trace = {"client": client, "extra_path": extra_path, "acks": acks,
+             "prepared_at": prepared_at, "finished_at": finished_at}
     return (result, ack, trace) if return_trace else (result, ack)
 
 
@@ -995,6 +999,7 @@ for line in sys.stdin:
 
     def poll_event(*args, **kwargs):
         poll_entered.set()
+        assert command_written.wait(timeout=2), "producer did not publish steer"
         return real_poll_event(*args, **kwargs)
 
     def launch_gateway(**kwargs):
@@ -1099,8 +1104,18 @@ def test_runner_cancel_preserves_cleanup_reserve_and_reaps_stubborn_process(
     assert client.close_kwargs and client.close_kwargs["deadline"] > started
     assert client.process.poll() is not None
     assert client.process.returncode == -signal.SIGKILL
-    assert elapsed < 0.8
+    cleanup_elapsed = trace["finished_at"] - trace["prepared_at"]
+    # Original .8s control bound, now excludes fixture/interpreter startup.
+    assert cleanup_elapsed < 0.8
+    # Separate total task deadline (10s fixture contract), not a relaxed cleanup bound.
+    assert elapsed < 10
     assert trace["client"] is client
+    assert client.process.stdin.closed and client.process.stdout.closed and client.process.stderr.closed
+    (tmp_path / "cancel-timing-receipt.json").write_text(json.dumps({
+        "total_seconds": elapsed, "prepared_control_seconds": cleanup_elapsed,
+        "cleanup_bound_seconds": 0.8, "task_deadline_seconds": 10,
+        "returncode": client.process.returncode, "pipes_closed": True,
+    }))
 
 
 def test_runner_cancel_timeout_is_authoritative_and_bounded(tmp_path, monkeypatch):
