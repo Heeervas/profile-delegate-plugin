@@ -122,6 +122,16 @@ NATIVE_ASYNC_LEDGER_COLUMNS = {
     "delivery_state", "delivery_attempts", "delivered_at",
 }
 
+# Installed quiet CLI's exhausted_copy(overloaded) wraps the provider summary.
+# Match the entire native block, not provider-controlled "Provider said:" prose.
+NATIVE_OVERLOADED_503_PATTERN = re.compile(
+    r"[\w .:/-]{1,200} reported it was overloaded on all [1-9]\d* attempts — "
+    r"it looks temporarily unavailable\. Wait a minute and send /retry, or switch "
+    r"models with /model\. To avoid this in future, add a backup provider with "
+    r"`hermes fallback add`\.\n\nProvider said: HTTP 503: (?:HTTP 503: )?"
+    r"[^\r\n]*(?:Service Unavailable|upstream|temporarily unavailable|try again|retry later)[^\r\n]*"
+)
+
 TRANSIENT_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     ("incomplete_chunked_read", re.compile(r"^(?:[\w.]+\.)?RemoteProtocolError:\s*(?:peer closed connection without sending complete message body|incomplete chunked read).*$", re.I)),
     ("connection_reset", re.compile(r"^(?:[\w.]+(?:Error|Exception):\s*)?.*Connection reset by peer\.?$", re.I)),
@@ -2325,6 +2335,7 @@ def classify_transient_failure(
     *, exit_code: Optional[int], timed_out: bool, stdout: str, stderr: str,
     parsed_result: Optional[Dict[str, Any]], stdout_truncated: bool = False,
     stderr_truncated: bool = False, interrupted: bool = False,
+    native_stdout: Optional[str] = None, native_stderr: Optional[str] = None,
 ) -> Optional[str]:
     if interrupted or timed_out or exit_code in {None, 0, -9, -15, 137, 143}:
         return None
@@ -2340,18 +2351,34 @@ def classify_transient_failure(
     )
     if any(re.search(pattern, joined, re.I) for pattern in exclusions):
         return None
+    if not stdout_truncated and not stderr_truncated:
+        # The caller supplies complete retained streams separately from legacy
+        # diagnostic tails. Never infer native-block provenance from a tail.
+        native_streams = (
+            stdout if native_stdout is None else native_stdout,
+            stderr if native_stderr is None else native_stderr,
+        )
+        native_joined = "\n".join(native_streams)
+        if (not any(re.search(pattern, native_joined, re.I) for pattern in exclusions)
+                and not provider_realm_mismatch(*native_streams)
+                and any(NATIVE_OVERLOADED_503_PATTERN.fullmatch(strip_session_id_footer(text))
+                        for text in native_streams)):
+            return "provider_503"
     for reason, pattern in TRANSIENT_PATTERNS:
         if any(pattern.fullmatch(line) for line in lines):
             return reason
     return None
 
 
-def build_recovery_prompt(attempt_number: int) -> str:
+def build_recovery_prompt(attempt_number: int, resolved_output_mode: str = "json",
+                          require_terminal_verdict: bool = False) -> str:
     prompt = (
         "The previous delegated run ended because of a transient connection or stream failure.\n"
         "Continue exactly where you left off in this same session. Do not restart the original task or repeat work/actions already completed.\n"
-        "Finish the original task and return the requested final JSON result.\n"
+        f"Finish the original task and preserve its requested {resolved_output_mode} output format.\n"
     )
+    if require_terminal_verdict:
+        prompt += "End with exactly one line PROFILE_DELEGATE_RESULT: ok|blocked|failed outside any code fence.\n"
     if attempt_number >= 3:
         prompt += "This is the final automatic recovery attempt.\n"
     return prompt
@@ -2787,7 +2814,10 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
                 break
             prompt_path = run_dir / ("prompt.txt" if attempt == 1 else f"recovery_prompt_{attempt}.txt")
             if attempt > 1:
-                text_safe_write(prompt_path, build_recovery_prompt(attempt))
+                text_safe_write(prompt_path, build_recovery_prompt(
+                    attempt, request.get("resolved_output_mode", "json"),
+                    request.get("require_terminal_verdict", False),
+                ))
             stdout_path = run_dir / ("stdout.txt" if attempt == 1 else f"attempt_{attempt}_stdout.txt")
             stderr_path = run_dir / ("stderr.txt" if attempt == 1 else f"attempt_{attempt}_stderr.txt")
             cmd = build_child_command(request, run_dir, prompt_path=prompt_path, resume_session_id=stable_session_id if attempt > 1 else None)
@@ -2799,8 +2829,11 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
             exit_code = run_meta["exit_code"]
             timed_out = bool(run_meta["timed_out"])
             stop_reason = ensure_text(run_meta.get("stop_reason") or "exited")
-            stdout_attempt = tail_text(stdout_path, run_meta["stdout_limit"])
-            stderr_attempt = tail_text(stderr_path, run_meta["stderr_limit"])
+            # append_capped bounds retained files in decoded characters, not
+            # bytes. Read them without a second slice so native fullmatch sees
+            # every retained prefix; artifact truncation still disables it.
+            stdout_attempt = tail_text(stdout_path, 0)
+            stderr_attempt = tail_text(stderr_path, 0)
             stdout_footer = extract_session_id_footer(stdout_attempt)
             stderr_footer = extract_session_id_footer(stderr_attempt)
             footer_id = stdout_footer or stderr_footer
@@ -2825,6 +2858,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
                 stdout_truncated=bool(run_meta.get("stdout_truncated")),
                 stderr_truncated=bool(run_meta.get("stderr_truncated")),
                 interrupted=stop_reason in {"cancelled", "interrupted"},
+                native_stdout=stdout_attempt, native_stderr=stderr_attempt,
             )
             history.append({"attempt": attempt, "exit_code": exit_code, "timed_out": timed_out, "transient_reason": transient, "session_id": stable_session_id, "duration_seconds": round(time.monotonic() - started, 3), "stdout": str(stdout_path), "stderr": str(stderr_path)})
             if stop_reason in {"cancelled", "interrupted", "timed_out"} or integrity_error or not transient or attempt_index >= max_resumes:

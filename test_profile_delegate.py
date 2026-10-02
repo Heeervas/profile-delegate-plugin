@@ -12,6 +12,7 @@ import time
 import types
 from contextlib import closing
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -24,8 +25,7 @@ import __init__ as plugin
 import child_bootstrap
 
 
-HERMES_TEST_PYTHON = Path("/opt/hermes/.venv/bin/python")
-HAS_HERMES_RUNTIME = HERMES_TEST_PYTHON.is_file()
+HERMES_TEST_PYTHON = Path(os.environ.get("PROFILE_DELEGATE_TEST_RUNTIME", "/opt/hermes")) / ".venv/bin/python"
 
 
 
@@ -534,7 +534,6 @@ def test_child_command_uses_plugin_bootstrap_before_hermes(tmp_path):
     assert cmd[separator + 1] == "/opt/hermes/.venv/bin/hermes"
 
 
-@pytest.mark.skipif(not HAS_HERMES_RUNTIME, reason="requires an installed Hermes runtime")
 def test_bootstrap_real_subprocess_deny_is_immediate_and_observable(tmp_path):
     events = tmp_path / "approval_events.jsonl"
     script = f"""
@@ -566,7 +565,6 @@ print(json.dumps({{'danger': danger, 'safe': safe, 'code': code, 'elapsed': time
     assert any(row.get("detector") == "execute_code" for row in event_rows)
 
 
-@pytest.mark.skipif(not HAS_HERMES_RUNTIME, reason="requires an installed Hermes runtime")
 def test_bootstrap_real_subprocess_yolo_keeps_hardline_floor(tmp_path):
     events = tmp_path / "approval_events.jsonl"
     script = f"""
@@ -587,7 +585,6 @@ print(json.dumps({{'recoverable': terminal_tool._check_all_guards('git reset --h
     assert result["hardline"]["approved"] is False
 
 
-@pytest.mark.skipif(not HAS_HERMES_RUNTIME, reason="requires an installed Hermes runtime")
 def test_bootstrap_review_filter_removes_mutators_from_real_schema(tmp_path):
     events = tmp_path / "approval_events.jsonl"
     blocked = ["write_file", "patch", "execute_code", "terminal", "process"]
@@ -1466,7 +1463,130 @@ def test_transient_classifier_is_strict_and_deterministic():
     assert core.classify_transient_failure(exit_code=-9, timed_out=False, stdout="API call failed after 3 retries: Connection error.", stderr="", parsed_result=None) is None
 
 
-def test_transient_failure_resumes_same_session(tmp_path, monkeypatch):
+# Exact installed quiet-CLI failure copy from turn_failure_copy.exhausted_copy;
+# deliberately not imported from Hermes so compatibility drift stays observable.
+NATIVE_OVERLOADED_503 = (
+    "custom reported it was overloaded on all 1 attempts — it looks temporarily "
+    "unavailable. Wait a minute and send /retry, or switch models with /model. "
+    "To avoid this in future, add a backup provider with `hermes fallback add`.\n\n"
+    "Provider said: HTTP 503: HTTP 503: Service Unavailable upstream temporarily unavailable\n"
+)
+
+
+@pytest.mark.parametrize("diagnostic", [
+    NATIVE_OVERLOADED_503,
+    NATIVE_OVERLOADED_503.replace("HTTP 503: HTTP 503:", "HTTP 503:"),
+    "API call failed after 3 retries: HTTP 503: Service Unavailable upstream",
+])
+def test_transient_classifier_accepts_native_and_legacy_503(diagnostic):
+    assert core.classify_transient_failure(
+        exit_code=1, timed_out=False, stdout=diagnostic,
+        stderr="\nsession_id: 20261002_075608_f63a8e\n", parsed_result=None,
+    ) == "provider_503"
+
+
+@pytest.mark.parametrize("overrides", [
+    {"exit_code": None}, {"exit_code": 0}, {"exit_code": -9},
+    {"exit_code": -15}, {"exit_code": 137}, {"exit_code": 143},
+    {"timed_out": True}, {"interrupted": True},
+    {"stdout_truncated": True}, {"stderr_truncated": True},
+    {"parsed_result": {"status": "ok"}},
+    {"parsed_result": {"status": "blocked"}},
+    {"parsed_result": {"status": "failed"}},
+    {"stderr": "HTTP 401: unauthorized"},
+    {"stderr": "HTTP 403: forbidden"},
+    {"stderr": "HTTP 400: invalid request"},
+    {"stderr": "HTTP 404: invalid model"},
+    {"stderr": "HTTP 409: Reasoning chain belongs to a different provider realm"},
+    {"stderr": "billing quota exhausted"},
+    {"stderr": "credential invalid"},
+    {"stdout": "Provider said: HTTP 503: Service Unavailable upstream"},
+    {"stdout": "A report about an error:\n" + NATIVE_OVERLOADED_503},
+    {"stdout": "```text\n" + NATIVE_OVERLOADED_503 + "```"},
+    {"stdout": NATIVE_OVERLOADED_503 + "Task completed successfully."},
+    {"stdout": NATIVE_OVERLOADED_503.replace("503", "401")},
+    {"stdout": NATIVE_OVERLOADED_503.replace("503", "404")},
+    {"stdout": NATIVE_OVERLOADED_503.replace("503", "500")},
+    {"stdout": NATIVE_OVERLOADED_503.replace("1 attempts", "0 attempts")},
+    {"stdout": NATIVE_OVERLOADED_503.replace("reported it was overloaded", "didn't answer")},
+    {"stdout": NATIVE_OVERLOADED_503.replace("Service Unavailable upstream temporarily unavailable", "permanent failure")},
+])
+def test_transient_classifier_rejects_unsafe_native_503(overrides):
+    arguments: dict[str, Any] = dict(
+        exit_code=1, timed_out=False, stdout=NATIVE_OVERLOADED_503,
+        stderr="", parsed_result=None,
+    )
+    arguments.update(overrides)
+    assert core.classify_transient_failure(**arguments) is None
+
+
+@pytest.mark.parametrize("case, should_resume", [
+    ("native_clean", True),
+    ("legacy_tail", True),
+    ("native_prefixed", False),
+    ("native_other_stream_exclusion", False),
+])
+def test_native_503_recovery_caller_preserves_complete_output(tmp_path, monkeypatch, case, should_resume):
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setenv("PROFILE_DELEGATE_MAX_STDOUT_CHARS", "200000")
+    monkeypatch.setenv("PROFILE_DELEGATE_MAX_STDERR_CHARS", "100000")
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
+    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+    monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True})
+    monkeypatch.setattr(core, "_wait_for_transient_resume", lambda *a: "ready")
+    # Keep the real capture, caps, diagnostic tails and execution caller. Only
+    # replace the child command with a harmless local emitter (not Hermes).
+    real_run = core.run_capped_subprocess
+    calls, captures = [], []
+    prefix = "Actions completed; approval policy forbids repeating them.\n"
+    gap = "\n" * (core.DIAGNOSTIC_TAIL_CHARS + 100)
+
+    def emit_run(cmd, **kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            stdout, stderr = NATIVE_OVERLOADED_503, ""
+            if case == "native_prefixed":
+                stdout = prefix + gap + stdout
+            elif case == "native_other_stream_exclusion":
+                stderr = prefix + gap
+            elif case == "legacy_tail":
+                stdout = "Earlier diagnostic context\n" + gap + "API call failed after 3 retries: HTTP 503: Service Unavailable upstream\n"
+            stderr += "\nsession_id: stable_sid\n"
+            code = 1
+        else:
+            stdout = '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}'
+            stderr, code = "\nsession_id: stable_sid\n", 0
+        script = f"import sys; sys.stdout.write({stdout!r}); sys.stderr.write({stderr!r}); sys.exit({code})"
+        meta = real_run([sys.executable, "-c", script], **kwargs)
+        assert not meta["stdout_truncated"] and not meta["stderr_truncated"]
+        assert kwargs["stdout_path"].read_text() == stdout
+        assert kwargs["stderr_path"].read_text() == stderr
+        if len(calls) == 1 and case != "native_clean":
+            stream = "stderr" if case == "native_other_stream_exclusion" else "stdout"
+            assert meta[f"{stream}_chars"] > core.DIAGNOSTIC_TAIL_CHARS
+            assert "approval policy" not in meta[f"{stream}_diagnostic_tail"]
+        captures.append(meta)
+        return meta
+
+    monkeypatch.setattr(core, "run_capped_subprocess", emit_run)
+    result = core.delegate_profile("reviewer", "task", session_title="native provenance")
+    assert len(calls) == (2 if should_resume else 1)
+    assert result["recovery_history"][0]["transient_reason"] == ("provider_503" if should_resume else None)
+    if should_resume:
+        assert result["success"] is True
+        assert calls[1][calls[1].index("--resume") + 1] == "stable_sid"
+    else:
+        assert result["success"] is False
+        assert result["error_code"] == "nonzero_exit"
+    assert len(captures) == len(calls)
+
+
+@pytest.mark.parametrize("output_mode", ["json", "markdown", "text"])
+def test_transient_failure_resumes_same_session(tmp_path, monkeypatch, output_mode):
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
     monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
@@ -1476,23 +1596,32 @@ def test_transient_failure_resumes_same_session(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     monkeypatch.setattr(core.time, "sleep", lambda _s: None)
     calls = []
+    envelopes = []
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
+        prompt_path = Path(cmd[cmd.index("-q") + 1].removeprefix("@file:"))
+        envelopes.append(core.read_json_file(prompt_path.parent / "request.json")["native_approval"])
         if len(calls) == 1:
             stdout, code = "API call failed after 3 retries: Connection error.\nsession_id: stable_sid", 1
         else:
-            stdout, code = '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\nsession_id: stable_sid', 0
+            prompt = Path(cmd[cmd.index("-q") + 1].removeprefix("@file:")).read_text()
+            assert f"requested {output_mode} output format" in prompt
+            if output_mode != "json":
+                assert "PROFILE_DELEGATE_RESULT: ok|blocked|failed" in prompt
+                assert "JSON" not in prompt
+            stdout, code = ('{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}' if output_mode == "json" else 'Done\nPROFILE_DELEGATE_RESULT: ok') + '\nsession_id: stable_sid', 0
         core.text_safe_write(kwargs["stdout_path"], stdout)
         core.text_safe_write(kwargs["stderr_path"], "")
         return {"exit_code": code, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": len(stdout), "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000, "stdout_diagnostic_tail": stdout, "stderr_diagnostic_tail": ""}
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run)
     monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True})
-    result = core.delegate_profile("reviewer", "task", session_title="recover")
+    result = core.delegate_profile("reviewer", "task", session_title="recover", output_mode=output_mode)
     assert result["success"] is True
     assert len(calls) == 2
     assert calls[1][calls[1].index("--resume") + 1] == "stable_sid"
+    assert len(envelopes) == 2 and envelopes[0] == envelopes[1]
     assert [item["transient_reason"] for item in result["recovery_history"]] == ["connection_error", None]
 
 
@@ -2151,7 +2280,7 @@ def test_list_and_status_handlers_capture_origin_and_schema_contract(monkeypatch
     assert seen["status"][1]["caller_origin"] == ORIGIN_A
     list_props = plugin._list_schema()["parameters"]["properties"]
     assert list_props["scope"]["default"] == "current_session"
-    assert list_props["scope"]["enum"] == ["current_session", "current_lane", "all"]
+    assert list_props["scope"]["enum"] == ["current_session"]
     assert list_props["status"]["items"]["enum"] == [
         "running", "cancelling", "completed", "failed", "cancelled", "timed_out", "corrupt",
     ]

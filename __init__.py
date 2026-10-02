@@ -245,9 +245,9 @@ def _list_schema() -> Dict[str, Any]:
                 "limit": {"type": "integer", "description": "Maximum matching runs to list, 1-100.", "default": 20},
                 "scope": {
                     "type": "string",
-                    "enum": ["current_session", "current_lane", "all"],
+                    "enum": ["current_session"],
                     "default": "current_session",
-                    "description": "Origin scope. Defaults to the current caller session; use current_lane or all explicitly to widen.",
+                    "description": "Origin-authorized current caller session only. Lane/global inspection is operator CLI only; legacy widening requests are refused.",
                 },
                 "status": {
                     "type": "array",
@@ -273,40 +273,6 @@ def _policy_schema() -> Dict[str, Any]:
         "name": "profile_delegate_policy",
         "description": "Inspect the effective non-secret Profile Delegate policy before constructing a call.",
         "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
-    }
-
-
-def _prune_schema() -> Dict[str, Any]:
-    return {
-        "name": "profile_delegate_prune",
-        "description": "Prune old Profile Delegate run artifacts from the local runs directory. Dry-run by default.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "max_age_days": {"type": "integer", "description": "Delete runs older than this many days. Minimum 1.", "default": 14},
-                "dry_run": {"type": "boolean", "description": "If true, report matches without deleting.", "default": True},
-            },
-            "required": [],
-            "additionalProperties": False,
-        },
-    }
-
-
-def _reconcile_schema() -> Dict[str, Any]:
-    return {
-        "name": "profile_delegate_reconcile",
-        "description": (
-            "Conservatively reconcile one stale Profile Delegate run. Never signals processes "
-            "or deletes artifacts; live and unverifiable workers remain unchanged."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "Run task id to reconcile."},
-            },
-            "required": ["task_id"],
-            "additionalProperties": False,
-        },
     }
 
 
