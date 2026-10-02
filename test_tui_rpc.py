@@ -305,7 +305,7 @@ def test_session_flow_uses_create_resume_submit_and_native_controls():
     client = RecordingClient()
     new = tui_rpc.start_session(client, profile="reviewer", mode="new", session_id="", title="review", cwd="/tmp")
     assert new == {"ui_session_id": "ui-new", "child_session_id": "durable-new"}
-    resumed = tui_rpc.start_session(client, profile="reviewer", mode="resume", session_id="durable-old", title="review", cwd="/tmp")
+    resumed = tui_rpc.start_session(client, profile="reviewer", mode="resume", session_id="durable-old", title="ignored", cwd="/different-workspace", model="ignored", provider="ignored", reasoning_effort="ignored")
     assert resumed == {"ui_session_id": "ui-resumed", "child_session_id": "durable-old"}
     tui_rpc.submit(client, "ui-resumed", "bounded prompt")
     tui_rpc.steer(client, "ui-resumed", "change direction")
@@ -314,6 +314,22 @@ def test_session_flow_uses_create_resume_submit_and_native_controls():
         "session.create", "session.resume", "prompt.submit", "session.steer", "session.interrupt"
     ]
     assert client.calls[1][1]["profile"] == "reviewer"
+    assert client.calls[0][1]["cwd"] == "/tmp"
+    assert client.calls[1][1] == {
+        "profile": "reviewer", "session_id": "durable-old", "source": "profile-delegate", "cols": 100,
+    }
+    # The plugin's minimal venv deliberately lacks Hermes' pydantic dependency.
+    # Validate actual emitted params with the installed runtime's interpreter.
+    check = subprocess.run(
+        ["/opt/hermes/.venv/bin/python", "-c",
+         "import json,sys; from tui_gateway.contracts.sessions import SessionCreateParams,SessionResumeParams; "
+         "create,resume=json.load(sys.stdin); SessionCreateParams.model_validate(create); "
+         "SessionResumeParams.model_validate(resume); print('installed_contracts_ok')"],
+        input=json.dumps([client.calls[0][1], client.calls[1][1]]),
+        capture_output=True, text=True, timeout=30,
+    )
+    assert check.returncode == 0, check.stderr
+    assert check.stdout.strip() == "installed_contracts_ok"
     assert client.calls[-2][1] == {"session_id": "ui-resumed", "text": "change direction"}
 
 

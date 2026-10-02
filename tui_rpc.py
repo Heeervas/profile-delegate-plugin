@@ -333,7 +333,7 @@ def start_session(client: Any, *, profile: str, mode: str, session_id: str,
                   title: str, cwd: str, model: str = "", provider: str = "",
                   reasoning_effort: str = "", timeout: float = 60.0,
                   on_event: Optional[Callable[[dict], None]] = None) -> dict[str, str]:
-    common: dict[str, Any] = {"profile": profile, "cwd": cwd, "source": "profile-delegate", "cols": 100}
+    common: dict[str, Any] = {"profile": profile, "source": "profile-delegate", "cols": 100}
     if mode == "resume":
         response = client.call(
             "session.resume", {**common, "session_id": session_id}, timeout=timeout,
@@ -341,7 +341,9 @@ def start_session(client: Any, *, profile: str, mode: str, session_id: str,
         )
         durable = response.get("resumed", session_id)
     else:
-        params = {**common, "title": title, "close_on_disconnect": True}
+        # Resume restores the stored workspace; creation-only overrides must
+        # never be sent to session.resume (its installed contract forbids cwd).
+        params = {**common, "cwd": cwd, "title": title, "close_on_disconnect": True}
         if model:
             params["model"] = model
         if provider:
