@@ -1,5 +1,17 @@
 # Profile Delegate project state
 
+## Refactor prerequisite — blocked, no product edits
+
+Full authorized goal: `/opt/data/workspace/projects/profile-delegate-refactor/goal.md`. Verified unchanged HEAD `a57914222c96d6e2c3532967641bb10b8cb3002f`: installed prerequisite passes, **709 passed in 140.29s**, baseline production/test physical lines **7643/7948**. Historical missing-pytest claim below is superseded. Pre-edit installed smoke `scripts/accept_audit_runtime.py --authorize-isolated-runtime --cases completion` exits **2**: `frozen delegated authority detected; do not clear or bypass it`. Required integration/efficiency baseline and redesign remain pending; no authority bypass or product/test changes. Exact receipt/operator next probe: `/opt/data/workspace/projects/profile-delegate-refactor/execution-blocker.md`. Incoming docs/artifacts preserved; no activation/commit/review acceptance.
+
+## Current independent-audit implementation candidate
+
+F5 gate corrected locally: native pytest must use selected Hermes Python 3.14 with explicit locked dev tooling and hash-pinned YAML helper; interpreter/real-closure prerequisite is fail-closed. Latest own portable **228 passed / 444 deselected**, full native gate **blocked: installed runtime has no pytest**. Frozen tooling install refused by security intelligence guard; no alternative executor/ABI path or production mutation attempted. See latest receipt in `docs/audits/independent-current/IMPLEMENTATION.md`.
+
+Parent installed approval matrix completed: `.artifacts/task-approval-runtime-hdzu9r09/receipt.json` status ok/matrix_complete true/case_count64; parent enumerated 64 pass/0 nonpass. Real installed handlers/launch/guards/tools, deterministic scripted MODEL HTTP fixture. Fresh discovery already verified by parent. Neither matrix resume nor discovery proves forced CLI recovery or steer follow-up. New opt-in `scripts/accept_audit_runtime.py` prepares five bounded completion/steer/cancel/Markdown+text recovery cases; execution refused frozen delegated ancestry (exit2), so **unvalidated**, not acceptance. Parent owns authorized execution and focal review. Clean provisioning/Hermes-free portable runner also remain blocked. No commits/push/restart/activation; incoming diffs/artifacts preserved.
+
+Everything below is historical provenance, not evidence of acceptance of this candidate.
+
 ## Latest historical resume closure candidate
 
 Missing/unknown frozen-envelope resumes now refuse with actionable new-session approval_policy_error, never reading current grants/posture. Valid frozen resumes unchanged; narrowly affected continuity/transport fixtures seed frozen records. Final canonical gate **651 passed in 102.85s**, lock/sync/Ruff/compile/registration and staged/unstaged diff checks green. Real 64-case CLI/TUI matrix `.artifacts/task-approval-runtime-5zkkraa1` independently verified by Reviewer `pd_20261001_231809_b80ll9`; earlier runtime pending claims below are superseded. That review's HIGH historical refresh finding is locally fixed; bounded re-review still pending, no final acceptance/activation claim. See PER_TASK_REPAIR.md. No future audit/refactor or production changes.

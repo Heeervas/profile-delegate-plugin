@@ -35,7 +35,7 @@ Example uses:
 - Conservative local fallback for useful non-JSON child output; no automatic profile retry on parse failure.
 - Strict automatic recovery for recognized terminal transport failures: resume the same child session up to twice, wait 10 seconds between attempts, and share one total timeout budget. Never restart in a fresh session.
 - Private local run artifacts: request, prompt, status, stdout, stderr, result, and redacted/hash-only approval events.
-- Async background mode with durable notify-on-complete through Hermes' native async-delegation ledger and completion queue. Delivery is lane-routed and idempotent by task id across session reset and gateway restart.
+- Async background mode with native durable completion records and best-effort lane-routed notification. Task-id deduplication is not exactly-once or guaranteed post-restart delivery; records can be dropped by native replay age/retry budgets.
 - A read-only compatibility circuit breaker runs before every background task with `notify_on_complete=true`. It opens `state.db` with SQLite `mode=ro` plus `PRAGMA query_only`, validates required native API signatures and minimum `async_delegations` columns, and fails before creating a run or writing the database if Hermes has become incompatible.
 - Stable error codes for common failures.
 - Tool preview patch so users see the target profile and one-line task summary.
@@ -249,7 +249,7 @@ Notes:
 - `background=true` returns immediately with `mode: "async"`, `task_id`, and run artifact paths; the delegated run continues in the configured thread or detached worker using persisted request data.
 - Identical active requests from the same resolved caller origin are reused under a per-fingerprint file lock. `duplicate_policy:"new"` permits intentional duplicate work. Completed runs are not silently reused.
 - Both synchronous and detached runs execute the same bootstrap path. If legacy/core output contains `Timeout — denying command`, the run is finalized as structured `approval_timeout` failure instead of being reported as successful or left active.
-- `notify_on_complete=true` registers a native durable Hermes `async_delegation` delivery before launch, commits the completion from the detached worker, and routes it back by the originating lane `session_key`. Logical session expiry, `/new`, auto-reset, and gateway restart therefore do not discard the result. The task id is the delivery idempotency key. This requires a fresh gateway/CLI process after plugin upgrade so the new code is loaded.
+- `notify_on_complete=true` registers a native Hermes `async_delegation` record before launch and persists completion from the detached worker, routed by origin lane `session_key`. Durable records support inspection/recovery but notification remains best effort: expiry, retry budgets or runtime failure can prevent delivery across reset/restart. Task-id deduplication is not an exactly-once receipt.
 
 Default result requested from the target profile:
 
@@ -265,9 +265,10 @@ Default result requested from the target profile:
 
 The plugin normalizes non-list fields into arrays where appropriate and converts invalid statuses into a structured failure. `unknown` is a real non-success task result used for useful output that has no safe explicit verdict; it is never promoted to wrapper success.
 
-For explicit Markdown/text output, one unambiguous terminal line beginning with
-`PASS`/`OK`, `BLOCKED`, or `FAILED` may recover task status. Conflicting or
-negated verdicts remain `unknown`. Async notification status follows execution
+For new Markdown/text requests, finish with exactly one terminal line
+`PROFILE_DELEGATE_RESULT: ok|blocked|failed` outside code fences. Generic
+PASS/OK/BLOCKED/FAILED verdict recovery remains conservative legacy compatibility,
+not the new request contract. Conflicting or negated verdicts remain `unknown`. Async notification status follows execution
 lifecycle: a completed run is announced as completed even when its task result is
 blocked, failed, or unknown; the compact result preserves that distinction.
 
@@ -337,9 +338,10 @@ needed. Cancellation is idempotent and is committed only after cleanup.
 
 Returns status, result, stdout/stderr tails, artifact paths, `session_title`, normalized
 `origin`, worker metadata, notification status, and advisory `activity`. The
-`belongs_to_current_session` field is `true`, `false`, or `null` when caller/run
-provenance cannot be compared. Lookup remains global by task id; provenance is
-observability metadata, not access control.
+`belongs_to_current_session` is advisory provenance; model status access still
+requires authorized origin, home and namespace. Native directional compression
+continuity may extend exact identity only with verified evidence. Global inspection
+is available to the trusted operator CLI, not model-facing status.
 
 Example output fragment:
 
@@ -359,8 +361,9 @@ Example output fragment:
 
 List recent runs. The default scope is `current_session`; it uses UI session id,
 durable session id, then lane key in that precedence order and never falls back to
-a weaker key after a stronger mismatch. Use `current_lane` explicitly to include
-the same gateway lane across session rotations, or `all` for global inspection.
+a weaker key after a stronger mismatch. Model calls permit only `current_session`;
+legacy widening requests are refused. The trusted `operator-list` CLI permits
+`current_lane` or `all` for lane/global inspection.
 
 ```json
 {
@@ -384,18 +387,11 @@ runs are `unknown`. Inspection never rewrites canonical status. Older artifacts
 remain readable without migration, but missing provenance or PID metadata can
 produce `null` ownership and `unknown` activity.
 
-### `profile_delegate_prune`
+### Retention (internal only)
 
-Prune old run artifacts. Dry-run by default.
-
-```json
-{
-  "max_age_days": 14,
-  "dry_run": true
-}
-```
-
-Set `dry_run` to `false` to delete matching run directories.
+No prune tool or public prune CLI is registered. The internal operator retention
+helper and its terminal-only/lock/UID safety tests remain; this is not a public
+invocable interface or authorization for automated deletion.
 
 ## Run artifacts
 
@@ -418,7 +414,7 @@ Security posture:
 - files are written as `0600`
 - prompts, context, stdout, and stderr may contain private data
 - stdout/stderr are capped by default to prevent local memory/disk blowups
-- prune old runs periodically with `profile_delegate_prune`
+- retention has no registered public prune interface; do not automate deletion through model tools
 
 ## Security model
 
@@ -472,43 +468,36 @@ This is a local compatibility shim. If Hermes later adds an official preview API
 
 ## Development
 
-Run tests:
+Use the frozen lock, not an ad-hoc pip environment:
 
 ```bash
-python -m pip install pytest
-python -m pytest . -q
-python -m py_compile __init__.py core.py cli_smoke.py
+uv lock --check
+uv sync --frozen
+uv run --frozen python -m pytest -m 'not integration' -q -o 'addopts=' -W error
+PROFILE_DELEGATE_TEST_RUNTIME=/opt/hermes PYTHONPATH=/opt/hermes \
+  /opt/hermes/.venv/bin/python -m pytest -m integration -q -o 'addopts=' -W error
+uv run --frozen ruff check .
+uv run --frozen python scripts/validate_release.py
+uv run --frozen python scripts/scan_secrets.py  # add explicit intended-new source paths
 ```
 
-Optional local smoke:
+Both partitions are required. Runtime-coupled mixed modules are conservatively
+classified integration; no tests were removed. The installed job uses immutable
+Hermes `e8c97320ac8691d4de92af49f98459f9ef9ddb08` with its Python 3.14 runtime
+and frozen lock with its explicit `--group dev` test tooling. Native pytest is
+executed by that same `.venv/bin/python` (3.14), never the plugin 3.13 environment.
+The hash-pinned native PyYAML helper is in `scripts/native-test-tooling.txt`;
+`scripts/native_prerequisite.py` fails closed on interpreter/closure mismatch.
+The portable matrix
+remains 3.11/3.12/3.13. Missing runtime/imports fail integration rather than skip.
+Source availability was verified, but isolated provisioning and GitHub execution
+remain unvalidated locally; see `docs/audits/independent-current/IMPLEMENTATION.md`.
+Canonical compilation and behavioral gates: `.agents/validation.md`.
 
-```bash
-PROFILE_DELEGATE_ALLOWED_PROFILES=reviewer \
-python cli_smoke.py --profile reviewer --session-title smoke --task 'Return {"status":"ok","summary":"smoke","artifacts":[],"errors":[],"next_steps":[]}'
-```
+Operator runtime smokes require separate authorization; do not run the acceptance
+harness from frozen delegated authority or treat registration's FakeContext as
+installed discovery.
 
-Secret scan before publishing:
-
-```bash
-python - <<'PY'
-import os, re
-patterns=[r'github_pat_[A-Za-z0-9_]+', r'ghp_[A-Za-z0-9]{20,}', r'sk-[A-Za-z0-9]{20,}', r'AKIA[0-9A-Z]{16}', r'BEGIN (?:RSA|OPENSSH|EC|DSA)? ?PRIVATE KEY']
-hits=[]
-for dp, dns, fns in os.walk('.'):
-    dns[:] = [d for d in dns if d not in {'.git','__pycache__','.pytest_cache'}]
-    for fn in fns:
-        p=os.path.join(dp, fn)
-        try: data=open(p,'rb').read()
-        except Exception: continue
-        if b'\0' in data[:4096]: continue
-        text=data.decode('utf-8','ignore')
-        if any(re.search(x,text) for x in patterns): hits.append(p)
-print('secret_hits=', len(hits))
-for h in hits: print(h)
-PY
-```
-
-CI runs pytest and py_compile on Python 3.11, 3.12, and 3.13 with frozen, hash-locked dependencies and immutable action revisions, matching Hermes' supported interpreter window.
 
 ## Roadmap
 

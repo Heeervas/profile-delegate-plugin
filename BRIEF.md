@@ -24,7 +24,7 @@ Provide bounded, model-callable delegation between Hermes profiles without the c
 - New and explicit resume sessions with short titles.
 - Per-call execution overrides subject to effective policy.
 - Deterministic result parsing and conservative recovery.
-- TUI spectator, steering, cancellation, status/list/policy/prune surfaces.
+- TUI spectator, steering, cancellation, status/list/policy surfaces; operator reconciliation and internal retention helper (no registered public prune interface).
 - Private bounded local artifacts, duplicate protection, concurrency limits, and lifecycle-safe inspection.
 
 ## Out of scope

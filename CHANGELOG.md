@@ -6,6 +6,11 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- Installed audit gate now invokes Hermes Python 3.14 directly with frozen native dev tooling and a hash-pinned YAML helper; fail-closed interpreter/closure checks and regressions added. Portable support remains 3.11–3.13. Installed execution/provisioning evidence remains blocked, not implicitly accepted.
+- Independent-audit candidate: bounded incremental TUI frames/deadlines and fair stderr draining; CLI journal/spectator phases; same-session recovery preserves resolved format/marker.
+- Public scopes/notification/retention/prose docs aligned with authority. Portable/native CI partitions proposed; isolated provisioning/CI and final runtime review pending, not acceptance.
+- Detector assertion checks boolean; unused private prune/reconcile schema builders removed, denial handlers/internal retention safety retained.
+
 - Local native approval-source candidate adds `deny|profile|inherit|yolo`, per-target operator selection and frozen snapshots; preserves historical selectors, checks resumed ancestry and decouples hook consent. Activation remains separately authorized.
 
 - Deterministic child environment and request preflight now separate inherited, resolved, and observed capabilities; schema-local validation and provider/session mismatch diagnostics fail before unsafe execution or retry.
