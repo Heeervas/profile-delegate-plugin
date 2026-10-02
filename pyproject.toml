@@ -7,6 +7,7 @@ dependencies = []
 [tool.ruff]
 target-version = "py311"
 line-length = 140
+extend-exclude = [".artifacts"]
 
 [tool.ruff.lint]
 select = ["E", "F"]
@@ -16,5 +17,6 @@ ignore = ["E402", "E501"]
 dev = [
     "pytest==9.1.1",
     "pyyaml==6.0.3",
+    "ruamel-yaml==0.18.16",
     "ruff==0.15.10",
 ]
