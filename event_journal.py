@@ -33,7 +33,7 @@ KNOWN_PHASES = {
     "starting", "transport_starting", "gateway_starting", "transport_ready", "session_creating",
     "session_ready", "agent_initializing", "model_running",
     "tool_running", "message_complete", "interrupting", "completed", "failed", "cancelled",
-    "timed_out", "running",
+    "timed_out", "running", "child_running", "child_stopped", "cancellation_requested",
 }
 MESSAGE_STATUSES = {"complete", "error", "interrupted", "cancelled"}
 STATUS_KINDS = {

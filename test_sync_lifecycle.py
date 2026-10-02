@@ -93,6 +93,17 @@ def test_interrupt_or_cancel_reaps_complete_process_group(tmp_path, trigger, mon
     )
     interrupted = threading.Event()
     outcome: dict = {}
+    from spectator import inspect_run
+    real_merge = core.merge_run_status
+    inspected = []
+
+    def inspect_publication(directory, fields):
+        real_merge(directory, fields)
+        if fields.get('phase') == 'cancellation_requested':
+            inspect_run(directory)
+            inspected.append(fields['phase'])
+
+    monkeypatch.setattr(core, 'merge_run_status', inspect_publication)
 
     def worker() -> None:
         outcome.update(core.run_capped_subprocess(
@@ -119,6 +130,8 @@ def test_interrupt_or_cancel_reaps_complete_process_group(tmp_path, trigger, mon
     assert status["worker_alive"] is False
     assert status["interrupted"] is (trigger == "interrupt")
     assert status["cancellation_requested"] is (trigger == "cancel")
+    inspect_run(run_dir)
+    assert inspected == (['cancellation_requested'] if trigger == 'cancel' else [])
 
 
 def test_foreground_cancel_is_exact_origin_and_idempotent(tmp_path, monkeypatch):
