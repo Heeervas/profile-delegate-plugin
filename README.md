@@ -308,7 +308,7 @@ Final results carry three orthogonal fields:
 
 A whole-document JSON object is `valid`; when it omits an explicit task status its task outcome is `unknown`, not success. A uniquely selected fenced or prose-embedded JSON object is `recovered` and retains `raw_output_path`. Narrow recovery from one explicit Markdown/text verdict is also `recovered`; ambiguous JSON, negated verdicts, and multiple/conflicting textual statuses are `drifted` and cannot become successful. Wrapper `success:true` requires a completed execution, task `status:"ok"`, contract `valid` or `recovered`, and no parse error. `blocked`, `failed`, `unknown`, cancellation, timeout, transport failure, and parsing ambiguity always produce `success:false`.
 
-Child prompts are passed through `@file:<prompt.txt>` and results are parsed from captured stdout/stderr; this is not stdin transport.
+Child prompts use Hermes' native `--query-file <prompt.txt>` input; results are parsed from captured stdout/stderr. The model receives the task directly, without a tool call to read the prompt file.
 
 ### `profile_delegate_status`
 
@@ -421,7 +421,7 @@ Security posture:
 
 Enabling this plugin lets the caller profile invoke configured target profiles. The target profile runs with its own Hermes context and tool configuration, but it still has the same operating-system permissions as the Hermes process. Profiles are context/state boundaries, not security sandboxes.
 
-Treat delegated `task`, `context`, and `output_contract` as private. The plugin stores prompt and logs with restrictive local permissions and passes the prompt to Hermes via `@file:<prompt-path>` instead of putting the full prompt in process argv. Still, do not delegate secrets unless the target profile genuinely needs them.
+Treat delegated `task`, `context`, and `output_contract` as private. The plugin stores prompt and logs with restrictive local permissions and passes the prompt to Hermes via native `--query-file <prompt-path>` instead of putting the full prompt in process argv. Still, do not delegate secrets unless the target profile genuinely needs them.
 
 For shared or untrusted installations:
 

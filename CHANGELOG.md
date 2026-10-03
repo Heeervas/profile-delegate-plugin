@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- CLI tasks and recovery use native `--query-file`, delivering the full prompt without a model tool call or exposing task text in argv. Named-profile selection and frozen approval remain unchanged.
+
 - Detached CLI supervision keeps the wrapper identity separate from the child transport. Recovery and capacity track the wrapper; cancellation verifies and stops the child process group.
 
 - Native session selection refuses reasoning display commands before RPC; these commands persist display YAML even with session scope.

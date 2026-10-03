@@ -40,7 +40,7 @@ def build_child_command(
     prefix = bootstrap_command(request, run_dir)
     requested = request.get("effective_execution") or request.get("requested_execution") or {}
     hermes_cmd = [ensure_text(request.get("hermes_bin")), "-p", ensure_text(request.get("profile")),
-                  "chat", "-q", f"@file:{prompt_path or (run_dir / 'prompt.txt')}", "-Q"]
+                  "chat", "--query-file", str(prompt_path or (run_dir / "prompt.txt")), "-Q"]
     approval_mode = ensure_text(request.get("child_approval_mode")) or "deny"
     if approval_mode in {"approve_yolo", "yolo"}:
         hermes_cmd.append("--yolo")

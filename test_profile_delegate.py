@@ -807,8 +807,14 @@ def test_delegate_uses_prompt_file_not_raw_prompt_in_argv(tmp_path, monkeypatch)
     assert result["result"]["contract_status"] == "valid"
     separator = seen["cmd"].index("--")
     child = seen["cmd"][separator + 1:]
-    assert child[:5] == ["/usr/bin/hermes", "-p", "reviewer", "chat", "-q"]
-    assert child[5].startswith("@file:")
+    from hermes_cli._parser import build_top_level_parser
+    from hermes_cli.main import _read_query_file
+    parser = build_top_level_parser()[0]
+    native_args = parser.parse_args(child[3:])  # Native entry pre-parses -p PROFILE.
+    _read_query_file(native_args)
+    assert "PRIVATE TASK TEXT" in native_args.query
+    assert child[:5] == ["/usr/bin/hermes", "-p", "reviewer", "chat", "--query-file"]
+    assert native_args.query == Path(child[5]).read_text(encoding="utf-8")
     assert "-Q" in child
     assert "--pass-session-id" in child
     assert "--source" in child
@@ -1564,12 +1570,12 @@ def test_transient_failure_resumes_same_session(tmp_path, monkeypatch, output_mo
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        prompt_path = Path(cmd[cmd.index("-q") + 1].removeprefix("@file:"))
+        prompt_path = Path(cmd[cmd.index("--query-file") + 1])
         envelopes.append(core.read_json_file(prompt_path.parent / "request.json")["native_approval"])
         if len(calls) == 1:
             stdout, code = "API call failed after 3 retries: Connection error.\nsession_id: stable_sid", 1
         else:
-            prompt = Path(cmd[cmd.index("-q") + 1].removeprefix("@file:")).read_text()
+            prompt = Path(cmd[cmd.index("--query-file") + 1]).read_text()
             assert f"requested {output_mode} output format" in prompt
             if output_mode != "json":
                 assert "PROFILE_DELEGATE_RESULT: ok|blocked|failed" in prompt
@@ -1744,7 +1750,7 @@ def test_execution_override_allowlists_and_exact_argv(tmp_path, monkeypatch):
     assert cmd[cmd.index("--approval-mode") + 1] == "deny"
     separator = cmd.index("--")
     assert cmd[separator + 1:] == [
-        "/usr/bin/hermes", "-p", "reviewer", "chat", "-q", f"@file:{tmp_path / 'prompt.txt'}", "-Q",
+        "/usr/bin/hermes", "-p", "reviewer", "chat", "--query-file", str(tmp_path / "prompt.txt"), "-Q",
         "--model", "openai/gpt-5", "--provider", "openai", "--max-turns", "12",
         "--toolsets", "file,terminal", "--skills", "hermes-agent",
         "--pass-session-id", "--source", "profile-delegate",
