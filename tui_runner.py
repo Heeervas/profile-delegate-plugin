@@ -319,9 +319,8 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             core.merge_run_status(run_dir, {"phase": "transport_ready", "steerability": "available"})
             core.merge_run_status(run_dir, {"phase": "session_creating"})
             execution = request.get("effective_execution") or {}
-            agent_init_timeout = min(
-                _stage_timeout("PROFILE_DELEGATE_AGENT_INIT_TIMEOUT_SECONDS", 60.0),
-                max(0.1, deadline - time.monotonic()),
+            agent_init_deadline = min(
+                deadline, time.monotonic() + _stage_timeout("PROFILE_DELEGATE_AGENT_INIT_TIMEOUT_SECONDS", 60.0),
             )
             identities = tui_rpc.start_session(
                 client,
@@ -333,7 +332,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                 model=core.ensure_text(execution.get("model")),
                 provider=core.ensure_text(execution.get("provider")),
                 reasoning_effort=core.ensure_text(execution.get("reasoning_effort")),
-                timeout=agent_init_timeout,
+                timeout=max(0.0, agent_init_deadline - time.monotonic()),
                 on_event=persist_event,
             )
             ui_session_id = identities["ui_session_id"]
@@ -385,7 +384,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
             })
             prompt = (run_dir / "prompt.txt").read_text(encoding="utf-8")
             tui_rpc.submit(
-                client, ui_session_id, prompt, timeout=agent_init_timeout,
+                client, ui_session_id, prompt, timeout=max(0.0, agent_init_deadline - time.monotonic()),
                 on_event=persist_event,
             )
             core.merge_run_status(run_dir, {"phase": "model_running"})

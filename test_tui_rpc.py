@@ -11,6 +11,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -209,6 +210,9 @@ def test_rpc_timeout_tracks_id_and_late_response_is_consumed_once():
 
     proc = FakeProcess([])
     client = TimeoutOnceClient(proc)
+    with pytest.raises(tui_rpc.TuiTransportError, match="timed out before dispatch"):
+        client.call("session.steer", {"session_id": "ui-1", "text": "x"}, timeout=0)
+    assert proc.stdin.getvalue() == b""
     with pytest.raises(tui_rpc.TuiTransportError, match="timed out"):
         client.call("session.steer", {"session_id": "ui-1", "text": "x"}, timeout=0.01)
     client.force_timeout = False
@@ -334,13 +338,17 @@ def test_runner_exposes_separate_bounded_startup_and_agent_init_timeouts(monkeyp
     assert tui_runner._stage_timeout("PROFILE_DELEGATE_AGENT_INIT_TIMEOUT_SECONDS", 60) == 600.0
 
 
-def test_session_flow_uses_create_resume_submit_and_native_controls():
+def test_session_flow_uses_create_resume_submit_and_native_controls(monkeypatch):
+    ticks = iter([0.0, 0.25, 1.0, 1.25])
+    monkeypatch.setattr(tui_rpc, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
     class RecordingClient:
         def __init__(self):
             self.calls = []
+            self.timeouts = []
 
         def call(self, method, params, **kwargs):
             self.calls.append((method, params))
+            self.timeouts.append(kwargs["timeout"])
             if method == "session.create":
                 return {"session_id": "ui-new", "session_key": "durable-new"}
             if method == "session.resume":
@@ -352,6 +360,7 @@ def test_session_flow_uses_create_resume_submit_and_native_controls():
     assert new == {"ui_session_id": "ui-new", "child_session_id": "durable-new"}
     resumed = tui_rpc.start_session(client, profile="reviewer", mode="resume", session_id="durable-old", title="ignored", cwd="/different-workspace")
     assert resumed == {"ui_session_id": "ui-resumed", "child_session_id": "durable-old"}
+    assert client.timeouts[:2] == [59.75, 59.75]
     tui_rpc.submit(client, "ui-resumed", "bounded prompt")
     tui_rpc.steer(client, "ui-resumed", "change direction")
     tui_rpc.interrupt(client, "ui-resumed")
@@ -573,9 +582,12 @@ def test_runner_poll_flushes_before_propagating_transport_error():
 
 def test_runner_publishes_ready_status_transitions_after_success(tmp_path, monkeypatch):
     run = runner_run(tmp_path, "pd_20260721_120001_bbbbbb", prompt="prompt", fields={
-        "requested_session_id": "", "session_title": "test", "effective_execution": {}, "effective_capabilities": {},
+        "requested_session_id": "", "session_title": "test", "timeout_seconds": 5,
+        "effective_execution": {}, "effective_capabilities": {},
     })
-    transitions = []
+    clock = [0.0]
+    monkeypatch.setattr(tui_runner, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    transitions, budgets = [], []
     real_merge = tui_runner.core.merge_run_status
 
     def capture_merge(run_dir, updates, **kwargs):
@@ -601,13 +613,16 @@ def test_runner_publishes_ready_status_transitions_after_success(tmp_path, monke
 
 
     monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", lambda **kwargs: CompleteClient(complete, exit_code=0))
-    monkeypatch.setattr(
-        tui_runner.tui_rpc, "start_session",
-        lambda *args, **kwargs: {"ui_session_id": "ui-1", "child_session_id": "child-1"},
-    )
-    monkeypatch.setattr(tui_runner.tui_rpc, "submit", lambda *args, **kwargs: {})
+    def start_session(*args, **kwargs):
+        budgets.append(kwargs["timeout"])
+        clock[0] += 3.0
+        return {"ui_session_id": "ui-1", "child_session_id": "child-1"}
+
+    monkeypatch.setattr(tui_runner.tui_rpc, "start_session", start_session)
+    monkeypatch.setattr(tui_runner.tui_rpc, "submit", lambda *args, **kwargs: budgets.append(kwargs["timeout"]))
     result = tui_runner.execute(run)
     assert result["success"] is True
+    assert budgets == [5.0, 2.0]
     assert transitions.index("transport_ready") < transitions.index("session_creating")
     assert transitions.index("session_ready") < transitions.index("agent_initializing")
     status = json.loads((run / "status.json").read_text(encoding="utf-8"))

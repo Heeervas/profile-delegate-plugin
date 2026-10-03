@@ -236,6 +236,8 @@ class TuiRpcClient:
              stage: str = "rpc_waiting") -> dict[str, Any]:
         if not method or not isinstance(params, dict):
             raise ValueError("method and object params are required")
+        if timeout <= 0:
+            raise TuiTransportError(f"{stage} RPC {method} timed out before dispatch")
         request_id = self._next_id
         self._next_id += 1
         self._frame_context = f"stage={stage}, request_id={request_id}, method={method}"
@@ -384,7 +386,7 @@ def start_session(client: Any, *, profile: str, mode: str, session_id: str,
         if reasoning_effort:
             params["reasoning_effort"] = reasoning_effort
         response = client.call(
-            "session.create", params, timeout=timeout, on_event=on_event,
+            "session.create", params, timeout=max(0.0, deadline - time.monotonic()), on_event=on_event,
             stage="session_creating",
         )
         durable = response.get("stored_session_id", response.get("session_key", ""))

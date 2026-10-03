@@ -1,6 +1,6 @@
 # Native simplification — final local candidate evidence
 
-Production candidate: native query-file batch atop `e6010d0`, following CLI owner correction `1c4fe3a`. The latter correction retains the supervisor identity and uses existing transport fields for the CLI child; same-caller cancellation still verifies the child group. Its regression fails on `2aeeb8f` and focal independent review approves the patch subject to final gates. Historical nonterminal artifacts are not repaired retroactively. Functional release remains v1.10.0; this is an unactivated local candidate. The Codex goal remains active because the full acceptance criteria below are pending.
+Production candidate: TUI deadline batch atop `e160a35`, following native query-file input and CLI owner corrections. The latter correction retains the supervisor identity and uses existing transport fields for the CLI child; same-caller cancellation still verifies the child group. Its regression fails on `2aeeb8f` and focal independent review approves the patch subject to final gates. Historical nonterminal artifacts are not repaired retroactively. Functional release remains v1.10.0; this is an unactivated local candidate. The Codex goal remains active because the full acceptance criteria below are pending.
 
 ## Exact scope and measurements
 
@@ -8,18 +8,18 @@ All tracked Python files are counted: root production including `cli_smoke.py`, 
 
 | Scope | Historical `a579142` physical / substantive | Initial `5ddc731` physical / substantive | Candidate physical / substantive |
 | --- | ---: | ---: | ---: |
-| Production (13 files) | 7643 / 6787 | 7658 / 6799 | 7251 / 6381 |
-| Tests (27 files) | 7948 / 6759 | 8006 / 6808 | 8149 / 6935 |
+| Production (13 files) | 7643 / 6787 | 7658 / 6799 | 7252 / 6382 |
+| Tests (27 files) | 7948 / 6759 | 8006 / 6808 | 8164 / 6949 |
 | Support (historical 5; initial/current 6 files) | 698 / 606 | 969 / 839 | 969 / 839 |
 | Collected cases | 709 | 712 | 719 |
 
-All tracked Python totals: historical 16289, incoming 16633, candidate 16369 physical lines. The candidate is -264 versus incoming and +80 versus historical; production-only reduction is not whole-tree historical reduction.
+All tracked Python totals: historical 16289, incoming 16633, candidate 16385 physical lines. The candidate is -248 versus incoming and +96 versus historical; production-only reduction is not whole-tree historical reduction.
 
-Production <=7253 is met: -392 physical and -406 substantive lines versus historical. Tests <=6908 and cases <=654 remain pending: gaps 1241 lines and 65 cases. Support growth predates this refactor and is not excluded. Fifteen redundant cases were retired; twenty-two meaningful selection/delivery/safety regressions were added. Net case count versus initial is +7. [Coverage retirement rationale](2026-10-03-test-retirement.md) identifies retired families and surviving assertions. Independent review found no evidence that another 55 distinct safety cases can be deleted safely. Remaining authority/compression/malformed artifact/native503/publication race cases stay covered; The reviewed fixture slice removes 107 net test lines counting its local helpers. It preserves 177 test definitions/decorators and 680 assertions across the three edited modules. The independent review found about 95–135 lines of safe setup consolidation, not evidence supporting the full remaining deficit.
+Production <=7253 is met: -391 physical and -405 substantive lines versus historical. Tests <=6908 and cases <=654 remain pending: gaps 1256 lines and 65 cases. Support growth predates this refactor and is not excluded. Fifteen redundant cases were retired; twenty-two meaningful selection/delivery/safety regressions were added. Net case count versus initial is +7. [Coverage retirement rationale](2026-10-03-test-retirement.md) identifies retired families and surviving assertions. Independent review found no evidence that another 55 distinct safety cases can be deleted safely. Remaining authority/compression/malformed artifact/native503/publication race cases stay covered; The reviewed fixture slice removes 107 net test lines counting its local helpers. It preserves 177 test definitions/decorators and 680 assertions across the three edited modules. The independent review found about 95–135 lines of safe setup consolidation, not evidence supporting the full remaining deficit.
 
 The native worker ownership defect was reproduced against exact `3fed48e`: dispatch owner was the launcher PID; native abandoned recovery terminalized a live detached task. Both process/ledger regressions fail there and pass on this candidate. The actual native SessionDB and detached processes run in a disposable caller home, provider workload is a fixture, and replay goes only to a local test queue. Silent execution creates no native notification row. Reviewer findings on conflict finalization and thread-local home propagation have regression coverage and focal approval; full Discord acceptance remains pending; real provider subcases below now pass.
 
-Private reproducible receipts: `.artifacts/refactor-20261003/final-line-metrics-query-file.json` (latest counts), `final-line-metrics-cli-owner.json` (prior owner correction), `final-line-metrics.json` (prior fixture revision) and `import-benchmark-current.json`. Historical counts use `git ls-tree -r --name-only REV` and `git show REV:PATH`; the working candidate uses the same tracked scope from `git ls-files`, reading files before commit. Both apply the three categories above and count full-line comments with `tokenize.generate_tokens`.
+Private reproducible receipts: `.artifacts/refactor-20261003/final-line-metrics-tui-budget.json` (latest counts), `final-line-metrics-query-file.json` (prior input fix), `final-line-metrics-cli-owner.json` (prior owner correction), `final-line-metrics.json` (prior fixture revision) and `import-benchmark-current.json`. Historical counts use `git ls-tree -r --name-only REV` and `git show REV:PATH`; the working candidate uses the same tracked scope from `git ls-files`, reading files before commit. Both apply the three categories above and count full-line comments with `tokenize.generate_tokens`.
 
 Controlled fresh-process import measurement at production revision `482b2d7` (before the subsequent CLI ownership correction): Hermes Python 3.14.7, seven samples after one warmup, alternating initial/candidate order, identical interpreter and installed closure. All root production modules are precompiled on both sides; imported source origins are verified. Median import of core/TUI/plugin modules: **11.38 -> 12.53 ms**; median maximum RSS: **56960 -> 56960 KiB**. The prior receipt did not establish matching bytecode-cache policy and is superseded for performance claims. No provider startup, detached acceptance, Discord delivery or memory under a real workload is inferred from this import-only comparison; it establishes no workload speedup.
 
@@ -27,8 +27,8 @@ Controlled fresh-process import measurement at production revision `482b2d7` (be
 
 From `.agents/validation.md`, final candidate:
 
-- Native full suite, installed Python 3.14.7, `-W error`: **719 passed in 123.74 s**. Integration prerequisites execute against the real installed native closure; no skipped missing-runtime partition.
-- Portable partition, frozen plugin Python 3.13: **238 passed / 481 deselected in 7.54 s**. This is interpreter/partition coverage in the existing installed container, not a newly provisioned Hermes-free environment.
+- Native full suite, installed Python 3.14.7, `-W error`: **719 passed in 127.28 s**. Integration prerequisites execute against the real installed native closure; no skipped missing-runtime partition.
+- Portable partition, frozen plugin Python 3.13: **238 passed / 481 deselected in 8.15 s**. This is interpreter/partition coverage in the existing installed container, not a newly provisioned Hermes-free environment.
 - `uv lock --check`, `uv sync --frozen`: pass; lock unchanged.
 - Whole-tree frozen Ruff, canonical 21-file compilation, six-tool/CLI registration and validation-error handler smoke: pass.
 - Secret scan: `secret_hits=0`; staged/unstaged diff whitespace checks: pass.
@@ -64,15 +64,25 @@ The controlled comparison uses exact precompiled production snapshots, installed
 | --- | ---: | ---: | ---: | --- |
 | Initial `5ddc731` | 2 | 28.61 s | 2 | Read own prompt |
 | Prior candidate `1c4fe3a` | 2 | 27.78 s | 2 | Read own prompt |
-| Native query-file working source | 2 | 22.86 s | 1 | None |
+| Native query-file `e160a35` | 2 | 22.86 s | 1 | None |
 
-The four earlier runs alternate baseline/candidate/candidate/baseline; fixed runs follow them. Two samples per version and variable provider timing support no statistical latency claim. The eliminated tool/API roundtrip is directly observed. Parent and maximum-child RSS show no established reduction; maximum-child RSS is not aggregate concurrent memory. Receipt hashes match every working production module.
+The four earlier runs alternate baseline/candidate/candidate/baseline; fixed runs follow them. Two samples per version and variable provider timing support no statistical latency claim. The eliminated tool/API roundtrip is directly observed. Parent and maximum-child RSS show no established reduction; maximum-child RSS is not aggregate concurrent memory. Receipt hashes match every production module at `e160a35`, the measured revision; this comparison predates the TUI deadline correction.
 
 A separate first-call detached acceptance measurement uses an explicit harmless literal task, with no private request/prompt copied. Acceptance is 945.79 ms baseline / 933.65 ms fixed; one sample each establishes no speedup. The fixed job completes ok/valid with one API call, no tools, notification false, paired supervisor identity and both processes gone. The baseline accepts dispatch but its child exits -7 before a result; cause is unproven and it is excluded from completion/performance equivalence. Configuration hashes remain unchanged since the controlled comparison. No workload was restarted after an observation timeout.
 
 Automatic approval review rejected an earlier proposed measurement because it copied the payload from a private `request.json`; that command did not run. The explicit harmless-literal alternative passed review. Earlier observer mistakes (expecting a response PID, omitting the required session title) provide no performance evidence and are excluded; they prompted no product API or harness changes.
 
 Private receipts: `.artifacts/refactor-20261003/cli-workload-comparison-z4yvy224/{receipt,query-file-receipt,query-file-async-acceptance-valid}.json`. The fixed receipt records source SHA256 per production file, exact child identities, native API-call count and route-field equality. Metrics are in `final-line-metrics-query-file.json`. Real failure/recovery equivalence and gateway/Discord acceptance remain pending.
+
+## Shared TUI initialization budget
+
+Creation previously received the original timeout after preparation, and prompt submission received the full initialization allowance again after session preparation. The existing call-flow/readiness tests reproduce the extra budget (creation 60 instead of 59.75 seconds; submission 5 instead of the remaining 2). Both stages now consume one deadline. A third existing test reproduces zero-budget dispatch: the client previously wrote the RPC before failing; it now refuses before allocating a request ID or writing. Subsequent positive-timeout/late-response correlation assertions remain intact. No test case was added. Focal independent review approves the final three-file change. Positive-timeout write/backpressure behavior is unchanged and is not certified by this slice.
+
+Real provider TUI new and resume both complete ok/valid, with inherited selection, frozen deny, notification false, no tool calls and both owned processes gone. Resume retains the existing child identity. Terminal artifacts were initially observed just before worker exit; a separate liveness observation confirms cleanup, without restarting either task. Global and target YAML hashes agree before/after. Source hashes and observations: `.artifacts/refactor-20261003/real-tui-budget-r92o8lcc/receipt.json`.
+
+A separate real native-parent probe on `e160a35` verifies public dispatch/status and delivery to that exact local CLI origin: native ledger completed/delivered, one completion user row, worker/transport gone, unchanged YAML. The native ledger parent_session_id is null; origin_session matches the real caller. Its selected parent policy requires notification true. Only the own child's sanitized journal was read. Steering is not acceptance: no command was sent, because the probe demanded initialization kinds absent from that journal before the child completed. The earlier direct control without a session origin was correctly refused. Receipt: `public-real-steer-1befi1l1/receipt.json`. No further journal polling or simulated-provider mechanism was added to the product.
+
+Live effort override preflight refuses under the current caller policy (`execution_overrides_not_allowed`); no task/configuration was changed to force positive selection. Native writer-trap tests still validate authorized session-scoped selection. Gateway generation remains unchanged; Discord and applied steering acceptance stay pending.
 
 ## No-YAML boundary
 

@@ -291,6 +291,8 @@ reused-PID, or unverifiable workers are not finalized. Conflicting, malformed,
 oversized, symlinked, or otherwise unsafe evidence fails closed. An existing
 terminal status remains immutable; repeated reconciliation is read-only.
 
+Interactive session preparation and prompt submission share one initialization deadline. RPCs with an exhausted budget fail before dispatch.
+
 Terminal worker, startup, and failure publishers share the verified lock
 publication decision: a valid terminal result is written before terminal status,
 and later failure paths cannot overwrite it. Paired operator/model status reads use
