@@ -354,14 +354,15 @@ def start_session(client: Any, *, profile: str, mode: str, session_id: str,
                   on_event: Optional[Callable[[dict], None]] = None) -> dict[str, str]:
     deadline = time.monotonic() + timeout
     model_value = ""
-    if mode == "resume" and (model or provider):
+    select_after_start = mode == "resume" or bool(provider and not model)
+    if select_after_start and (model or provider):
         from hermes_cli.model_switch import parse_model_switch_args
         model_value = " ".join(part for part in (model, f"--provider {provider}" if provider else "", "--session") if part)
         parsed = parse_model_switch_args(model_value)
         if (parsed.errors or parsed.model_input != model or parsed.explicit_provider != provider
                 or parsed.scope != "session" or parsed.is_global or parsed.is_once or parsed.force_refresh
                 or parsed.reasoning_effort):
-            raise TuiProtocolError("resume model/provider cannot contain native command flags")
+            raise TuiProtocolError("model/provider cannot contain native command flags")
     common: dict[str, Any] = {"profile": profile, "source": "profile-delegate", "cols": 100}
     if mode == "resume":
         response = client.call(
@@ -391,11 +392,11 @@ def start_session(client: Any, *, profile: str, mode: str, session_id: str,
             or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", ui_id)
             or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", durable)):
         raise TuiProtocolError("session response omitted session identity")
-    if mode == "resume":
+    if select_after_start:
         if provider and not model:
             model = (response.get("info") or {}).get("model", "")
             if not isinstance(model, str) or not model or parse_model_switch_args(model).model_input != model:
-                raise TuiProtocolError("resume provider override requires the stored model")
+                raise TuiProtocolError("provider override requires the session model")
             model_value = f"{model} --provider {provider} --session"
         selections = ([("model", model_value)] if model_value else [])
         if reasoning_effort:
@@ -408,7 +409,7 @@ def start_session(client: Any, *, profile: str, mode: str, session_id: str,
             if reply.get("confirm_required"):
                 raise TuiRemoteError("selection_confirmation_required", reply.get("confirm_message") or "Selection requires operator confirmation")
             if reply.get("scope") == "global":
-                raise TuiProtocolError("resume selection returned unexpected global scope")
+                raise TuiProtocolError("selection returned unexpected global scope")
             # Compute-host sessions defer model switching until the next prompt.
             # Acceptance is not observed execution; no actual-model claim is made here.
     return {"ui_session_id": ui_id, "child_session_id": durable}

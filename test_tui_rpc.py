@@ -333,11 +333,12 @@ def test_session_flow_uses_create_resume_submit_and_native_controls():
     assert client.calls[-2][1] == {"session_id": "ui-resumed", "text": "change direction"}
 
 
-@pytest.mark.parametrize("selection", [
-    {"model": "codex/example", "provider": "openai-api", "reasoning_effort": "high"},
-    {"model": "codex/example"}, {"provider": "openai-api"}, {"reasoning_effort": "none"},
+@pytest.mark.parametrize("mode, selection", [
+    ("resume", {"model": "codex/example", "provider": "openai-api", "reasoning_effort": "high"}),
+    ("resume", {"model": "codex/example"}), ("resume", {"provider": "openai-api"}),
+    ("resume", {"reasoning_effort": "none"}), ("new", {"provider": "openai-api", "reasoning_effort": "high"}),
 ])
-def test_resume_applies_authorized_selection_without_config_writes(monkeypatch, selection):
+def test_session_applies_authorized_selection_without_config_writes(monkeypatch, mode, selection):
     from contextlib import nullcontext
     import types
     from hermes_cli import model_switch
@@ -379,12 +380,13 @@ def test_resume_applies_authorized_selection_without_config_writes(monkeypatch, 
     class Client:
         def call(self, method, params, **kwargs):
             calls.append((method, params))
-            if method == "session.resume":
-                return {"session_id": "ui-resumed", "resumed": "durable-child", "info": {"model": "codex/stored"}}
+            if method in {"session.resume", "session.create"}:
+                return {"session_id": "ui-resumed", "resumed": "durable-child", "session_key": "durable-child",
+                        "info": {"model": "codex/stored"}}
             response = handler(1, params)
             assert "error" not in response, response
             return response["result"]
-    identity = tui_rpc.start_session(Client(), profile="builder", mode="resume", session_id="durable-parent",
+    identity = tui_rpc.start_session(Client(), profile="builder", mode=mode, session_id="durable-parent",
                                      title="ignored", cwd="/ignored", **selection)
     assert identity["child_session_id"] == "durable-child"
     for method, params in calls[1:]:
