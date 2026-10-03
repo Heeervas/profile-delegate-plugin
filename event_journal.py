@@ -15,41 +15,29 @@ try:
 except Exception:  # pragma: no cover - fail closed on unsupported platforms
     fcntl = None  # type: ignore[assignment]
 
-try:
-    from .event_schema import (
-        EVENT_JOURNAL_MAX_BYTES, EVENT_MESSAGE_MAX_CHARS, EVENT_METADATA_MAX_CHARS,
-        EVENT_RECORD_MAX_BYTES, EVENT_SCHEMA_VERSION, EVENT_TEXT_FRAGMENT_MAX_CHARS,
-    )
-except ImportError:
-    from event_schema import (  # type: ignore[no-redef]
-        EVENT_JOURNAL_MAX_BYTES, EVENT_MESSAGE_MAX_CHARS, EVENT_METADATA_MAX_CHARS,
-        EVENT_RECORD_MAX_BYTES, EVENT_SCHEMA_VERSION, EVENT_TEXT_FRAGMENT_MAX_CHARS,
-    )
+if __package__:
+    from . import contracts
+else:
+    import contracts
 
-SCHEMA_VERSION = EVENT_SCHEMA_VERSION
-TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
-LIFECYCLE_STATUSES = TERMINAL_STATUSES | {"running", "cancelling"}
-KNOWN_PHASES = {
-    "starting", "transport_starting", "gateway_starting", "transport_ready", "session_creating",
-    "session_ready", "agent_initializing", "model_running",
-    "tool_running", "message_complete", "interrupting", "completed", "failed", "cancelled",
-    "timed_out", "running", "child_running", "child_stopped", "cancellation_requested",
-}
-MESSAGE_STATUSES = {"complete", "error", "interrupted", "cancelled"}
-STATUS_KINDS = {
-    "compacting", "retrying", "waiting", "streaming", "queued", "running", "idle",
-    "rate_limited", "context_compacted",
-}
+EVENT_JOURNAL_MAX_BYTES = contracts.EVENT_JOURNAL_MAX_BYTES
+EVENT_MESSAGE_MAX_CHARS = contracts.EVENT_MESSAGE_MAX_CHARS
+EVENT_METADATA_MAX_CHARS = contracts.EVENT_METADATA_MAX_CHARS
+EVENT_RECORD_MAX_BYTES = contracts.EVENT_RECORD_MAX_BYTES
+EVENT_SCHEMA_VERSION = contracts.EVENT_SCHEMA_VERSION
+EVENT_TEXT_FRAGMENT_MAX_CHARS = contracts.EVENT_TEXT_FRAGMENT_MAX_CHARS
+KNOWN_PHASES = contracts.KNOWN_PHASES
+MESSAGE_STATUSES = contracts.MESSAGE_STATUSES
+STATUS_KINDS = contracts.STATUS_KINDS
+COMMON_KEYS = contracts.COMMON_KEYS
+TERMINAL_STATUSES = contracts.TERMINAL_RUN_STATUSES
+LIFECYCLE_STATUSES = contracts.LIFECYCLE_STATUSES
+SCHEMA_VERSION = contracts.EVENT_SCHEMA_VERSION
+sanitize_text = contracts.sanitize_text
+
 USAGE_KEYS = {"input", "output", "reasoning", "total", "calls"}
-COMMON_KEYS = {
-    "schema_version", "task_id", "seq", "at", "type", "phase", "payload", "redacted",
-    "dropped_fields",
-}
 
 # ECMA-48 CSI and OSC, including unterminated OSC to end of fragment.
-_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)")
-_CSI_RE = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]")
-_ESC_RE = re.compile(r"\x1b(?:[@-_]|.)")
 _SECRET_RE = re.compile(
     r"(?i)\b(token|api[_-]?key|secret|password|authorization)\s*[:=]\s*([^\s,;]+)"
 )
@@ -61,19 +49,6 @@ def _now() -> str:
 
 def _bounded(value: Any, limit: int = 128) -> str:
     return str(value or "")[:limit]
-
-
-def sanitize_text(value: Any, limit: int) -> str:
-    """Neutralize terminal controls and invalid Unicode, preserving newline/tab."""
-    text = str(value or "").encode("utf-8", "replace").decode("utf-8", "replace")
-    text = _OSC_RE.sub("", text)
-    text = _CSI_RE.sub("", text)
-    text = _ESC_RE.sub("", text)
-    text = "".join(
-        char for char in text
-        if char in "\n\t" or (ord(char) >= 0x20 and not 0x7F <= ord(char) <= 0x9F)
-    )
-    return text[:limit]
 
 
 def _redact(text: str) -> tuple[str, bool]:

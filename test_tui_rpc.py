@@ -4,7 +4,6 @@ from __future__ import annotations
 import io
 import json
 import os
-import queue
 import signal
 import subprocess
 import sys
@@ -466,14 +465,6 @@ def test_oversized_frame_diagnostic_is_bounded_safe_and_actionable(exact):
     assert "stage=session_creating, request_id=1, method=session.resume" in diagnostic
     assert "frame_type=unparsed" in diagnostic and "omit_messages=true" in diagnostic
     assert secret not in diagnostic
-
-
-def test_wait_for_completion_consumes_events_until_matching_terminal_message():
-    events = queue.Queue()
-    events.put({"jsonrpc": "2.0", "method": "event", "params": {"type": "message.delta", "session_id": "other", "payload": {"text": "wrong"}}})
-    events.put({"jsonrpc": "2.0", "method": "event", "params": {"type": "message.complete", "session_id": "ui-1", "payload": {"text": "final", "status": "complete"}}})
-    result = tui_rpc.wait_for_completion(events, "ui-1", timeout=1)
-    assert result == {"text": "final", "status": "complete"}
 
 
 def test_close_reaps_process_and_is_idempotent():

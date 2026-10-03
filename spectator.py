@@ -15,36 +15,31 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, TextIO
 
-try:
-    from .event_schema import (
-        EVENT_IDENTIFIER_MAX_CHARS, EVENT_JOURNAL_MAX_BYTES, EVENT_MESSAGE_MAX_CHARS,
-        EVENT_METADATA_MAX_CHARS, EVENT_SCHEMA_VERSION, EVENT_TIMESTAMP_MAX_CHARS,
-    )
-except ImportError:
-    from event_schema import (  # type: ignore[no-redef]
-        EVENT_IDENTIFIER_MAX_CHARS, EVENT_JOURNAL_MAX_BYTES, EVENT_MESSAGE_MAX_CHARS,
-        EVENT_METADATA_MAX_CHARS, EVENT_SCHEMA_VERSION, EVENT_TIMESTAMP_MAX_CHARS,
-    )
+if __package__:
+    from . import contracts
+else:
+    import contracts
+
+EVENT_IDENTIFIER_MAX_CHARS = contracts.EVENT_IDENTIFIER_MAX_CHARS
+EVENT_JOURNAL_MAX_BYTES = contracts.EVENT_JOURNAL_MAX_BYTES
+EVENT_MESSAGE_MAX_CHARS = contracts.EVENT_MESSAGE_MAX_CHARS
+EVENT_METADATA_MAX_CHARS = contracts.EVENT_METADATA_MAX_CHARS
+EVENT_SCHEMA_VERSION = contracts.EVENT_SCHEMA_VERSION
+EVENT_TIMESTAMP_MAX_CHARS = contracts.EVENT_TIMESTAMP_MAX_CHARS
+VALID_PHASES = contracts.KNOWN_PHASES
+MESSAGE_STATUSES = contracts.MESSAGE_STATUSES
+STATUS_KINDS = contracts.STATUS_KINDS
+COMMON_EVENT_KEYS = contracts.COMMON_KEYS
+TERMINAL = contracts.TERMINAL_RUN_STATUSES
+VALID_STATUSES = contracts.LIFECYCLE_STATUSES
 
 TASK_ID_RE = re.compile(r"pd_\d{8}_\d{6}_[a-z0-9]{6,12}\Z")
-TERMINAL = {"completed", "failed", "cancelled", "timed_out"}
 FAILED = {"failed", "cancelled", "timed_out"}
 READABLE_ARTIFACTS = {"status.json", "events.jsonl", "result.json", "request.json"}
 MAX_JSON_BYTES = 262_144
 MAX_INSPECT_EVENTS = 100
 MAX_TEXT_CHARS = EVENT_MESSAGE_MAX_CHARS
 TTY_EVENT_RING = 20
-VALID_STATUSES = {"running", "cancelling"} | TERMINAL
-VALID_PHASES = {
-    "starting", "transport_starting", "gateway_starting", "transport_ready", "session_creating",
-    "session_ready", "agent_initializing", "model_running",
-    "tool_running", "message_complete", "interrupting", "completed", "failed", "cancelled",
-    "timed_out", "running", "child_running", "child_stopped", "cancellation_requested",
-}
-COMMON_EVENT_KEYS = {
-    "schema_version", "task_id", "seq", "at", "type", "phase", "payload", "redacted",
-    "dropped_fields",
-}
 EVENT_PAYLOAD_KEYS = {
     "lifecycle": ({"status", "phase"}, {"status", "phase"}),
     "message.start": ({"message_id", "role"}, {"role"}),
@@ -66,17 +61,8 @@ SAFE_DROPPED_FIELDS = {
     "warning",
 }
 TOOL_CLASSES = {"file", "web", "shell", "browser", "delegate", "other"}
-MESSAGE_STATUSES = {"complete", "error", "interrupted", "cancelled"}
-STATUS_KINDS = {
-    "compacting", "retrying", "waiting", "streaming", "queued", "running", "idle",
-    "rate_limited", "context_compacted",
-}
 
 # ESC/CSI/OSC plus C0/C1 controls. Newline and tab are retained for readable text.
-_OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)?")
-_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_ESC_RE = re.compile(r"\x1b(?:[@-_]|\[[^@-~]*[@-~])")
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 class SpectatorError(Exception):
@@ -90,11 +76,7 @@ class SpectatorError(Exception):
 def neutralize_terminal(value: Any) -> Any:
     """Repeat journal terminal-control neutralization before rendering."""
     if isinstance(value, str):
-        value = value.encode("utf-8", "replace").decode("utf-8", "replace")
-        value = _OSC_RE.sub("", value)
-        value = _CSI_RE.sub("", value)
-        value = _ESC_RE.sub("", value)
-        return _CONTROL_RE.sub("", value)[:MAX_TEXT_CHARS]
+        return contracts.sanitize_text(value, MAX_TEXT_CHARS)
     if isinstance(value, list):
         return [neutralize_terminal(item) for item in value[:100]]
     if isinstance(value, dict):

@@ -39,16 +39,12 @@ def _hermes_command(request, run_dir, prompt_path, resume_session_id):
     approval_mode = ensure_text(request.get("child_approval_mode")) or "deny"
     if approval_mode in {"approve_yolo", "yolo"}:
         hermes_cmd.append("--yolo")
-    if requested.get("model"):
-        hermes_cmd += ["--model", ensure_text(requested["model"])]
-    if requested.get("provider"):
-        hermes_cmd += ["--provider", ensure_text(requested["provider"])]
-    if requested.get("max_turns") is not None:
-        hermes_cmd += ["--max-turns", str(requested["max_turns"])]
-    if requested.get("toolsets"):
-        hermes_cmd += ["--toolsets", ",".join(requested["toolsets"])]
-    if requested.get("skills"):
-        hermes_cmd += ["--skills", ",".join(requested["skills"])]
+    for name in ("model", "provider", "max_turns", "toolsets", "skills"):
+        value = requested.get(name)
+        if value is None or (name != "max_turns" and not value):
+            continue
+        rendered = ",".join(value) if name in {"toolsets", "skills"} else ensure_text(value)
+        hermes_cmd.extend(["--" + name.replace("_", "-"), rendered])
     effective_resume_id = resume_session_id
     if effective_resume_id is None and ensure_text(request.get("session_mode") or "new") == "resume":
         effective_resume_id = ensure_text(request.get("requested_session_id"))

@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 if __package__:
-    from . import contracts, native
+    from . import contracts, native, native_approval
 else:
     import contracts
     import native
+    import native_approval
 
 ensure_text = contracts.ensure_text
 ProfileDelegateError = contracts.ProfileDelegateError
@@ -192,16 +193,13 @@ class ConcurrencySlot:
         self.slot = slot
 
     def release(self) -> None:
-        if self.handle is None:
-            return
-        try:
-            if fcntl is not None:
-                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-        finally:
+        handle, self.handle = self.handle, None
+        if handle is not None:
             try:
-                self.handle.close()
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             finally:
-                self.handle = None
+                handle.close()
 
     def __enter__(self) -> "ConcurrencySlot":
         return self
@@ -711,13 +709,6 @@ def tail_text(path: Path, max_chars: int = 4000) -> str:
     return text[-max_chars:] if max_chars and len(text) > max_chars else text
 
 
-def env_bool(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in TRUTHY
-
-
 def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -729,11 +720,6 @@ def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     if value < minimum or value > maximum:
         raise ProfileDelegateError(f"{name} must be between {minimum} and {maximum}", "configuration_error")
     return value
-
-
-def parse_csv_env(name: str) -> List[str]:
-    raw = os.getenv(name, "")
-    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def _plugin_entry() -> Dict[str, Any]:
@@ -842,10 +828,6 @@ def load_effective_policy() -> EffectivePolicy:
         "duplicate_guard_enabled": ("bool", duplicate.get("enabled")),
         "duplicate_active_window_seconds": ("window", duplicate.get("active_window_seconds")),
     }
-    if __package__:
-        from . import native_approval
-    else:
-        import native_approval
     native_approval.configure_selector(entry, values, sources, coerce_child_approval_mode)
     for key, (kind, raw) in yaml_specs.items():
         if raw is not None:
@@ -875,10 +857,6 @@ def load_effective_policy() -> EffectivePolicy:
         except ProfileDelegateError as exc:
             raise ProfileDelegateError(str(exc).replace(key, env_name), exc.code) from exc
         sources[key] = "env"
-    if __package__:
-        from . import native_approval
-    else:
-        import native_approval
     values["child_approval_modes_by_profile"] = native_approval.configured_target_modes(entry)
     # This trusted caller-side grant authorizes task selection, not native defaults.
     maximum = values["max_timeout_seconds"]
@@ -1295,27 +1273,90 @@ def coerce_child_approval_mode(value: Any, *, allow_legacy_config: bool = False)
 
 
 def _resume_record_matches(request, status, target, session_id):
-    if __package__:
-        from .native_resolution import _resume_record_matches as resolve
-    else:
-        from native_resolution import _resume_record_matches as resolve
-    return resolve(request, status, target, session_id)
+    if request.get("profile_home") != target.home:
+        return False
+    recorded_ids = {status.get("child_session_id"), status.get("session_id")}
+    if session_id in recorded_ids:
+        seeded = session_id == request.get("requested_session_id")
+        if seeded and status.get("status") in {"cancelled", "failed", "timed_out"}:
+            evidence = status.get("session_identity_evidence")
+            history = status.get("recovery_history", [])
+            if not isinstance(history, list) or not isinstance(evidence, (str, type(None))):
+                return False
+            observed = evidence in ("post_interrupt_observed", "native_observed") or any(
+                item.get("session_id") == session_id and type(item.get("exit_code")) is int
+                and item["exit_code"] == 0
+                for item in history if isinstance(item, dict))
+            if not observed:
+                return False
+        return True
+    return any(sid and compression_continuation(Path(target.home), sid, session_id,
+                                               profile=target.canonical, cli_footer=True)
+               for sid in recorded_ids)
 
 
-def resume_native_approval(policy, target, session_id):
-    if __package__:
-        from .native_resolution import resume_native_approval as resolve
-    else:
-        from native_resolution import resume_native_approval as resolve
-    return resolve(policy, target, session_id)
+def resume_native_approval(policy: EffectivePolicy, target: ValidatedProfile, session_id: str) -> Dict[str, Any]:
+    """Read-only resume lookup: reuse one unambiguous frozen source snapshot."""
+    matches = []
+    root = get_runs_root()
+    if root.is_dir():
+        for directory in root.iterdir():
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            try:
+                request = read_json_file(directory / "request.json")
+                status = read_json_file(directory / "status.json")
+                if _resume_record_matches(request, status, target, session_id):
+                    if "native_approval" in request:
+                        matches.append(native_approval.validate(request["native_approval"]))
+                    else:
+                        raise ValueError("resume has no trustworthy frozen approval envelope; create a new session")
+            except ProfileDelegateError:
+                continue
+            except ValueError as exc:
+                # A matching frozen envelope must fail closed, never disappear
+                # into the unknown-session fallback or get recomputed.
+                raise ProfileDelegateError(str(exc), "approval_policy_error") from exc
+    if matches:
+        if any(value != matches[0] for value in matches):
+            raise ProfileDelegateError("resume approval snapshots conflict; create a new session", "approval_policy_error")
+        if matches[0] is not None:
+            frozen = matches[0]
+            ancestor_path = os.getenv("PROFILE_DELEGATE_APPROVAL_REQUEST")
+            if ancestor_path:
+                try:
+                    native_approval.admit_resume(frozen, native_approval.read_request(Path(ancestor_path)))
+                except ValueError as exc:
+                    raise ProfileDelegateError(str(exc), "approval_policy_error") from exc
+            return frozen
+    raise ProfileDelegateError(
+        "resume has no trustworthy frozen approval envelope; create a new session", "approval_policy_error",
+    )
 
 
-def resolve_native_approval(policy, target):
-    if __package__:
-        from .native_resolution import resolve_native_approval as resolve
-    else:
-        from native_resolution import resolve_native_approval as resolve
-    return resolve(policy, target)
+def resolve_native_approval(policy: EffectivePolicy, target: ValidatedProfile) -> Dict[str, Any]:
+    try:
+        from hermes_cli.config import load_config_readonly
+        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+        caller_config = load_config_readonly()
+        token = set_hermes_home_override(target.home)
+        try:
+            target_config = load_config_readonly()
+        finally:
+            reset_hermes_home_override(token)
+        target_modes = policy.values["child_approval_modes_by_profile"]
+        target_selected = target.canonical in target_modes and policy.sources["child_approval_mode"] not in {"env", "task"}
+        mode = target_modes[target.canonical] if target_selected else policy.values["child_approval_mode"]
+        source = "operator_target" if target_selected else policy.sources["child_approval_mode"]
+        ancestor_path = os.getenv("PROFILE_DELEGATE_APPROVAL_REQUEST")
+        ancestor = native_approval.read_request(Path(ancestor_path)) if ancestor_path else None
+        from tools import approval
+        return native_approval.snapshot(
+            mode, source, str(get_hermes_home_path()), target.home,
+            caller_config, target_config, approval._YOLO_MODE_FROZEN, ancestor,
+        )
+    except Exception as exc:
+        raise ProfileDelegateError(f"native approval snapshot refused: {exc}", "approval_policy_error") from exc
 
 
 def resolve_request_approval(policy, target, mode, resume_id, requested=None):
@@ -1329,10 +1370,6 @@ def resolve_request_approval(policy, target, mode, resume_id, requested=None):
         policy.values["child_approval_mode"] = requested
         policy.sources["child_approval_mode"] = "task"
     return resolve_native_approval(policy, target)
-
-
-def plugin_config_child_approval_mode() -> str:
-    return load_effective_policy().values["child_approval_mode"]
 
 
 def validate_session_id(value: Any, required: bool = False) -> str:
@@ -1353,18 +1390,6 @@ def resolve_workdir(workdir: str = "", policy: Optional[EffectivePolicy] = None)
         raise ProfileDelegateError(f"workdir does not exist or is not a directory: {cwd}", "workdir_not_found")
     enforce_workdir_policy(cwd, explicit, policy)
     return cwd
-
-
-def load_yaml_mapping(path: Path) -> Dict[str, Any]:
-    try:
-        import yaml
-
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception as exc:
-        raise ProfileDelegateError(f"failed to load profile config {path}: {exc}", "reasoning_overlay_error") from exc
-    if not isinstance(data, dict):
-        raise ProfileDelegateError(f"profile config must contain a mapping: {path}", "reasoning_overlay_error")
-    return data
 
 
 DEFAULT_MANAGED_SCOPE = Path("/etc/hermes")
@@ -1480,15 +1505,6 @@ if __package__:
     from .execution import build_child_command
 else:
     from execution import build_child_command
-
-
-
-def capped_text(text: str, limit: int) -> Tuple[str, bool]:
-    if limit < 0:
-        limit = 0
-    if len(text) <= limit:
-        return text, False
-    return text[:limit], True
 
 
 def output_limits() -> Tuple[int, int]:
@@ -2948,7 +2964,7 @@ def resolve_run_dir(task_id: str) -> Path:
 
 
 @contextmanager
-def _locked_run_status(run_dir: Path):
+def _locked_run_status(run_dir: Path, *, allow_legacy_identity: bool = False):
     """Yield one current status snapshot while holding the run's status lock."""
     if fcntl is None:
         raise ProfileDelegateError("status locking is unavailable", "status_lock_unavailable")
@@ -2972,12 +2988,12 @@ def _locked_run_status(run_dir: Path):
                 live_dir = os.lstat(run_dir)
             except FileNotFoundError as exc:
                 raise ProfileDelegateError("run vanished while waiting for status lock", "run_status_vanished") from exc
-            if (not stat.S_ISDIR(live_dir.st_mode) or
+            if (not stat.S_ISDIR(live_dir.st_mode) or live_dir.st_uid != os.getuid() or
                     (live_dir.st_dev, live_dir.st_ino) != (before.st_dev, before.st_ino) or
                     (live_lock.st_dev, live_lock.st_ino) != (info.st_dev, info.st_ino)):
                 raise ProfileDelegateError("run identity changed while waiting for status lock", "run_identity_changed")
             current = operator_read_json(run_dir / "status.json")
-            if current.get("task_id") != run_dir.name:
+            if current.get("task_id", run_dir.name if allow_legacy_identity else None) != run_dir.name:
                 raise ProfileDelegateError("run status identity mismatch", "unsafe_artifact")
             yield current
         finally:
@@ -3234,47 +3250,34 @@ def _read_run_status(
             "dropped": "failed",
         }.get(durable_notification.get("delivery_state"), notification_status)
     return {
+        **{key: status.get(key) for key in (
+            'profile', 'session_title', 'error_code', 'exit_code',
+            'created_at', 'started_at', 'ended_at', 'background_worker_mode',
+            'worker_pid', 'process_identity', 'phase', 'transport',
+            'transport_alive', 'child_session_id', 'latest_activity', 'timeout_seconds',
+            'timeout_deadline', 'terminal_reason', 'last_control', 'notification_delivery_id',
+        )},
         "success": True,
         "task_id": status.get("task_id", task_id),
-        "profile": status.get("profile"),
-        "session_title": status.get("session_title"),
         "status": status.get("status", "unknown"),
-        "error_code": status.get("error_code"),
-        "exit_code": status.get("exit_code"),
         "timed_out": bool(status.get("timed_out", False)),
         "stdout_truncated": bool(status.get("stdout_truncated", False)),
         "stderr_truncated": bool(status.get("stderr_truncated", False)),
-        "created_at": status.get("created_at"),
-        "started_at": status.get("started_at"),
-        "ended_at": status.get("ended_at"),
         "requested_execution": status.get("requested_execution") or {},
         "origin": persisted_origin,
         "belongs_to_current_session": ownership,
         "origin_match_by": matched_by,
-        "background_worker_mode": status.get("background_worker_mode"),
-        "worker_pid": status.get("worker_pid"),
         "worker_alive": activity["worker_alive"],
         "activity": activity["activity"],
-        "process_identity": status.get("process_identity"),
-        "phase": status.get("phase"),
-        "transport": status.get("transport"),
         "requested_transport": status.get("requested_transport", "unknown"),
         "selected_transport": status.get("selected_transport", "unknown"),
         "actual_transport": status.get("actual_transport", "unknown"),
         "transport_selection_state": status.get("transport_selection_state", "unknown"),
         "steerability": status.get("steerability", "unknown"),
-        "transport_alive": status.get("transport_alive"),
-        "child_session_id": status.get("child_session_id"),
-        "latest_activity": status.get("latest_activity"),
-        "timeout_seconds": status.get("timeout_seconds"),
-        "timeout_deadline": status.get("timeout_deadline"),
-        "terminal_reason": status.get("terminal_reason"),
         "cancellation_requested": bool(status.get("cancellation_requested", False)),
         "interrupted": bool(status.get("interrupted", False)),
         "event_metadata": _safe_event_metadata(status),
-        "last_control": status.get("last_control"),
         "notification_status": notification_status,
-        "notification_delivery_id": status.get("notification_delivery_id"),
         "notification_delivery_attempts": (
             durable_notification.get("delivery_attempts") if durable_notification else None
         ),
@@ -3474,15 +3477,14 @@ def _read_run_list(
         activity = derive_activity(status)
         runs.append(
             {
+                **{key: status.get(key) for key in (
+                    'profile', 'session_title', 'error_code', 'created_at',
+                    'ended_at',
+                )},
                 "task_id": status.get("task_id", run_dir.name),
-                "profile": status.get("profile"),
-                "session_title": status.get("session_title"),
                 "status": lifecycle,
                 "activity": activity["activity"],
                 "worker_alive": activity["worker_alive"],
-                "error_code": status.get("error_code"),
-                "created_at": status.get("created_at"),
-                "ended_at": status.get("ended_at"),
                 "origin": persisted_origin,
                 "run_dir": str(run_dir),
             }
@@ -3514,47 +3516,13 @@ def profile_delegate_list(
 
 
 def _locked_prune_candidate(run_dir: Path, cutoff: datetime, *, dry_run: bool) -> Optional[Path]:
-    """Reread and claim one old terminal run while holding its status lock."""
-    if fcntl is None:
-        return None
+    """Claim an old terminal run using the same verified lock as publication."""
     try:
-        before = os.lstat(run_dir)
-        if not stat.S_ISDIR(before.st_mode) or before.st_uid != os.getuid():
-            return None
-        status_path = run_dir / "status.json"
-        status_info = os.lstat(status_path)
+        status_info = os.lstat(run_dir / "status.json")
         if not stat.S_ISREG(status_info.st_mode) or status_info.st_uid != os.getuid():
             return None
-
-        lock_path = run_dir / "status.lock"
-        flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(lock_path, flags, 0o600)
-    except (FileNotFoundError, OSError):
-        return None
-
-    tombstone: Optional[Path] = None
-    try:
-        lock_info = os.fstat(fd)
-        if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid():
-            return None
-        os.fchmod(fd, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        try:
-            after = os.lstat(run_dir)
-            if (
-                not stat.S_ISDIR(after.st_mode)
-                or after.st_uid != os.getuid()
-                or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
-            ):
-                return None
-            status_info = os.lstat(status_path)
-            if not stat.S_ISREG(status_info.st_mode) or status_info.st_uid != os.getuid():
-                return None
-            status = read_json_file(status_path)
-            lifecycle = ensure_text(status.get("status")).strip().lower()
-            if lifecycle not in TERMINAL_RUN_STATUSES:
+        with _locked_run_status(run_dir, allow_legacy_identity=True) as status:
+            if ensure_text(status.get("status")).strip().lower() not in TERMINAL_RUN_STATUSES:
                 return None
             created = parse_iso(ensure_text(status.get("created_at")))
             if created is None or created >= cutoff:
@@ -3563,13 +3531,9 @@ def _locked_prune_candidate(run_dir: Path, cutoff: datetime, *, dry_run: bool) -
                 return run_dir
             tombstone = run_dir.parent / f".tombstone-{run_dir.name}-{uuid.uuid4().hex}"
             os.rename(run_dir, tombstone)
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            return tombstone
     except (ProfileDelegateError, FileNotFoundError, OSError):
         return None
-    finally:
-        os.close(fd)
-    return tombstone
 
 
 def _operator_prune(max_age_days: Any = 14, dry_run: bool = True) -> Dict[str, Any]:

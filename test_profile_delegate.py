@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 if str(PLUGIN_DIR) not in sys.path:
@@ -485,7 +486,7 @@ def test_plugin_config_legacy_strip_only_migrates_fail_closed(monkeypatch):
 
     fake_config = types.SimpleNamespace(load_config=lambda: {"plugins": {"entries": {"profile-delegate": {"child_approval_mode": "strip_only"}}}})
     monkeypatch.setitem(sys.modules, "hermes_cli.config", fake_config)
-    assert core.plugin_config_child_approval_mode() == "deny"
+    assert core.load_effective_policy().values["child_approval_mode"] == "deny"
 
 
 def test_review_capability_preset_filters_mutating_schema_and_terminal(monkeypatch):
@@ -637,7 +638,7 @@ def test_plugin_config_child_approval_mode_reads_yaml(monkeypatch):
 
     fake_config = types.SimpleNamespace(load_config=lambda: {"plugins": {"entries": {"profile-delegate": {"child_approval_mode": "approve_yolo"}}}})
     monkeypatch.setitem(sys.modules, "hermes_cli.config", fake_config)
-    assert core.plugin_config_child_approval_mode() == "yolo"
+    assert core.load_effective_policy().values["child_approval_mode"] == "yolo"
 
 
 def test_timeout_defaults_and_caps(monkeypatch):
@@ -1828,7 +1829,7 @@ def test_reasoning_config_without_existing_scope_and_rejects_destination_symlink
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     managed_dir = core.prepare_reasoning_config(run_dir, "high")
-    assert core.load_yaml_mapping(managed_dir / "config.yaml") == {"agent": {"reasoning_effort": "high"}}
+    assert yaml.safe_load((managed_dir / "config.yaml").read_text()) == {"agent": {"reasoning_effort": "high"}}
     assert sorted(path.name for path in managed_dir.iterdir()) == ["config.yaml"]
     assert not (managed_dir / "config.yaml").is_symlink()
 
@@ -1925,7 +1926,7 @@ def test_reasoning_override_without_scope_keeps_canonical_home_and_session(tmp_p
     assert seen["run_env"]["HERMES_MANAGED_DIR"] == expected_managed
     assert seen["rename_env"]["HERMES_HOME"] == expected_home
     assert seen["rename_env"]["HERMES_MANAGED_DIR"] == expected_managed
-    assert core.load_yaml_mapping(run_dir / "reasoning_config" / "config.yaml") == {"agent": {"reasoning_effort": "high"}}
+    assert yaml.safe_load((run_dir / "reasoning_config" / "config.yaml").read_text()) == {"agent": {"reasoning_effort": "high"}}
     assert json.loads((run_dir / "result.json").read_text())["session_id"] == "canonical_sid"
 
 

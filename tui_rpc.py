@@ -5,13 +5,11 @@ import io
 import json
 import re
 import os
-import queue
 import select
 import signal
 import subprocess
 import threading
 import time
-from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 
@@ -32,10 +30,6 @@ class TuiRemoteError(TuiRpcError):
         super().__init__(f"TUI RPC error {code}: {message}")
         self.code = code
         self.message = message
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class TuiRpcClient:
@@ -438,27 +432,3 @@ def interrupt(client: Any, session_id: str, *, timeout: float = 15.0,
         "session.interrupt", {"session_id": session_id}, timeout=timeout,
         on_event=on_event,
     )
-
-
-def wait_for_completion(events: queue.Queue[dict], session_id: str, *, timeout: float,
-                        poll: Optional[Callable[[], None]] = None) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout
-    while True:
-        if poll:
-            poll()
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TuiTransportError("delegated TUI turn timed out")
-        try:
-            frame = events.get(timeout=min(0.1, remaining))
-        except queue.Empty:
-            continue
-        params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
-        if params.get("session_id") != session_id:
-            continue
-        event_type = params.get("type")
-        payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-        if event_type == "message.complete":
-            return {"text": str(payload.get("text") or ""), "status": str(payload.get("status") or "complete")}
-        if event_type == "error":
-            raise TuiTransportError(str(payload.get("message") or "TUI turn failed"))

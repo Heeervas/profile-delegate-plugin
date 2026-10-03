@@ -70,32 +70,25 @@ def _top_level_json_candidates(
             continue
         if isinstance(obj, dict):
             decoded.append((obj, idx, idx + length, "embedded_json"))
-    # A candidate contained by a larger decoded object is nested data, not a
-    # competing terminal envelope. Report every failed top-level opening brace
-    # so malformed structured output can never fall through to textual success.
-    top_level = [
-        candidate for candidate in decoded
-        if not any(
-            other[1] <= candidate[1] and candidate[2] <= other[2]
-            and (other[1], other[2]) != (candidate[1], candidate[2])
-            for other in decoded
-        )
-    ]
-    return top_level, len(candidate_starts) - len(decoded)
+    # Starts are collected only at depth zero: successfully decoded spans
+    # cannot contain or overlap another candidate. Avoid a quadratic rescan.
+    return decoded, len(candidate_starts) - len(decoded)
+
+
+def _parse_metadata(method: str, count: int = 0, *, span=None, error=None) -> Dict[str, Any]:
+    return {"parse_method": method, "candidate_count": count, "selected_span": span, "parse_error": error}
+
 
 def parse_json_result(text: str) -> Tuple[Optional[Any], Dict[str, Any]]:
     raw = text or ""
     stripped = raw.strip()
-    empty = {"parse_method": "none", "candidate_count": 0, "selected_span": None, "parse_error": None}
+    empty = _parse_metadata('none', 0)
     if not stripped:
         return None, empty
     leading = len(raw) - len(raw.lstrip())
     try:
         obj = json.loads(stripped)
-        return obj, {
-            "parse_method": "whole_json", "candidate_count": 1,
-            "selected_span": [leading, leading + len(stripped)], "parse_error": None,
-        }
+        return obj, _parse_metadata('whole_json', 1, span=[leading, leading + len(stripped)])
     except Exception:
         pass
 
@@ -114,12 +107,7 @@ def parse_json_result(text: str) -> Tuple[Optional[Any], Dict[str, Any]]:
     # Any malformed top-level JSON-like candidate makes structured parsing
     # unresolved. Do not let an adjacent valid object or textual OK hide it.
     if malformed_candidate_count:
-        return None, {
-            "parse_method": "malformed",
-            "candidate_count": len(candidates) + malformed_candidate_count,
-            "selected_span": None,
-            "parse_error": "malformed_json_candidate",
-        }
+        return None, _parse_metadata('malformed', len(candidates) + malformed_candidate_count, error='malformed_json_candidate')
 
     # Deduplicate a JSON object found both as fenced and embedded by exact span.
     unique: Dict[Tuple[int, int], Tuple[Dict[str, Any], int, int, str]] = {}
@@ -136,28 +124,16 @@ def parse_json_result(text: str) -> Tuple[Optional[Any], Dict[str, Any]]:
             obj, start, end, method = candidates[0]
             keys = [ensure_text(key) for key in obj]
             if len(keys) >= 2 and any(not key.isdigit() for key in keys):
-                return obj, {
-                    "parse_method": f"{method}_custom", "candidate_count": 1,
-                    "selected_span": [start, end], "parse_error": None,
-                }
+                return obj, _parse_metadata(f'{method}_custom', 1, span=[start, end])
         if len(candidates) > 1:
-            return None, {
-                "parse_method": "ambiguous", "candidate_count": len(candidates),
-                "selected_span": None, "parse_error": "ambiguous_json_candidates",
-            }
+            return None, _parse_metadata('ambiguous', len(candidates), error='ambiguous_json_candidates')
         return None, {**empty, "candidate_count": len(candidates)}
     best_score = max(score for _candidate, score in scored)
     best = [candidate for candidate, score in scored if score == best_score]
     if len(best) != 1:
-        return None, {
-            "parse_method": "ambiguous", "candidate_count": len(best),
-            "selected_span": None, "parse_error": "ambiguous_json_candidates",
-        }
+        return None, _parse_metadata('ambiguous', len(best), error='ambiguous_json_candidates')
     obj, start, end, method = best[0]
-    return obj, {
-        "parse_method": method, "candidate_count": len(scored),
-        "selected_span": [start, end], "parse_error": None,
-    }
+    return obj, _parse_metadata(method, len(scored), span=[start, end])
 
 def extract_json_object(text: str) -> Optional[Any]:
     """Backward-compatible object-only wrapper around deterministic parsing."""
@@ -349,3 +325,56 @@ def output_result(text: str, stdout_path: str, request: Dict[str, Any],
         result.update(status="failed", error_code=error_code)
         result["errors"] = coerce_list(result.get("errors")) + (errors if errors is not None else [error_code])
     return apply_execution_status(result, execution_status)
+
+
+EVENT_SCHEMA_VERSION = 1
+EVENT_JOURNAL_MAX_BYTES = 1_048_576
+EVENT_RECORD_MAX_BYTES = 16_384
+EVENT_TEXT_FRAGMENT_MAX_CHARS = 2_048
+EVENT_MESSAGE_MAX_CHARS = 32_768
+EVENT_IDENTIFIER_MAX_CHARS = 128
+EVENT_METADATA_MAX_CHARS = 200
+EVENT_TIMESTAMP_MAX_CHARS = 64
+
+
+KNOWN_PHASES = {
+    "starting", "transport_starting", "gateway_starting", "transport_ready", "session_creating",
+    "session_ready", "agent_initializing", "model_running",
+    "tool_running", "message_complete", "interrupting", "completed", "failed", "cancelled",
+    "timed_out", "running", "child_running", "child_stopped", "cancellation_requested",
+}
+
+
+MESSAGE_STATUSES = {"complete", "error", "interrupted", "cancelled"}
+
+
+STATUS_KINDS = {
+    "compacting", "retrying", "waiting", "streaming", "queued", "running", "idle",
+    "rate_limited", "context_compacted",
+}
+
+
+COMMON_KEYS = {
+    "schema_version", "task_id", "seq", "at", "type", "phase", "payload", "redacted",
+    "dropped_fields",
+}
+
+
+_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)")
+_CSI_RE = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]")
+_ESC_RE = re.compile(r"\x1b(?:[@-_]|.)")
+
+
+def sanitize_text(value: Any, limit: int) -> str:
+    """Neutralize terminal controls and invalid Unicode, preserving newline/tab."""
+    text = str(value or "").encode("utf-8", "replace").decode("utf-8", "replace")
+    text = _OSC_RE.sub("", text)
+    text = _CSI_RE.sub("", text)
+    text = _ESC_RE.sub("", text)
+    text = "".join(
+        char for char in text
+        if char in "\n\t" or (ord(char) >= 0x20 and not 0x7F <= ord(char) <= 0x9F)
+    )
+    return text[:limit]
+
+LIFECYCLE_STATUSES = TERMINAL_RUN_STATUSES | {"running", "cancelling"}
