@@ -1503,12 +1503,11 @@ def prepare_reasoning_config(run_dir: Path, reasoning_effort: str) -> Path:
     return managed_dir
 
 
-def build_child_command(request, run_dir, *, prompt_path=None, resume_session_id=None):
-    if __package__:
-        from .child_launch import build_child_command as build
-    else:
-        from child_launch import build_child_command as build
-    return build(request, run_dir, prompt_path=prompt_path, resume_session_id=resume_session_id)
+if __package__:
+    from .execution import build_child_command
+else:
+    from execution import build_child_command
+
 
 
 def capped_text(text: str, limit: int) -> Tuple[str, bool]:
@@ -2118,6 +2117,28 @@ def child_environment(
     return env
 
 
+def prepare_child_environment(request: Dict[str, Any], run_dir: Path, *, tui: bool = False) -> Dict[str, str]:
+    mode = coerce_child_approval_mode(request.get("child_approval_mode", DEFAULT_CHILD_APPROVAL_MODE))
+    env = child_environment(int(request.get("delegate_depth") or 0), mode, run_dir.name)
+    env["HERMES_HOME"] = ensure_text(request.get("profile_home"))
+    env["PROFILE_DELEGATE_ROOT_TASK_ID"] = ensure_text(request.get("root_task_id") or run_dir.name)
+    execution = request.get("effective_execution") or request.get("requested_execution") or {}
+    if tui:
+        for name in ("toolsets", "skills"):
+            if execution.get(name):
+                env[f"HERMES_TUI_{name.upper()}"] = ",".join(execution[name])
+        if execution.get("max_turns"):
+            env["HERMES_TUI_MAX_TURNS"] = env["HERMES_MAX_ITERATIONS"] = str(execution["max_turns"])
+    effort = execution.get("reasoning_effort")
+    if effort:
+        existing = discover_managed_scope(env)
+        if existing is not None:
+            raise ProfileDelegateError(f"reasoning_effort cannot replace existing Hermes managed scope: {existing}",
+                                       "reasoning_managed_scope_conflict")
+        env["HERMES_MANAGED_DIR"] = str(prepare_reasoning_config(run_dir, ensure_text(effort)))
+    return env
+
+
 def collect_nested_delegations(run_dir: Path, request: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Return bounded direct-child delegation results created by this delegated run."""
     parent_task_id = run_dir.name
@@ -2441,20 +2462,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     mode = ensure_text(request.get("session_mode") or "new")
     resume_id = ensure_text(request.get("requested_session_id") or "")
     title_text = ensure_text(request.get("session_title") or "")
-    depth = int(request.get("delegate_depth") or 0)
-    child_approval_mode = coerce_child_approval_mode(request.get("child_approval_mode", DEFAULT_CHILD_APPROVAL_MODE))
-    env = child_environment(depth, child_approval_mode, run_dir.name)
-    env["PROFILE_DELEGATE_ROOT_TASK_ID"] = ensure_text(request.get("root_task_id") or run_dir.name)
-    env["HERMES_HOME"] = ensure_text(request.get("profile_home"))
-    requested_execution = request.get("effective_execution") or request.get("requested_execution") or {}
-    reasoning_effort = requested_execution.get("reasoning_effort")
-    if reasoning_effort:
-        profile_home = Path(ensure_text(request.get("profile_home"))).resolve()
-        existing_managed_dir = discover_managed_scope(env)
-        if existing_managed_dir is not None:
-            raise ProfileDelegateError(f"reasoning_effort cannot replace existing Hermes managed scope: {existing_managed_dir}", "reasoning_managed_scope_conflict")
-        env["HERMES_HOME"] = str(profile_home)
-        env["HERMES_MANAGED_DIR"] = str(prepare_reasoning_config(run_dir, ensure_text(reasoning_effort)))
+    env = prepare_child_environment(request, run_dir)
 
     merge_run_status_best_effort(run_dir, {"actual_transport": "cli", "steerability": "unavailable"})
 

@@ -31,56 +31,15 @@ def _stage_timeout(name: str, default: float) -> float:
 
 
 def _environment(request: Dict[str, Any], run_dir: Path) -> Dict[str, str]:
-    mode = core.coerce_child_approval_mode(
-        request.get("child_approval_mode", core.DEFAULT_CHILD_APPROVAL_MODE)
-    )
-    env = core.child_environment(
-        int(request.get("delegate_depth") or 0), mode,
-        core.ensure_text(request.get("task_id") or run_dir.name),
-    )
-    env["HERMES_HOME"] = core.ensure_text(request.get("profile_home"))
-    execution = request.get("effective_execution") or {}
-    if execution.get("toolsets"):
-        env["HERMES_TUI_TOOLSETS"] = ",".join(execution["toolsets"])
-    if execution.get("skills"):
-        env["HERMES_TUI_SKILLS"] = ",".join(execution["skills"])
-    if execution.get("max_turns"):
-        env["HERMES_TUI_MAX_TURNS"] = str(execution["max_turns"])
-        env["HERMES_MAX_ITERATIONS"] = str(execution["max_turns"])
-    effort = execution.get("reasoning_effort")
-    if effort:
-        existing = core.discover_managed_scope(env)
-        if existing is not None:
-            raise core.ProfileDelegateError(
-                f"reasoning_effort cannot replace existing Hermes managed scope: {existing}",
-                "reasoning_managed_scope_conflict",
-            )
-        env["HERMES_MANAGED_DIR"] = str(
-            core.prepare_reasoning_config(run_dir, core.ensure_text(effort))
-        )
-    return env
+    return core.prepare_child_environment(request, run_dir, tui=True)
 
 
 def _gateway_command(request: Dict[str, Any], run_dir: Path) -> list[str]:
-    blocked = ((request.get("effective_capabilities") or {}).get("blocked_tools") or [])
-    hermes_path = Path(core.ensure_text(request.get("hermes_bin"))).resolve()
-    sibling_python = hermes_path.parent / "python"
-    runtime_python = Path("/opt/hermes/.venv/bin/python")
-    child_python = sibling_python if hermes_path.name == "hermes" and sibling_python.is_file() else runtime_python
-    if not child_python.is_file():
-        child_python = Path(core.sys.executable)
-    return [
-        str(child_python),
-        str(core.CHILD_BOOTSTRAP),
-        "--approval-mode",
-        core.coerce_child_approval_mode(request.get("child_approval_mode")),
-        "--events-path",
-        str(run_dir / "approval_events.jsonl"),
-        "--blocked-tools",
-        ",".join(core.ensure_text(item) for item in blocked),
-        "--request-path", str(run_dir / "request.json"),
-        "--tui-gateway",
-    ]
+    if __package__:
+        from .execution import bootstrap_command
+    else:
+        from execution import bootstrap_command
+    return [*bootstrap_command(request, run_dir), "--tui-gateway"]
 
 
 def _poll_event(

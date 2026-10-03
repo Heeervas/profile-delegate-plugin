@@ -6,6 +6,7 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- CLI and TUI share child interpreter/approval/bootstrap and environment/reasoning preparation.
 - CLI and TUI share pure result contracts and terminal enrichment/publication, retaining transport-specific failure and recovery evidence.
 
 - TUI resume applies authorized model/provider/reasoning selections through native session-scoped config.set, preserving stored workspace, frozen authority and operator confirmations.

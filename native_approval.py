@@ -130,9 +130,9 @@ def configure_selector(entry, values, sources, coerce) -> None:
 
 def configured_target_modes(entry: dict) -> dict:
     if __package__:
-        from .core import ProfileDelegateError
+        from .contracts import ProfileDelegateError
     else:
-        from core import ProfileDelegateError
+        from contracts import ProfileDelegateError
     try:
         return target_modes(entry)
     except Exception as exc:

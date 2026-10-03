@@ -12,7 +12,7 @@ import pathlib
 import sys
 import types
 foreign = {}
-for name in ('core', 'native_approval', 'native_resolution', 'child_launch'):
+for name in ('core', 'native_approval', 'native_resolution', 'execution', 'contracts'):
     foreign[name] = types.ModuleType(name)
     sys.modules[name] = foreign[name]
 entry = pathlib.Path(sys.argv[1])
@@ -21,11 +21,12 @@ spec = importlib.util.spec_from_file_location('pd_package_smoke', entry,
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
-from pd_package_smoke import core, native_approval, native_resolution, child_launch
+from pd_package_smoke import core, native_approval, native_resolution, execution, contracts
 assert native_approval.selector('approve_yolo') == 'yolo'
 assert callable(native_resolution.resolve_native_approval)
 assert native_resolution.core is core
-assert child_launch.core is core
+assert execution.ProfileDelegateError is contracts.ProfileDelegateError is core.ProfileDelegateError
+assert callable(execution.bootstrap_command)
 assert native_approval.configured_target_modes({}) == {}
 assert core.load_effective_policy().values['child_approval_mode'] in ('deny', 'profile', 'inherit', 'yolo')
 assert core._resume_record_matches({}, {}, types.SimpleNamespace(home='unused'), 'unused') is False
