@@ -1,5 +1,13 @@
 # Profile Delegate project state
 
+## Native simplification — current execution
+
+Authority: complete-target local implementation and scoped commit batches, explicitly authorized by the operator. No core/profile/global configuration changes, publication, activation, or gateway restart. Optimization, integration and net reduction take priority; unsupported native goal cases are complementary limitations, not permission for another orchestrator.
+
+Baseline product HEAD: `5ddc731`. Incoming rejected steering/harness candidate was already withdrawn; the incoming checkpoint is preserved privately. Historical physical production/tests/support: 7643/7948/698; current: 7658/8006/969. Last recorded native gate: 712 passed; not yet rerun for this execution.
+
+Next: reproduce affected behavior, consolidate terminal decisions and preserve per-task profile/model/provider/reasoning selection, then simplify completion ownership. Active plan: `docs/plans/2026-10-03-native-simplification.md`. Validation commands: `.agents/validation.md`. Live changed-code acceptance requires an operator restart after the coherent candidate is reviewed.
+
 ## Refactor prerequisite — blocked, no product edits
 
 Full authorized goal: `/opt/data/workspace/projects/profile-delegate-refactor/goal.md`. Verified unchanged HEAD `a57914222c96d6e2c3532967641bb10b8cb3002f`: installed prerequisite passes, **709 passed in 140.29s**, baseline production/test physical lines **7643/7948**. Historical missing-pytest claim below is superseded. Pre-edit installed smoke `scripts/accept_audit_runtime.py --authorize-isolated-runtime --cases completion` exits **2**: `frozen delegated authority detected; do not clear or bypass it`. Required integration/efficiency baseline and redesign remain pending; no authority bypass or product/test changes. Exact receipt/operator next probe: `/opt/data/workspace/projects/profile-delegate-refactor/execution-blocker.md`. Incoming docs/artifacts preserved; no activation/commit/review acceptance.
