@@ -4,9 +4,9 @@
 
 Authority: complete-target local implementation and scoped commit batches, explicitly authorized by the operator. No core/profile/global configuration changes, publication, activation, or gateway restart. Optimization, integration and net reduction take priority; unsupported native goal cases are complementary limitations, not permission for another orchestrator.
 
-Baseline product HEAD: `5ddc731`. Incoming rejected steering/harness candidate was already withdrawn; the incoming checkpoint is preserved privately. Historical physical production/tests/support: 7643/7948/698; current: 7658/8006/969. Last recorded native gate: 712 passed; not yet rerun for this execution.
+Baseline product HEAD: `5ddc731`. Incoming rejected steering/harness candidate was already withdrawn; the incoming checkpoint is preserved privately. Historical physical production/tests/support: 7643/7948/698; current: 7658/8006/969. Baseline native gate: 712 passed. First-slice focused gate: 80 passed; whole-tree gate pending.
 
-Next: reproduce affected behavior, consolidate terminal decisions and preserve per-task profile/model/provider/reasoning selection, then simplify completion ownership. Active plan: `docs/plans/2026-10-03-native-simplification.md`. Validation commands: `.agents/validation.md`. Live changed-code acceptance requires an operator restart after the coherent candidate is reviewed.
+First slice: six regression cases demonstrated ignored TUI resume selection/confirmation boundaries before the fix. Native session-scoped config.set now applies authorized selection; real native setter tests trap YAML writes, including a stale-session refusal; native compute-host deferred picks remain acceptance, not observed model identity. Next: consolidate terminal decisions and simplify completion ownership. Active plan: `docs/plans/2026-10-03-native-simplification.md`. Validation commands: `.agents/validation.md`. Live changed-code acceptance requires an operator restart after the coherent candidate is reviewed.
 
 ## Refactor prerequisite — blocked, no product edits
 

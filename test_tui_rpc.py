@@ -305,7 +305,7 @@ def test_session_flow_uses_create_resume_submit_and_native_controls():
     client = RecordingClient()
     new = tui_rpc.start_session(client, profile="reviewer", mode="new", session_id="", title="review", cwd="/tmp")
     assert new == {"ui_session_id": "ui-new", "child_session_id": "durable-new"}
-    resumed = tui_rpc.start_session(client, profile="reviewer", mode="resume", session_id="durable-old", title="ignored", cwd="/different-workspace", model="ignored", provider="ignored", reasoning_effort="ignored")
+    resumed = tui_rpc.start_session(client, profile="reviewer", mode="resume", session_id="durable-old", title="ignored", cwd="/different-workspace")
     assert resumed == {"ui_session_id": "ui-resumed", "child_session_id": "durable-old"}
     tui_rpc.submit(client, "ui-resumed", "bounded prompt")
     tui_rpc.steer(client, "ui-resumed", "change direction")
@@ -334,6 +334,83 @@ def test_session_flow_uses_create_resume_submit_and_native_controls():
     assert client.calls[-2][1] == {"session_id": "ui-resumed", "text": "change direction"}
 
 
+@pytest.mark.parametrize("selection", [
+    {"model": "codex/example", "provider": "openai-api", "reasoning_effort": "high"},
+    {"model": "codex/example"}, {"provider": "openai-api"}, {"reasoning_effort": "none"},
+])
+def test_resume_applies_authorized_selection_without_config_writes(monkeypatch, selection):
+    from contextlib import nullcontext
+    import types
+    from hermes_cli import model_switch
+    from tui_gateway import methods_config_set, model_switch as gateway_model
+    from tui_gateway.method_ctx import rebind
+
+    def forbidden_write(*args, **kwargs):
+        pytest.fail("session selection attempted a configuration write")
+
+    monkeypatch.setattr(model_switch, "persist_model_selection", forbidden_write)
+    switched = []
+    def resolve_switch(**kwargs):
+        switched.append(kwargs)
+        return model_switch.ModelSwitchResult(True, new_model=kwargs["raw_input"],
+                                              target_provider=kwargs["explicit_provider"])
+    monkeypatch.setattr(model_switch, "switch_model", resolve_switch)
+    from hermes_cli.observability import shared_metrics_events
+    monkeypatch.setattr(shared_metrics_events, "record_model_switch", lambda **kwargs: None)
+    session = {"session_key": "durable-child", "agent": None}
+    namespace = dict(vars(gateway_model), **vars(methods_config_set))
+    for name, value in list(namespace.items()):
+        if isinstance(value, types.FunctionType) and value.__module__ in {gateway_model.__name__, methods_config_set.__name__}:
+            namespace[name] = rebind(value, namespace)
+    namespace.update(_current_model_runtime=lambda *args: ("openai-api", "codex/stored", "", ""), _sessions={"ui-resumed": session}, _write_config_key=forbidden_write,
+                     _save_cfg=forbidden_write, _resolve_model=lambda: "codex/stored",
+                     _ok=lambda rid, result: {"result": result},
+                     _err=lambda rid, code, message: {"error": {"code": code, "message": message}},
+                     _session_profile_runtime_scope=lambda session: nullcontext(),
+                     _start_agent_build=lambda *args: None, _wait_agent=lambda *args: None,
+                     _cfgset_await_agent=lambda *args: None,
+                     _expensive_model_confirm=lambda *args: None,
+                     _switch_away_provider=lambda *args: None, _session_source=lambda *args: "test",
+                     _sess_nowait=lambda *args: (None, {"error": {"code": 4001}}))
+    namespace["_apply_model_switch"] = rebind(gateway_model._apply_model_switch, namespace)
+    namespace["_CONFIG_SETTERS"] = {key: rebind(methods_config_set._CONFIG_SETTERS[key], namespace)
+                                  for key in ("model", "reasoning")}
+    handler = rebind(dict(methods_config_set._registry._pending)["config.set"], namespace)
+    calls = []
+    class Client:
+        def call(self, method, params, **kwargs):
+            calls.append((method, params))
+            if method == "session.resume":
+                return {"session_id": "ui-resumed", "resumed": "durable-child", "info": {"model": "codex/stored"}}
+            response = handler(1, params)
+            assert "error" not in response, response
+            return response["result"]
+    identity = tui_rpc.start_session(Client(), profile="builder", mode="resume", session_id="durable-parent",
+                                     title="ignored", cwd="/ignored", **selection)
+    assert identity["child_session_id"] == "durable-child"
+    for method, params in calls[1:]:
+        assert method == "config.set"
+        assert params["session_id"] == "ui-resumed" and params["scope"] == "session"
+    if selection.get("model") or selection.get("provider"):
+        assert switched[0]["is_global"] is False
+        assert session["model_override"]["model"] == selection.get("model", "codex/stored")
+    if selection.get("reasoning_effort"):
+        from hermes_constants import parse_reasoning_effort
+        assert session["create_reasoning_override"] == parse_reasoning_effort(selection["reasoning_effort"])
+    assert handler(1, {"session_id": "stale", "key": "reasoning", "value": "high", "scope": "session"})["error"]["code"] == 4001
+
+
+@pytest.mark.parametrize("reply", [{"confirm_required": True, "confirm_message": "operator confirmation needed"},
+                                    {"scope": "global"}])
+def test_resume_refuses_confirmation_or_global_scope(reply):
+    class Client:
+        def call(self, method, params, **kwargs):
+            return {"session_id": "ui-1", "resumed": "child-1"} if method == "session.resume" else reply
+    with pytest.raises(tui_rpc.TuiRpcError):
+        tui_rpc.start_session(Client(), profile="builder", mode="resume", session_id="child-1",
+                              title="", cwd="/tmp", model="codex/example")
+
+
 def test_large_resume_response_is_bounded_without_changing_identity_or_model_history():
     class NativeLikeClient:
         def __init__(self):
@@ -357,7 +434,7 @@ def test_large_resume_response_is_bounded_without_changing_identity_or_model_his
     client = NativeLikeClient()
     identity = tui_rpc.start_session(
         client, profile="builder", mode="resume", session_id="stored-1",
-        title="ignored", cwd="/ignored", model="ignored", provider="ignored",
+        title="ignored", cwd="/ignored",
     )
     assert identity == {"ui_session_id": "runtime-1", "child_session_id": "stored-1"}
     assert client.wire_bytes < 2_000_000
