@@ -9,4 +9,7 @@ __pycache__/
 !.env.example
 *.log
 
+# Disposable native-runtime test homes and private run artifacts.
+.artifacts/
+
 # Project operating contracts under `.agents/` and `.hermes/` are tracked.

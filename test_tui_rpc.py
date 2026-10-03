@@ -317,6 +317,7 @@ def test_session_flow_uses_create_resume_submit_and_native_controls():
     assert client.calls[0][1]["cwd"] == "/tmp"
     assert client.calls[1][1] == {
         "profile": "reviewer", "session_id": "durable-old", "source": "profile-delegate", "cols": 100,
+        "omit_messages": True, "inline_images": False,
     }
     # The plugin's minimal venv deliberately lacks Hermes' pydantic dependency.
     # Validate actual emitted params with the installed runtime's interpreter.
@@ -331,6 +332,63 @@ def test_session_flow_uses_create_resume_submit_and_native_controls():
     assert check.returncode == 0, check.stderr
     assert check.stdout.strip() == "installed_contracts_ok"
     assert client.calls[-2][1] == {"session_id": "ui-resumed", "text": "change direction"}
+
+
+def test_large_resume_response_is_bounded_without_changing_identity_or_model_history():
+    class NativeLikeClient:
+        def __init__(self):
+            self.params = None
+            self.model_history = [{"role": "user", "content": "private" * 400_000}]
+
+        def call(self, method, params, **kwargs):
+            assert method == "session.resume"
+            self.params = params
+            response = {"jsonrpc": "2.0", "id": 1, "result": {
+                "session_id": "runtime-1", "resumed": "stored-1",
+                "message_count": len(self.model_history),
+                "messages": [] if params["omit_messages"] else self.model_history,
+            }}
+            wire = (json.dumps(response, separators=(",", ":")) + "\n").encode()
+            self.wire_bytes = len(wire)
+            legacy = {**response, "result": {**response["result"], "messages": self.model_history}}
+            self.legacy_wire_bytes = len((json.dumps(legacy, separators=(",", ":")) + "\n").encode())
+            return response["result"]
+
+    client = NativeLikeClient()
+    identity = tui_rpc.start_session(
+        client, profile="builder", mode="resume", session_id="stored-1",
+        title="ignored", cwd="/ignored", model="ignored", provider="ignored",
+    )
+    assert identity == {"ui_session_id": "runtime-1", "child_session_id": "stored-1"}
+    assert client.wire_bytes < 2_000_000
+    assert client.legacy_wire_bytes > 2_000_000
+    assert len(client.model_history) == 1
+    assert client.params is not None
+    assert "cwd" not in client.params and "model" not in client.params
+
+
+@pytest.mark.parametrize("exact", [True, False])
+def test_oversized_frame_diagnostic_is_bounded_safe_and_actionable(exact):
+    secret = "PRIVATE_TRANSCRIPT_MARKER"
+    bound = 128
+    # A complete frame gives an exact size; an unterminated one gives only a lower bound.
+    raw = (secret * 10 + "\n" if exact else secret * 10).encode()
+    proc = FakeProcess([])
+    proc.stdout = io.BytesIO(raw)
+    client = tui_rpc.TuiRpcClient(proc, max_frame_bytes=bound)  # type: ignore[arg-type]
+    if exact:
+        # A complete buffered frame allows an exact length; streamed reads are
+        # intentionally capped at bound+1 and can report only that lower bound.
+        client._stdout_buffer.extend(raw)
+        proc.stdout = io.BytesIO()
+    with pytest.raises(tui_rpc.TuiProtocolError) as failure:
+        client.call("session.resume", {"session_id": "stored-1"}, timeout=1, stage="session_creating")
+    diagnostic = str(failure.value)
+    assert "configured=128 bytes" in diagnostic
+    assert (f"observed={len(raw)} bytes" if exact else "observed>=129 bytes") in diagnostic
+    assert "stage=session_creating, request_id=1, method=session.resume" in diagnostic
+    assert "frame_type=unparsed" in diagnostic and "omit_messages=true" in diagnostic
+    assert secret not in diagnostic
 
 
 def test_wait_for_completion_consumes_events_until_matching_terminal_message():

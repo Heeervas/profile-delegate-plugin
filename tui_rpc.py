@@ -55,6 +55,7 @@ class TuiRpcClient:
         self._stdout_buffer = bytearray()
         self._stderr_eof = False
         self.last_event_type = "none"
+        self._frame_context = "idle"
         # Single-owner client: a locally timed-out RPC may still answer later.
         # Remember that exact id so one late response can be discarded without
         # weakening correlation for any other response.
@@ -97,12 +98,12 @@ class TuiRpcClient:
             newline = self._stdout_buffer.find(b"\n")
             if newline >= 0:
                 if newline + 1 > self.max_frame_bytes:
-                    raise TuiProtocolError("TUI frame exceeds configured bound")
+                    raise self._frame_overflow(newline + 1, exact=True)
                 raw = bytes(self._stdout_buffer[:newline + 1])
                 del self._stdout_buffer[:newline + 1]
                 return raw
             if len(self._stdout_buffer) > self.max_frame_bytes:
-                raise TuiProtocolError("TUI frame exceeds configured bound")
+                raise self._frame_overflow(len(self._stdout_buffer), exact=False)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TuiTransportError("TUI RPC response timed out")
@@ -124,6 +125,18 @@ class TuiRpcClient:
                 raise TuiTransportError("TUI stdout EOF")
             self._stdout_buffer.extend(chunk)
 
+    def _frame_overflow(self, observed: int, *, exact: bool) -> TuiProtocolError:
+        # Do not parse/log an over-limit frame: it can contain private transcript
+        # text, attachments, tool arguments, or an incomplete JSON string.
+        size = f"observed={observed}" if exact else f"observed>={observed}"
+        return TuiProtocolError(
+            f"TUI frame exceeds configured bound: configured={self.max_frame_bytes} bytes, "
+            f"{size} bytes; {self._frame_context}; frame_type=unparsed. "
+            "Recovery: for session.resume request omit_messages=true "
+            "(inline_images=false alone only removes image data); otherwise "
+            "reduce or page the emitting event/result before retrying."
+        )
+
     def _write(self, frame: dict[str, Any]) -> None:
         if self._closed or self.process.stdin is None:
             raise TuiTransportError("TUI RPC client is closed")
@@ -142,8 +155,6 @@ class TuiRpcClient:
         if not raw:
             self._drain_stderr()
             raise TuiTransportError("TUI stdout EOF")
-        if len(raw) > self.max_frame_bytes:
-            raise TuiProtocolError("TUI frame exceeds configured bound")
         try:
             frame = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -197,6 +208,7 @@ class TuiRpcClient:
             return frame
 
     def read_event(self, timeout: float) -> dict[str, Any]:
+        self._frame_context = "stage=event_polling, request_id=none"
         frame = self.read_frame(timeout)
         if not self._is_event(frame):
             response_id = self._validate_response(frame)
@@ -204,6 +216,7 @@ class TuiRpcClient:
         return frame
 
     def wait_ready(self, timeout: float = 15.0, *, on_event: Optional[Callable[[dict], None]] = None) -> dict:
+        self._frame_context = "stage=gateway_starting, request_id=none"
         deadline = time.monotonic() + timeout
         while True:
             try:
@@ -231,6 +244,7 @@ class TuiRpcClient:
             raise ValueError("method and object params are required")
         request_id = self._next_id
         self._next_id += 1
+        self._frame_context = f"stage={stage}, request_id={request_id}, method={method}"
         self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
         deadline = time.monotonic() + timeout
         while True:
@@ -347,7 +361,8 @@ def start_session(client: Any, *, profile: str, mode: str, session_id: str,
     common: dict[str, Any] = {"profile": profile, "source": "profile-delegate", "cols": 100}
     if mode == "resume":
         response = client.call(
-            "session.resume", {**common, "session_id": session_id}, timeout=timeout,
+            "session.resume", {**common, "session_id": session_id,
+                               "omit_messages": True, "inline_images": False}, timeout=timeout,
             on_event=on_event, stage="session_creating",
         )
         durable = response.get("resumed", session_id)
