@@ -54,226 +54,116 @@ TOOL_DESCRIPTION = (
 )
 
 
+def _field(kind: str, description: str, **constraints: Any) -> Dict[str, Any]:
+    return {"type": kind, "description": description, **constraints}
+
+
+def _tool_schema(name: str, description: str, properties: Dict[str, Any], required=None) -> Dict[str, Any]:
+    return {"name": name, "description": description,
+            "parameters": {"type": "object", "properties": properties,
+                           "required": required or [], "additionalProperties": False}}
+
+
 def _schema() -> Dict[str, Any]:
-    return {
-        "name": "profile_delegate",
-        "description": TOOL_DESCRIPTION,
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "profile": {
-                    "type": "string",
-                    "description": "Target Hermes profile name, e.g. reviewer, builder, research, work. Must exist locally.",
-                },
-                "task": {
-                    "type": "string",
-                    "description": "Self-contained bounded task for the target profile. Be explicit about success criteria.",
-                },
-                "session_title": {
-                    "type": "string",
-                    "description": "Required short title for this delegated session/run, max 50 chars. If longer, it is truncated. Broken English or Spanish shorthand is fine, e.g. 'seguir tests builder' or 'review plan riesgos'.",
-                },
-                "session_mode": {
-                    "type": "string",
-                    "enum": ["new", "resume"],
-                    "description": "Start a fresh target-profile session or resume an explicit target-profile session_id. Default: new.",
-                },
-                "session_id": {
-                    "type": "string",
-                    "description": "Target-profile Hermes session id; required only with session_mode='resume', forbidden with new. Use `hermes -p <profile> sessions list` to find it.",
-                },
-                "context": {
-                    "type": "string",
-                    "description": "Optional caller-selected context. Keep compact; pass paths/artifacts/summaries instead of dumping chat history unless truly needed.",
-                    "default": "",
-                },
-                "timeout_seconds": {
-                    "type": "integer",
-                    "description": (
-                        f"Synchronous wait limit. Minimum 10 seconds. Current plugin cap: "
-                        f"{'none' if MAX_TIMEOUT_SECONDS <= 0 else str(MAX_TIMEOUT_SECONDS) + ' seconds'}; "
-                        "set PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS to raise it, or 0 for no plugin cap. "
-                        "On timeout the child process is terminated and a structured timeout result is returned."
-                    ),
-                    "default": DEFAULT_TIMEOUT_SECONDS,
-                    "minimum": 10,
-                    **({} if MAX_TIMEOUT_SECONDS <= 0 else {"maximum": MAX_TIMEOUT_SECONDS}),
-                },
-                "output_contract": {
-                    "type": "string",
-                    "description": "Optional content/schema guidance. Extra JSON keys are allowed. With output_mode=auto, exact legacy phrases such as 'Markdown only' or 'plain text' select that format. New Markdown/text runs must end with PROFILE_DELEGATE_RESULT: ok|blocked|failed outside fences; no verdict means unknown, not success.",
-                    "default": "",
-                },
-                "output_mode": {
-                    "type": "string",
-                    "enum": ["auto", "json", "markdown", "text"],
-                    "description": "Serialization mode. auto (default) preserves legacy format selection; explicit json/markdown/text wins and contradictory contracts fail before launch. JSON uses a separate object envelope; new prose requires a terminal verdict.",
-                    "default": "auto",
-                },
-                "workdir": {
-                    "type": "string",
-                    "description": "Optional working directory for the delegated Hermes subprocess. Defaults to the current process working directory.",
-                    "default": "",
-                },
-                "background": {
-                    "type": "boolean",
-                    "description": "Run asynchronously, return a task_id immediately, and keep the originating conversation responsive. Prefer background for long, multi-stage, or independently monitorable work; short bounded specialist work may remain foreground. Advisory only: no automatic mode selection or rejection.",
-                    "default": False,
-                },
-                "notify_on_complete": {
-                    "type": "boolean",
-                    "description": "When background=true, notify the originating chat when the delegated profile finishes. Default true.",
-                    "default": True,
-                },
-                "model": {
-                    "type": "string",
-                    "description": "Optional requested model for this call. Overrides the target profile default temporarily; blank means inherit.",
-                },
-                "provider": {
-                    "type": "string",
-                    "description": "Optional requested provider for this call. Hermes validates compatibility; blank means inherit.",
-                },
-                "reasoning_effort": {
-                    "type": "string",
-                    "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
-                    "description": "Explicit child override, including 'none'. Omit it to inherit. Supplying it without reasoning_mode remains a backward-compatible explicit override.",
-                },
-                "reasoning_mode": {
-                    "type": "string", "enum": ["inherit", "override"],
-                    "description": "inherit creates no reasoning overlay; override requires reasoning_effort. 'none' is explicit, never inheritance.",
-                },
-                "max_turns": {
-                    "type": "integer", "minimum": 1, "maximum": 10000,
-                    "description": "Optional requested maximum child agent turns for this call.",
-                },
-                "toolsets": {
-                    "type": "array", "items": {"type": "string"}, "maxItems": 100,
-                    "description": "Optional requested toolsets. Every item must be explicitly allowed by PROFILE_DELEGATE_ALLOWED_TOOLSETS.",
-                },
-                "skills": {
-                    "type": "array", "items": {"type": "string"}, "maxItems": 100,
-                    "description": "Optional skills to preload. Every item must be explicitly allowed by PROFILE_DELEGATE_ALLOWED_SKILLS.",
-                },
-                "capability_preset": {
-                    "type": "string",
-                    "enum": ["review", "build"],
-                    "default": "build",
-                    "description": (
-                        "Plugin-owned capability posture. review exposes web plus file reads/search while the child bootstrap "
-                        "removes mutating file tools, terminal/process, and execute_code from the child schema. build preserves "
-                        "the selected/inherited build capabilities; it does not bypass approval policy."
-                    ),
-                },
-                "child_approval_mode": {
-                    "type": "string",
-                    "enum": ["deny", "profile", "inherit", "yolo", "approve_yolo"],
-                    "description": "Per-task ordinary approval selection: deny refuses fresh consent, profile uses target posture/grants, inherit uses caller posture/grants, yolo bypasses ordinary prompts. Only profile, inherit and yolo require caller-side allow_child_approval_override=true; deny narrowing is exempt. Target/ancestor denies and frozen resume authority remain. Omission uses configured default; approve_yolo aliases yolo.",
-                },
-                "transport_mode": {
-                    "type": "string", "enum": ["auto", "interactive", "simple"],
-                    "description": "auto (default) keeps detached background work interactive/steerable and fails closed on startup errors. simple is non-steerable. interactive requires background=true.",
-                },
-                "preflight": {
-                    "type": "boolean", "default": False,
-                    "description": "Validate this exact request without creating a run or starting a child; return normalized fields, policy conflicts and a retry shape. Resolved capabilities are preflight estimates; runtime-observed fields remain unknown.",
-                },
-                "duplicate_policy": {
-                    "type": "string", "enum": ["reuse", "new"], "default": "reuse",
-                    "description": "reuse returns an identical active request from the same origin; new intentionally creates another run.",
-                },
-            },
-            "required": ["profile", "task", "session_title"],
-            "additionalProperties": False,
-        },
-    }
+    return _tool_schema(
+        'profile_delegate', TOOL_DESCRIPTION, {
+            'profile': _field(
+                'string', 'Target Hermes profile name, e.g. reviewer, builder, research, work. Must exist locally.'),
+            'task': _field(
+                'string', 'Self-contained bounded task for the target profile. Be explicit about success criteria.'),
+            'session_title': _field(
+                'string', "Required short title for this delegated session/run, max 50 chars. If longer, it is truncated. Broken English or Spanish shorthand is fine, e.g. 'seguir tests builder' or 'review plan riesgos'."),
+            'session_mode': _field(
+                'string', 'Start a fresh target-profile session or resume an explicit target-profile session_id. Default: new.', enum=['new', 'resume']),
+            'session_id': _field(
+                'string', "Target-profile Hermes session id; required only with session_mode='resume', forbidden with new. Use `hermes -p <profile> sessions list` to find it."),
+            'context': _field(
+                'string', 'Optional caller-selected context. Keep compact; pass paths/artifacts/summaries instead of dumping chat history unless truly needed.', default=''),
+            'timeout_seconds': _field(
+                'integer', f"Synchronous wait limit. Minimum 10 seconds. Current plugin cap: {('none' if MAX_TIMEOUT_SECONDS <= 0 else str(MAX_TIMEOUT_SECONDS) + ' seconds')}; set PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS to raise it, or 0 for no plugin cap. On timeout the child process is terminated and a structured timeout result is returned.", default=DEFAULT_TIMEOUT_SECONDS, minimum=10, **{} if MAX_TIMEOUT_SECONDS <= 0 else {'maximum': MAX_TIMEOUT_SECONDS}),
+            'output_contract': _field(
+                'string', "Optional content/schema guidance. Extra JSON keys are allowed. With output_mode=auto, exact legacy phrases such as 'Markdown only' or 'plain text' select that format. New Markdown/text runs must end with PROFILE_DELEGATE_RESULT: ok|blocked|failed outside fences; no verdict means unknown, not success.", default=''),
+            'output_mode': _field(
+                'string', 'Serialization mode. auto (default) preserves legacy format selection; explicit json/markdown/text wins and contradictory contracts fail before launch. JSON uses a separate object envelope; new prose requires a terminal verdict.', enum=['auto', 'json', 'markdown', 'text'], default='auto'),
+            'workdir': _field(
+                'string', 'Optional working directory for the delegated Hermes subprocess. Defaults to the current process working directory.', default=''),
+            'background': _field(
+                'boolean', 'Run asynchronously, return a task_id immediately, and keep the originating conversation responsive. Prefer background for long, multi-stage, or independently monitorable work; short bounded specialist work may remain foreground. Advisory only: no automatic mode selection or rejection.', default=False),
+            'notify_on_complete': _field(
+                'boolean', 'When background=true, notify the originating chat when the delegated profile finishes. Default true.', default=True),
+            'model': _field(
+                'string', 'Optional requested model for this call. Overrides the target profile default temporarily; blank means inherit.'),
+            'provider': _field(
+                'string', 'Optional requested provider for this call. Hermes validates compatibility; blank means inherit.'),
+            'reasoning_effort': _field(
+                'string', "Explicit child override, including 'none'. Omit it to inherit. Supplying it without reasoning_mode remains a backward-compatible explicit override.", enum=['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
+            'reasoning_mode': _field(
+                'string', "inherit creates no reasoning overlay; override requires reasoning_effort. 'none' is explicit, never inheritance.", enum=['inherit', 'override']),
+            'max_turns': _field(
+                'integer', 'Optional requested maximum child agent turns for this call.', minimum=1, maximum=10000),
+            'toolsets': _field(
+                'array', 'Optional requested toolsets. Every item must be explicitly allowed by PROFILE_DELEGATE_ALLOWED_TOOLSETS.', items={'type': 'string'}, maxItems=100),
+            'skills': _field(
+                'array', 'Optional skills to preload. Every item must be explicitly allowed by PROFILE_DELEGATE_ALLOWED_SKILLS.', items={'type': 'string'}, maxItems=100),
+            'capability_preset': _field(
+                'string', 'Plugin-owned capability posture. review exposes web plus file reads/search while the child bootstrap removes mutating file tools, terminal/process, and execute_code from the child schema. build preserves the selected/inherited build capabilities; it does not bypass approval policy.', enum=['review', 'build'], default='build'),
+            'child_approval_mode': _field(
+                'string', 'Per-task ordinary approval selection: deny refuses fresh consent, profile uses target posture/grants, inherit uses caller posture/grants, yolo bypasses ordinary prompts. Only profile, inherit and yolo require caller-side allow_child_approval_override=true; deny narrowing is exempt. Target/ancestor denies and frozen resume authority remain. Omission uses configured default; approve_yolo aliases yolo.', enum=['deny', 'profile', 'inherit', 'yolo', 'approve_yolo']),
+            'transport_mode': _field(
+                'string', 'auto (default) keeps detached background work interactive/steerable and fails closed on startup errors. simple is non-steerable. interactive requires background=true.', enum=['auto', 'interactive', 'simple']),
+            'preflight': _field(
+                'boolean', 'Validate this exact request without creating a run or starting a child; return normalized fields, policy conflicts and a retry shape. Resolved capabilities are preflight estimates; runtime-observed fields remain unknown.', default=False),
+            'duplicate_policy': _field(
+                'string', 'reuse returns an identical active request from the same origin; new intentionally creates another run.', enum=['reuse', 'new'], default='reuse'),
+        }, ['profile', 'task', 'session_title'])
 
 
 def _status_schema() -> Dict[str, Any]:
-    return {
-        "name": "profile_delegate_status",
-        "description": "Read a Profile Delegate run by task_id. Returns status, result, log tails, and artifact paths.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "Task id returned by profile_delegate, e.g. pd_20260613_083528_9hksdn."},
-                "tail_chars": {"type": "integer", "description": "Maximum stdout/stderr tail chars to return, 0-20000.", "default": 4000},
-            },
-            "required": ["task_id"],
-            "additionalProperties": False,
-        },
-    }
+    return _tool_schema(
+        'profile_delegate_status', 'Read a Profile Delegate run by task_id. Returns status, result, log tails, and artifact paths.', {
+            'task_id': _field(
+                'string', 'Task id returned by profile_delegate, e.g. pd_20260613_083528_9hksdn.'),
+            'tail_chars': _field(
+                'integer', 'Maximum stdout/stderr tail chars to return, 0-20000.', default=4000),
+        }, ['task_id'])
 
 
 def _steer_schema() -> Dict[str, Any]:
-    return {
-        "name": "profile_delegate_steer",
-        "description": "Steer an active background TUI-backed Profile Delegate run from its exact originating session.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "Active Profile Delegate task id."},
-                "text": {"type": "string", "minLength": 1, "maxLength": 12000, "description": "Bounded steering instruction delivered through native session.steer."},
-            },
-            "required": ["task_id", "text"],
-            "additionalProperties": False,
-        },
-    }
+    return _tool_schema(
+        'profile_delegate_steer', 'Steer an active background TUI-backed Profile Delegate run from its exact originating session.', {
+            'task_id': _field(
+                'string', 'Active Profile Delegate task id.'),
+            'text': _field(
+                'string', 'Bounded steering instruction delivered through native session.steer.', minLength=1, maxLength=12000),
+        }, ['task_id', 'text'])
 
 
 def _cancel_schema() -> Dict[str, Any]:
-    return {
-        "name": "profile_delegate_cancel",
-        "description": "Cancel an active Profile Delegate run from its exact originating session. Background TUI runs use native session.interrupt; foreground CLI runs use an owned control marker consumed by the synchronous process owner.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "Active Profile Delegate task id."},
-            },
-            "required": ["task_id"],
-            "additionalProperties": False,
-        },
-    }
+    return _tool_schema(
+        'profile_delegate_cancel', 'Cancel an active Profile Delegate run from its exact originating session. Background TUI runs use native session.interrupt; foreground CLI runs use an owned control marker consumed by the synchronous process owner.', {
+            'task_id': _field(
+                'string', 'Active Profile Delegate task id.'),
+        }, ['task_id'])
 
 
 def _list_schema() -> Dict[str, Any]:
-    return {
-        "name": "profile_delegate_list",
-        "description": "List recent Profile Delegate runs for local inspection/debugging.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "limit": {"type": "integer", "description": "Maximum matching runs to list, 1-100.", "default": 20},
-                "scope": {
-                    "type": "string",
-                    "enum": ["current_session"],
-                    "default": "current_session",
-                    "description": "Origin-authorized current caller session only. Lane/global inspection is operator CLI only; legacy widening requests are refused.",
-                },
-                "status": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": [
-                            "running", "cancelling", "completed", "failed",
-                            "cancelled", "timed_out", "corrupt",
-                        ],
-                    },
-                    "description": "Optional lifecycle status filters.",
-                },
-                "profile": {"type": "string", "description": "Optional exact canonical target-profile filter."},
-            },
-            "required": [],
-            "additionalProperties": False,
-        },
-    }
+    return _tool_schema(
+        'profile_delegate_list', 'List recent Profile Delegate runs for local inspection/debugging.', {
+            'limit': _field(
+                'integer', 'Maximum matching runs to list, 1-100.', default=20),
+            'scope': _field(
+                'string', 'Origin-authorized current caller session only. Lane/global inspection is operator CLI only; legacy widening requests are refused.', enum=['current_session'], default='current_session'),
+            'status': _field(
+                'array', 'Optional lifecycle status filters.', items={'type': 'string', 'enum': ['running', 'cancelling', 'completed', 'failed', 'cancelled', 'timed_out', 'corrupt']}),
+            'profile': _field(
+                'string', 'Optional exact canonical target-profile filter.'),
+        }, [])
 
 
 def _policy_schema() -> Dict[str, Any]:
-    return {
-        "name": "profile_delegate_policy",
-        "description": "Inspect the effective non-secret Profile Delegate policy before constructing a call.",
-        "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
-    }
+    return _tool_schema(
+        'profile_delegate_policy', 'Inspect the effective non-secret Profile Delegate policy before constructing a call.', {
+        }, [])
 
 
 def _error_result(exc: Exception) -> Dict[str, Any]:
@@ -359,104 +249,52 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-def _status_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
-    payload = args if isinstance(args, dict) else {}
-    # Hermes may pass internal kwargs such as task_id; explicit tool args must win.
-    payload = {**kwargs, **payload}
+def _invoke(name: str, function, *args, **kwargs) -> str:
     try:
-        result = profile_delegate_status(
-            payload.get("task_id", ""),
-            payload.get("tail_chars", 4000),
-            caller_origin=_current_origin(),
-        )
+        result = function(*args, **kwargs)
     except ProfileDelegateError as exc:
         result = _error_result(exc)
     except Exception as exc:
-        result = {"success": False, "error": f"profile_delegate_status internal error: {type(exc).__name__}: {exc}", "error_code": "internal_error", "status": "failed"}
+        result = {"success": False, "error": f"{name} internal error: {type(exc).__name__}: {exc}",
+                  "error_code": "internal_error", "status": "failed"}
     return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def _status_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
+    payload = {**kwargs, **(args if isinstance(args, dict) else {})}
+    return _invoke("profile_delegate_status", profile_delegate_status, payload.get("task_id", ""),
+                   payload.get("tail_chars", 4000), caller_origin=_current_origin())
 
 
 def _steer_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     payload = {**kwargs, **(args if isinstance(args, dict) else {})}
-    try:
-        result = profile_delegate_steer(
-            payload.get("task_id", ""),
-            payload.get("text", ""),
-            caller_origin=_current_origin(),
-        )
-    except ProfileDelegateError as exc:
-        result = _error_result(exc)
-    except Exception as exc:
-        result = {"success": False, "error": f"profile_delegate_steer internal error: {type(exc).__name__}: {exc}", "error_code": "internal_error", "status": "failed"}
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return _invoke("profile_delegate_steer", profile_delegate_steer, payload.get("task_id", ""),
+                   payload.get("text", ""), caller_origin=_current_origin())
 
 
 def _cancel_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     payload = {**kwargs, **(args if isinstance(args, dict) else {})}
-    try:
-        result = profile_delegate_cancel(
-            payload.get("task_id", ""), caller_origin=_current_origin()
-        )
-    except ProfileDelegateError as exc:
-        result = _error_result(exc)
-    except Exception as exc:
-        result = {"success": False, "error": f"profile_delegate_cancel internal error: {type(exc).__name__}: {exc}", "error_code": "internal_error", "status": "failed"}
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return _invoke("profile_delegate_cancel", profile_delegate_cancel, payload.get("task_id", ""),
+                   caller_origin=_current_origin())
 
 
 def _list_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
-    payload = args if isinstance(args, dict) else {}
-    payload = {**kwargs, **payload}
-    try:
-        result = profile_delegate_list(
-            limit=payload.get("limit", 20),
-            scope=payload.get("scope", "current_session"),
-            statuses=payload.get("status"),
-            profile=payload.get("profile", ""),
-            caller_origin=_current_origin(),
-        )
-    except ProfileDelegateError as exc:
-        result = _error_result(exc)
-    except Exception as exc:
-        result = {"success": False, "error": f"profile_delegate_list internal error: {type(exc).__name__}: {exc}", "error_code": "internal_error", "status": "failed"}
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    payload = {**kwargs, **(args if isinstance(args, dict) else {})}
+    return _invoke("profile_delegate_list", profile_delegate_list, limit=payload.get("limit", 20),
+                   scope=payload.get("scope", "current_session"), statuses=payload.get("status"),
+                   profile=payload.get("profile", ""), caller_origin=_current_origin())
 
 
 def _prune_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
-    payload = args if isinstance(args, dict) else {}
-    payload = {**kwargs, **payload}
-    try:
-        raise ProfileDelegateError("prune requires operator CLI", "operator_only")
-    except ProfileDelegateError as exc:
-        result = _error_result(exc)
-    except Exception as exc:
-        result = {"success": False, "error": f"profile_delegate_prune internal error: {type(exc).__name__}: {exc}", "error_code": "internal_error", "status": "failed"}
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return json.dumps(_error_result(ProfileDelegateError("prune requires operator CLI", "operator_only")), ensure_ascii=False, indent=2)
 
 
 def _reconcile_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
-    try:
-        raise ProfileDelegateError("reconcile requires operator CLI", "operator_only")
-    except ProfileDelegateError as exc:
-        result = _error_result(exc)
-    except Exception as exc:
-        result = {
-            "success": False,
-            "error": f"profile_delegate_reconcile internal error: {type(exc).__name__}: {exc}",
-            "error_code": "internal_error",
-            "status": "failed",
-        }
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return json.dumps(_error_result(ProfileDelegateError("reconcile requires operator CLI", "operator_only")), ensure_ascii=False, indent=2)
 
 
 def _policy_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
-    try:
-        result = profile_delegate_policy()
-    except ProfileDelegateError as exc:
-        result = _error_result(exc)
-    except Exception as exc:
-        result = {"success": False, "error": f"profile_delegate_policy internal error: {type(exc).__name__}: {exc}", "error_code": "internal_error", "status": "failed"}
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return _invoke("profile_delegate_policy", profile_delegate_policy)
 
 
 def _oneline(text: str) -> str:

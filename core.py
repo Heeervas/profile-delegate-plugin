@@ -793,6 +793,17 @@ def _config_list(value: Any, name: str) -> List[str]:
     return result
 
 
+def _policy_value(key: str, kind: str, raw: Any, source: str) -> Any:
+    if kind == "list":
+        return [item.strip() for item in raw.split(",") if item.strip()] if source == "env" else _config_list(raw, key)
+    if kind == "bool":
+        return _config_bool(raw, key)
+    bounds = {"max_depth": (0, 20), "max_concurrent": (1, 100), "max_async": (1, 100),
+              "default_timeout_seconds": (10, 604800), "max_timeout_seconds": (10, 604800),
+              "max_transient_resumes": (0, 2), "duplicate_active_window_seconds": (1, 3600)}
+    return _config_int(raw, key, *bounds[key], allow_zero=key == "max_timeout_seconds")
+
+
 def load_effective_policy() -> EffectivePolicy:
     """Load safe defaults < YAML < explicitly present environment overrides."""
     entry = _plugin_entry()
@@ -837,22 +848,9 @@ def load_effective_policy() -> EffectivePolicy:
         import native_approval
     native_approval.configure_selector(entry, values, sources, coerce_child_approval_mode)
     for key, (kind, raw) in yaml_specs.items():
-        if raw is None:
-            continue
-        if kind == "list":
-            values[key] = _config_list(raw, key)
-        elif kind == "bool":
-            values[key] = _config_bool(raw, key)
-        elif kind == "resume":
-            values[key] = _config_int(raw, key, 0, 2)
-        elif kind == "window":
-            values[key] = _config_int(raw, key, 1, 3600)
-        elif kind == "timeout":
-            values[key] = _config_int(raw, key, 10, 604800, allow_zero=True)
-        else:
-            bounds = {"max_depth": (0, 20), "max_concurrent": (1, 100), "max_async": (1, 100), "default_timeout_seconds": (10, 604800)}
-            values[key] = _config_int(raw, key, *bounds[key])
-        sources[key] = "yaml"
+        if raw is not None:
+            values[key] = _policy_value(key, kind, raw, "yaml")
+            sources[key] = "yaml"
     env_specs = {
         "PROFILE_DELEGATE_ALLOWED_PROFILES": ("allowed_profiles", "list"),
         "PROFILE_DELEGATE_ALLOW_ALL_PROFILES": ("allow_all_profiles", "bool"),
@@ -872,19 +870,10 @@ def load_effective_policy() -> EffectivePolicy:
         if env_name not in os.environ:
             continue
         raw = os.environ[env_name]
-        if kind == "list":
-            values[key] = [item.strip() for item in raw.split(",") if item.strip()]
-        elif kind == "bool":
-            values[key] = _config_bool(raw, env_name)
-        elif kind == "resume":
-            values[key] = _config_int(raw, env_name, 0, 2)
-        elif kind == "window":
-            values[key] = _config_int(raw, env_name, 1, 3600)
-        elif kind == "timeout":
-            values[key] = _config_int(raw, env_name, 10, 604800, allow_zero=True)
-        else:
-            bounds = {"max_depth": (0, 20), "max_concurrent": (1, 100), "max_async": (1, 100), "default_timeout_seconds": (10, 604800)}
-            values[key] = _config_int(raw, env_name, *bounds[key])
+        try:
+            values[key] = _policy_value(key, kind, raw, "env")
+        except ProfileDelegateError as exc:
+            raise ProfileDelegateError(str(exc).replace(key, env_name), exc.code) from exc
         sources[key] = "env"
     if __package__:
         from . import native_approval
@@ -977,30 +966,30 @@ def normalize_requested_execution(
         "toolsets": _execution_list("toolsets", toolsets),
         "skills": _execution_list("skills", skills),
     }
-    effective_policy = policy or load_effective_policy()
-    unsupported: List[str] = []
-    retry_patch: Dict[str, Any] = {}
-    allowed_values: Dict[str, Any] = {}
+    if validate_policy:
+        effective_policy = policy or load_effective_policy()
+        unsupported, retry_patch, allowed_values = _execution_policy_conflicts(result, effective_policy)
+        if result["reasoning_effort"] and not effective_policy.values["allow_reasoning_override"]:
+            unsupported.append("reasoning_effort")
+            retry_patch["reasoning_effort"] = None
+        if unsupported:
+            raise PreflightError("requested execution overrides are not allowed by effective policy",
+                                 unsupported, retry_patch, allowed_values=allowed_values)
+    return result
+
+
+def _execution_policy_conflicts(requested: Dict[str, Any], policy: EffectivePolicy):
+    unsupported, retry_patch, allowed_values = [], {}, {}
     for name in ("toolsets", "skills"):
-        requested = result[name]
-        allowed = effective_policy.values[f"allowed_{name}"]
-        if requested and (not allowed or any(item not in allowed for item in requested)):
+        allowed = policy.values[f"allowed_{name}"]
+        if requested[name] and (not allowed or any(item not in allowed for item in requested[name])):
             unsupported.append(name)
-            retry_patch[name] = []
-            allowed_values[name] = allowed
+            retry_patch[name], allowed_values[name] = [], allowed
     for name in ("model", "provider"):
-        if result[name] and not effective_policy.values[f"allow_{name}_override"]:
+        if requested[name] and not policy.values[f"allow_{name}_override"]:
             unsupported.append(name)
             retry_patch[name] = None
-    if result["reasoning_effort"] and not effective_policy.values["allow_reasoning_override"]:
-        unsupported.append("reasoning_effort")
-        retry_patch["reasoning_effort"] = None
-    if unsupported and validate_policy:
-        raise PreflightError(
-            "requested execution overrides are not allowed by effective policy",
-            unsupported, retry_patch, allowed_values=allowed_values,
-        )
-    return result
+    return unsupported, retry_patch, allowed_values
 
 
 def validate_preflight(
@@ -1017,16 +1006,9 @@ def validate_preflight(
     elif reasoning_mode == "override" and requested["reasoning_effort"] is None:
         unsupported.append("reasoning_effort")
         retry_patch.update({"reasoning_mode": "inherit", "reasoning_effort": None})
-    for name in ("toolsets", "skills"):
-        allowed = values[f"allowed_{name}"]
-        if requested[name] and (not allowed or any(item not in allowed for item in requested[name])):
-            unsupported.append(name)
-            retry_patch[name] = []
-            allowed_values[name] = allowed
-    for name in ("model", "provider"):
-        if requested[name] and not values[f"allow_{name}_override"]:
-            unsupported.append(name)
-            retry_patch[name] = None
+    fields, patch, allowed_values = _execution_policy_conflicts(requested, policy)
+    unsupported.extend(fields)
+    retry_patch.update(patch)
     if reasoning_mode == "override" and (
         not values["allow_reasoning_override"]
         or target_profile == "default"
