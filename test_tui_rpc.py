@@ -49,6 +49,52 @@ class FakeProcess:
         self.returncode = -9
 
 
+def runner_run(tmp_path, task_id, *, fields=None, prompt=None):
+    """Shared artifacts only; scenario-specific fields and omissions stay explicit."""
+    run = tmp_path / task_id
+    run.mkdir()
+    request = {
+        "task_id": run.name, "timeout_seconds": 10, "workdir": str(tmp_path),
+        "profile": "reviewer", "session_mode": "new", "profile_home": str(tmp_path),
+        "hermes_bin": sys.executable, "child_approval_mode": "deny",
+        "effective_policy": {"limits": {"max_concurrent": 8}},
+        **(fields or {}),
+    }
+    (run / "request.json").write_text(json.dumps(request), encoding="utf-8")
+    (run / "status.json").write_text(json.dumps({"task_id": run.name, "status": "running"}), encoding="utf-8")
+    if prompt is not None:
+        (run / "prompt.txt").write_text(prompt, encoding="utf-8")
+    return run
+
+
+@contextmanager
+def runner_slot(_limit):
+    yield type("Slot", (), {"slot": 0})()
+
+
+class CompleteClient:
+    """Existing complete-event fixture, shared without adding gateway behavior."""
+    stderr_tail = ""
+
+    def __init__(self, complete, *, exit_code=0):
+        self.process = type("Process", (), {"pid": os.getpid(), "poll": lambda self: exit_code})()
+        self.complete, self.calls, self.close_kwargs = complete, [], None
+
+    def wait_ready(self, **kwargs):
+        return None
+
+    def read_event(self, _timeout):
+        return self.complete
+
+    def call(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return {}
+
+    def close(self, **kwargs):
+        self.close_kwargs = kwargs
+        return None
+
+
 def test_gateway_command_uses_hermes_runtime_python(tmp_path):
     hermes_dir = tmp_path / "runtime"
     hermes_dir.mkdir()
@@ -526,20 +572,9 @@ def test_runner_poll_flushes_before_propagating_transport_error():
 
 
 def test_runner_publishes_ready_status_transitions_after_success(tmp_path, monkeypatch):
-    run = tmp_path / "pd_20260721_120001_bbbbbb"
-    run.mkdir()
-    request = {
-        "task_id": run.name, "timeout_seconds": 10, "workdir": str(tmp_path),
-        "profile": "reviewer", "session_mode": "new", "requested_session_id": "",
-        "session_title": "test", "profile_home": str(tmp_path), "hermes_bin": sys.executable,
-        "child_approval_mode": "deny", "effective_execution": {}, "effective_capabilities": {},
-        "effective_policy": {"limits": {"max_concurrent": 8}},
-    }
-    (run / "request.json").write_text(json.dumps(request), encoding="utf-8")
-    (run / "prompt.txt").write_text("prompt", encoding="utf-8")
-    (run / "status.json").write_text(
-        json.dumps({"task_id": run.name, "status": "running"}), encoding="utf-8",
-    )
+    run = runner_run(tmp_path, "pd_20260721_120001_bbbbbb", prompt="prompt", fields={
+        "requested_session_id": "", "session_title": "test", "effective_execution": {}, "effective_capabilities": {},
+    })
     transitions = []
     real_merge = tui_runner.core.merge_run_status
 
@@ -555,11 +590,7 @@ def test_runner_publishes_ready_status_transitions_after_success(tmp_path, monke
     )
     monkeypatch.setattr(tui_runner, "_environment", lambda request, run_dir: {})
 
-    @contextmanager
-    def slot(_limit):
-        yield type("Slot", (), {"slot": 0})()
-
-    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", slot)
+    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", runner_slot)
 
     complete = {
         "method": "event", "params": {
@@ -568,25 +599,8 @@ def test_runner_publishes_ready_status_transitions_after_success(tmp_path, monke
         },
     }
 
-    class Client:
-        stderr_tail = ""
 
-        def __init__(self):
-            self.process = type("Process", (), {"pid": os.getpid(), "poll": lambda self: 0})()
-
-        def wait_ready(self, **kwargs):
-            return None
-
-        def read_event(self, timeout):
-            return complete
-
-        def call(self, *args, **kwargs):
-            return {}
-
-        def close(self, **kwargs):
-            return None
-
-    monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", lambda **kwargs: Client())
+    monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", lambda **kwargs: CompleteClient(complete, exit_code=0))
     monkeypatch.setattr(
         tui_runner.tui_rpc, "start_session",
         lambda *args, **kwargs: {"ui_session_id": "ui-1", "child_session_id": "child-1"},
@@ -658,22 +672,10 @@ def test_bootstrap_discovery_failure_preserves_entry_exit_evidence(tmp_path, mon
 
 
 def test_runner_readiness_timeout_persists_stage_and_failure(tmp_path, monkeypatch):
-    run = tmp_path / "pd_20260721_120001_timeout"
-    run.mkdir()
-    (run / "request.json").write_text(json.dumps({
-        "task_id": run.name, "timeout_seconds": 10, "workdir": str(tmp_path),
-        "profile": "reviewer", "session_mode": "new", "profile_home": str(tmp_path),
-        "hermes_bin": sys.executable, "child_approval_mode": "deny",
-        "effective_policy": {"limits": {"max_concurrent": 8}},
-    }), encoding="utf-8")
-    (run / "status.json").write_text(json.dumps({"task_id": run.name, "status": "running"}), encoding="utf-8")
+    run = runner_run(tmp_path, "pd_20260721_120001_timeout")
     monkeypatch.setattr(tui_runner, "_environment", lambda *_args: {})
 
-    @contextmanager
-    def slot(_limit):
-        yield type("Slot", (), {"slot": 0})()
-
-    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", slot)
+    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", runner_slot)
 
     class Client:
         stderr_tail = ""
@@ -709,27 +711,12 @@ def test_client_close_allows_bounded_graceful_gateway_teardown():
 
 
 def test_runner_nonzero_transport_exit_overrides_complete_ok(tmp_path, monkeypatch):
-    run = tmp_path / "pd_20260721_120001_cccccc"
-    run.mkdir()
-    request = {
-        "task_id": run.name, "timeout_seconds": 10, "workdir": str(tmp_path),
-        "profile": "reviewer", "session_mode": "new", "requested_session_id": "",
-        "session_title": "test", "profile_home": str(tmp_path), "hermes_bin": sys.executable,
-        "child_approval_mode": "deny", "effective_execution": {}, "effective_capabilities": {},
-        "effective_policy": {"limits": {"max_concurrent": 8}},
-    }
-    (run / "request.json").write_text(json.dumps(request), encoding="utf-8")
-    (run / "prompt.txt").write_text("prompt", encoding="utf-8")
-    (run / "status.json").write_text(
-        json.dumps({"task_id": run.name, "status": "running"}), encoding="utf-8",
-    )
+    run = runner_run(tmp_path, "pd_20260721_120001_cccccc", prompt="prompt", fields={
+        "requested_session_id": "", "session_title": "test", "effective_execution": {}, "effective_capabilities": {},
+    })
     monkeypatch.setattr(tui_runner, "_environment", lambda request, run_dir: {})
 
-    @contextmanager
-    def slot(_limit):
-        yield type("Slot", (), {"slot": 0})()
-
-    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", slot)
+    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", runner_slot)
     complete = {
         "method": "event", "params": {
             "type": "message.complete", "session_id": "ui-1",
@@ -737,25 +724,8 @@ def test_runner_nonzero_transport_exit_overrides_complete_ok(tmp_path, monkeypat
         },
     }
 
-    class Client:
-        stderr_tail = ""
 
-        def __init__(self):
-            self.process = type("Process", (), {"pid": os.getpid(), "poll": lambda self: 17})()
-
-        def wait_ready(self, **kwargs):
-            return None
-
-        def read_event(self, timeout):
-            return complete
-
-        def call(self, *args, **kwargs):
-            return {}
-
-        def close(self, **kwargs):
-            return None
-
-    monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", lambda **kwargs: Client())
+    monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", lambda **kwargs: CompleteClient(complete, exit_code=17))
     monkeypatch.setattr(
         tui_runner.tui_rpc, "start_session",
         lambda *args, **kwargs: {"ui_session_id": "ui-1", "child_session_id": "child-1"},
@@ -773,20 +743,10 @@ def _execute_with_control(
     tmp_path, monkeypatch, command_type, control_call, *, extra_command_type=None,
     return_trace=False, client_factory=None, timeout_seconds=10,
 ):
-    run = tmp_path / f"pd_control_{command_type}"
-    run.mkdir()
-    request = {
-        "task_id": run.name, "timeout_seconds": timeout_seconds, "workdir": str(tmp_path),
-        "profile": "reviewer", "session_mode": "new", "requested_session_id": "",
-        "session_title": "control", "profile_home": str(tmp_path), "hermes_bin": sys.executable,
-        "child_approval_mode": "deny", "effective_execution": {}, "effective_capabilities": {},
-        "effective_policy": {"limits": {"max_concurrent": 8}},
-    }
-    (run / "request.json").write_text(json.dumps(request), encoding="utf-8")
-    (run / "prompt.txt").write_text("prompt", encoding="utf-8")
-    (run / "status.json").write_text(
-        json.dumps({"task_id": run.name, "status": "running"}), encoding="utf-8",
-    )
+    run = runner_run(tmp_path, f"pd_control_{command_type}", prompt="prompt", fields={
+        "timeout_seconds": timeout_seconds, "requested_session_id": "", "session_title": "control",
+        "effective_execution": {}, "effective_capabilities": {},
+    })
     _, commands, acks = core._control_dirs(run)
     command = {
         "schema_version": 1, "task_id": run.name, "type": command_type,
@@ -806,11 +766,7 @@ def _execute_with_control(
         extra_path.write_text(json.dumps(extra), encoding="utf-8")
     monkeypatch.setattr(tui_runner, "_environment", lambda request, run_dir: {})
 
-    @contextmanager
-    def slot(_limit):
-        yield type("Slot", (), {"slot": 0})()
-
-    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", slot)
+    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", runner_slot)
     complete = {
         "method": "event", "params": {
             "type": "message.complete", "session_id": "ui-1",
@@ -818,29 +774,8 @@ def _execute_with_control(
         },
     }
 
-    class Client:
-        stderr_tail = ""
 
-        def __init__(self):
-            self.process = type("Process", (), {"pid": os.getpid(), "poll": lambda self: 0})()
-            self.calls = []
-            self.close_kwargs = None
-
-        def wait_ready(self, **kwargs):
-            return None
-
-        def read_event(self, _timeout):
-            return complete
-
-        def call(self, *args, **kwargs):
-            self.calls.append((args, kwargs))
-            return {}
-
-        def close(self, **kwargs):
-            self.close_kwargs = kwargs
-            return None
-
-    client = client_factory(complete) if client_factory else Client()
+    client = client_factory(complete) if client_factory else CompleteClient(complete)
     monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", lambda **kwargs: client)
     monkeypatch.setattr(
         tui_runner.tui_rpc, "start_session",
@@ -1040,24 +975,12 @@ def test_runner_very_late_followup_is_unknown_not_missed(tmp_path, monkeypatch):
 
 
 def test_runner_applies_steer_over_real_stdio_gateway(tmp_path, monkeypatch):
-    run = tmp_path / "pd_20260824_120000_stdio1"
-    run.mkdir()
+    run = runner_run(tmp_path, "pd_20260824_120000_stdio1", prompt="initial prompt", fields={
+        "timeout_seconds": 1, "requested_session_id": "", "session_title": "stdio steer",
+        "requested_execution": {}, "effective_execution": {}, "effective_capabilities": {},
+        "approval_policy": {}, "resolved_output_mode": "json",
+    })
     methods_path = tmp_path / "methods.txt"
-    request = {
-        "task_id": run.name, "timeout_seconds": 1, "workdir": str(tmp_path),
-        "profile": "reviewer", "session_mode": "new", "requested_session_id": "",
-        "session_title": "stdio steer", "profile_home": str(tmp_path),
-        "hermes_bin": sys.executable, "child_approval_mode": "deny",
-        "requested_execution": {}, "effective_execution": {},
-        "effective_capabilities": {}, "approval_policy": {},
-        "resolved_output_mode": "json",
-        "effective_policy": {"limits": {"max_concurrent": 8}},
-    }
-    (run / "request.json").write_text(json.dumps(request), encoding="utf-8")
-    (run / "prompt.txt").write_text("initial prompt", encoding="utf-8")
-    (run / "status.json").write_text(
-        json.dumps({"task_id": run.name, "status": "running"}), encoding="utf-8",
-    )
     _, commands, acks = core._control_dirs(run)
     command = {
         "schema_version": 1, "task_id": run.name, "type": "steer",
@@ -1124,11 +1047,7 @@ for line in sys.stdin:
         lambda request, run_dir: [sys.executable, "-u", "-c", gateway_code, str(methods_path)],
     )
 
-    @contextmanager
-    def slot(_limit):
-        yield type("Slot", (), {"slot": 0})()
-
-    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", slot)
+    monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", runner_slot)
 
     poll_entered = threading.Event()
     command_written = threading.Event()

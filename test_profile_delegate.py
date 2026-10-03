@@ -30,13 +30,16 @@ HERMES_TEST_PYTHON = Path(os.environ.get("PROFILE_DELEGATE_TEST_RUNTIME", "/opt/
 
 
 
-def mock_delegate_admission(tmp_path, monkeypatch):
+def mock_delegate_admission(tmp_path, monkeypatch, *, hermes_bin=None):
     """Isolate admission only; each test supplies its own child/process behavior."""
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
     monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    if hermes_bin is None:
+        monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
+        monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    else:
+        monkeypatch.setattr(core, "resolve_hermes_bin", lambda: hermes_bin)
     monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
     monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
 
@@ -610,12 +613,7 @@ print(json.dumps(names))
 
 
 def test_approval_timeout_marker_becomes_structured_failure(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
-    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
+    mock_delegate_admission(tmp_path, monkeypatch, hermes_bin="/usr/bin/hermes")
 
     def fake_run(_cmd, **kwargs):
         core.text_safe_write(kwargs["stdout_path"], "Timeout — denying command\n")
@@ -840,12 +838,7 @@ def test_run_capped_subprocess_limits_stdout_stderr(tmp_path, monkeypatch):
 
 
 def test_delegate_reports_truncated_output(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
-    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: sys.executable)
+    mock_delegate_admission(tmp_path, monkeypatch, hermes_bin=sys.executable)
 
     def fake_run_capped(cmd, **kwargs):
         core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: sid999')
@@ -1875,12 +1868,7 @@ def test_default_profile_reasoning_override_rejected_before_run_dir(tmp_path, mo
 
 
 def test_execution_metadata_persisted_sync(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core, "validate_profile", lambda p, policy=None: core.ValidatedProfile(p, p, str(tmp_path / p)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
-    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
+    mock_delegate_admission(tmp_path, monkeypatch, hermes_bin="/usr/bin/hermes")
     def fake_run(cmd, **kwargs):
         core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
         core.text_safe_write(kwargs["stderr_path"], "")
@@ -2270,12 +2258,7 @@ def test_reasoning_omission_inherits_and_none_is_explicit():
 
 
 def test_identical_concurrent_background_requests_create_one_run(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core, "validate_profile", lambda p, policy=None: core.ValidatedProfile(p, p, str(tmp_path / p)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
-    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
+    mock_delegate_admission(tmp_path, monkeypatch, hermes_bin="/usr/bin/hermes")
     monkeypatch.setattr(core, "_start_background_run", lambda run_dir: None)
     origin = {"session_id": "same-origin"}
     barrier = threading.Barrier(2)
@@ -2351,12 +2334,7 @@ def test_detached_max_async_uses_persisted_policy(tmp_path, monkeypatch):
 
 
 def test_identical_concurrent_sync_requests_create_one_run(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core, "validate_profile", lambda p, policy=None: core.ValidatedProfile(p, p, str(tmp_path / p)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
-    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
+    mock_delegate_admission(tmp_path, monkeypatch, hermes_bin="/usr/bin/hermes")
     entered = threading.Event()
     release = threading.Event()
 
