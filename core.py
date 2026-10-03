@@ -441,6 +441,7 @@ def derive_activity(status: Any) -> Dict[str, Any]:
     if (
         lifecycle in {"running", "cancelling"}
         and data.get("transport") == "cli"
+        and data.get("background_worker_mode") != "detached"
         and data.get("process_identity")
         and isinstance(data.get("worker_alive"), bool)
     ):
@@ -1568,6 +1569,8 @@ def run_capped_subprocess(
     termination_grace: float = SYNC_TERMINATION_GRACE_SECONDS,
 ) -> Dict[str, Any]:
     """Run a bounded child while propagating parent activity and interruption."""
+    detached = run_dir is not None and read_json_file(run_dir / "status.json").get("background_worker_mode") == "detached"
+    pid_field, alive_field = ("transport_pid", "transport_alive") if detached else ("worker_pid", "worker_alive")
     stdout_limit, stderr_limit = output_limits()
     text_safe_write(stdout_path, "")
     text_safe_write(stderr_path, "")
@@ -1598,8 +1601,8 @@ def run_capped_subprocess(
         group_identity = _owned_group_identity(proc.pid)
         if run_dir is not None:
             merge_run_status_best_effort(run_dir, {
-                "phase": "child_running", "worker_pid": proc.pid,
-                "process_identity": identity, "worker_alive": True,
+                "phase": "child_running", pid_field: proc.pid,
+                "process_identity": identity, alive_field: True,
                 "process_group_identity": group_identity,
                 "latest_activity": now_iso(), "timeout_seconds": timeout,
                 "timeout_deadline": (datetime.now(timezone.utc) + timedelta(seconds=timeout)).isoformat(),
@@ -1629,7 +1632,7 @@ def run_capped_subprocess(
                         touch(activity_state, "profile_delegate child running")
                     if run_dir is not None and now - last_status >= max(0.01, status_interval):
                         merge_run_status_best_effort(run_dir, {
-                            "phase": "child_running", "worker_alive": True,
+                            "phase": "child_running", alive_field: True,
                             "latest_activity": now_iso(),
                         })
                         last_status = now
@@ -1672,7 +1675,7 @@ def run_capped_subprocess(
             exit_code = proc.wait(timeout=max(1, int(deadline - time.monotonic()) + 1))
         if run_dir is not None:
             merge_run_status(run_dir, {
-                "phase": "child_stopped", "worker_alive": False,
+                "phase": "child_stopped", alive_field: False,
                 "latest_activity": now_iso(), "cancellation_requested": cancelled,
                 "interrupted": interrupted,
             })
@@ -1835,7 +1838,7 @@ def _control_filename(seq: int, command_id: str) -> str:
 def _require_detached_cli_identity(status: Dict[str, Any]) -> None:
     if status.get("background_worker_mode") != "detached":
         return
-    pid, identity = status.get("worker_pid"), status.get("process_group_identity")
+    pid, identity = status.get("transport_pid", status.get("worker_pid")), status.get("process_group_identity")
     if type(pid) is not int or not identity:
         raise ProfileDelegateError(
             "detached CLI identity pending; cancellation was not accepted; retry after identity is published",

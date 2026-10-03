@@ -134,7 +134,7 @@ def test_detached_simple_cancel_reaps_child_and_ack_is_not_terminal(tmp_path, mo
     try:
         for _ in range(200):
             state = core.read_json_file(run / "status.json")
-            if state.get("process_group_identity") and state.get("worker_alive"):
+            if state.get("process_group_identity") and state.get("transport_alive"):
                 break
             time.sleep(0.01)
         else:
@@ -148,7 +148,9 @@ def test_detached_simple_cancel_reaps_child_and_ack_is_not_terminal(tmp_path, mo
         assert ack["command_id"] == command["command_id"]
         assert ack["state"] == "accepted"
         assert core.probe_worker_alive(results[0]["worker_pid"]) is False
-        assert core.read_json_file(run / "status.json")["status"] == "running"
+        final = core.read_json_file(run / "status.json")
+        assert final["worker_pid"] == os.getpid() and final["transport_alive"] is False
+        assert final["status"] == "running"
     finally:
         if thread.is_alive():
             thread.join(timeout=15)

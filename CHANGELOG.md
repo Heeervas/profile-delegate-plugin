@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- Detached CLI supervision keeps the wrapper identity separate from the child transport. Recovery and capacity track the wrapper; cancellation verifies and stops the child process group.
+
 - Native session selection refuses reasoning display commands before RPC; these commands persist display YAML even with session scope.
 
 - Native durable dispatch is registered by the actual worker before profile execution, surviving launcher exit. Startup metadata failures reap the worker before releasing its status lock; duplicate workers and foreign completion origins are refused without replacing existing records. In-process workers preserve the caller home through native context propagation.

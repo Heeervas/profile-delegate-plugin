@@ -17,6 +17,17 @@ The existing disposable installed-runtime probe, `workspace/projects/profile-del
 
 These are prior installed source/runtime evidence, not changed-candidate Discord or provider acceptance. Reusing this decisive counterexample avoids building another simulator. Public async dispatch also creates its own notification/finalizer and does not preserve the plugin's silent independent completion contract. Native PID parking can describe one process but does not supply the missing silent wake and multiple-child ownership lifecycle.
 
+## Public persistent-spawn counterexample
+
+A new disposable installed-runtime probe calls public `process_registry.spawn_local(..., persist_on_release=True)` and the real GoalManager. It uses a harmless process waiting on its own FIFO, a disposable native store and no provider. Receipt: `.artifacts/refactor-20261003/native-spawn-boundary.json`.
+
+- Initial owner: one worker discovered and explicit barrier waiting; notification false.
+- Goal compression: explicit barrier survives, new owner discovery zero, old owner one, unrelated new session zero.
+- Agent release: zero workers killed and the persistent process remains alive. This positively resolves the persistence issue for spawn; the adoption release counterexample does not apply to this API.
+- Silent completion: process exits zero and is reaped; local completion event is set, gateway wake queue remains empty. Only an explicit GoalManager recheck clears the barrier.
+
+This proves the two remaining limits for this supported spawn path. It does not prove universal impossibility, nor rule out replacing the completion producer with public async dispatch. No private registry insertion, ownership router, poller or core patch is justified by this result. Decision remains to preserve independent execution and native durable delivery, with automatic goal continuation pending.
+
 ## Current integration
 
 `native.py` owns the compatibility checks and native durable persistence seam. The worker persists terminal completion; the parent watcher only offers a coherent already-persisted pending event. Recovery is explicit. Internal Hermes ledger APIs remain a version-checked dependency; their use is not a public goal dependency API.

@@ -275,10 +275,14 @@ def test_callback_failure_still_reaps_owned_process_group(tmp_path):
     assert time.monotonic() - started < 3
 
 
-def test_sync_status_is_throttled_atomic_and_contains_no_output(tmp_path, monkeypatch):
+@pytest.mark.parametrize("detached", [False, True])
+def test_sync_status_is_throttled_atomic_and_contains_no_output(tmp_path, monkeypatch, detached):
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
     run_dir = tmp_path / "pd_20260724_120000_abcdef"
     _status_fixture(run_dir)
+    if detached:
+        core.merge_run_status(run_dir, {"background_worker_mode": "detached",
+                                       "worker_pid": os.getpid(), "worker_identity": core._process_identity(os.getpid())})
     writes = 0
     original = core.merge_run_status_best_effort
 
@@ -301,14 +305,22 @@ def test_sync_status_is_throttled_atomic_and_contains_no_output(tmp_path, monkey
     assert result["stop_reason"] == "exited"
     assert 2 <= writes <= 8
     assert secret not in status_text
-    assert status["worker_pid"] == result["worker_pid"]
-    assert status["worker_alive"] is False
+    expected_owner = os.getpid() if detached else result["worker_pid"]
+    assert status["worker_pid"] == expected_owner
+    assert status["transport_alive" if detached else "worker_alive"] is False
+    if detached:
+        assert status["transport_pid"] == result["worker_pid"]
+        assert status["worker_identity"] == core._process_identity(expected_owner)
+        assert core._operator_reconcile(run_dir.name)["reason"] == "worker_alive"
+        with pytest.raises(core.ProfileDelegateError) as error:
+            core._require_detached_cli_identity(status)
+        assert error.value.code == "control_identity_unverifiable"
     assert status["latest_activity"]
     assert status["process_identity"]
     public = core._read_run_status(run_dir.name, tail_chars=0, operator=True)
-    assert public["worker_pid"] == result["worker_pid"]
+    assert public["worker_pid"] == expected_owner
     assert public["process_identity"] == status["process_identity"]
-    assert public["activity"] == "stale"
+    assert public["activity"] == ("active" if detached else "stale")
     assert public["timeout_seconds"] == 3
     assert not (run_dir / "status.json.tmp").exists()
 
