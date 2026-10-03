@@ -296,7 +296,8 @@ Interactive session preparation and prompt submission share one initialization d
 Terminal worker, startup, and failure publishers share the verified lock
 publication decision: a valid terminal result is written before terminal status,
 and later failure paths cannot overwrite it. Paired operator/model status reads use
-the lock; notification enrichment cannot replace terminal-owned fields. A crash
+the lock and validate the same single result snapshot returned to the caller.
+Legacy results remain unverified; notification enrichment cannot replace terminal-owned fields. A crash
 between the two renames leaves a result-first intermediate that an operator can
 repair once its detached worker is definitively dead. Ordinary status/list and
 duplicate/capacity checks remain read-only. Retention remains separate,

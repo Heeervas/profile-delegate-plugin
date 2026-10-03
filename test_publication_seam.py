@@ -105,6 +105,16 @@ def test_paired_read_waits_for_publication(tmp_path, monkeypatch):
             assert proceed.wait(5)
         return original(run_dir, status)
     monkeypatch.setattr(core, "_write_locked_status_snapshot", block)
+    read_result = core.operator_read_json
+    result_reads = []
+    def replace_after_read(path, *args, **kwargs):
+        result = read_result(path, *args, **kwargs)
+        if path == run / "result.json":
+            result_reads.append(result)
+            if len(result_reads) == 1:
+                core.json_safe_write(path, {**result, "status": "blocked", "summary": "replacement"})
+        return result
+    monkeypatch.setattr(core, "operator_read_json", replace_after_read)
     writer = threading.Thread(target=lambda: publish(run))
     writer.start()
     assert inside.wait(5)
@@ -118,3 +128,6 @@ def test_paired_read_waits_for_publication(tmp_path, monkeypatch):
     reader.join(5)
     assert not writer.is_alive() and not reader.is_alive()
     assert observed[0]["status"] == observed[0]["result"]["execution_status"] == "completed"
+    assert observed[0]["task_status"] == observed[0]["result"]["status"] == "ok"
+    assert observed[0]["task_success"] is True
+    assert len(result_reads) == 1

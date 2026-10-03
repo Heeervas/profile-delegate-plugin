@@ -3080,14 +3080,16 @@ def _cancel_evidence(run_dir: Path) -> Tuple[bool, bool]:
     return pending, acknowledged
 
 
-def _validated_terminal_result(run_dir: Path) -> Optional[Dict[str, Any]]:
-    """Return a schema-valid terminal result artifact, otherwise fail closed."""
+def _validated_terminal_result(run_dir: Path, *, allow_legacy: bool = False) -> Optional[Dict[str, Any]]:
+    """Read once; current results fail closed, legacy inspection remains unverified."""
     result_path = run_dir / "result.json"
     try:
         result_path.lstat()
     except FileNotFoundError:
         return None
     candidate = operator_read_json(result_path)
+    if allow_legacy and "result_schema_version" not in candidate:
+        return candidate
     if (type(candidate.get("result_schema_version")) is not int
             or candidate["result_schema_version"] != RESULT_SCHEMA_VERSION
             or candidate.get("task_id") != run_dir.name
@@ -3220,14 +3222,11 @@ def _read_run_status(
     with _locked_run_status(run_dir) as status:
         if not operator:
             authorize_run("status", caller_origin, status)
-        result_path = run_dir / "result.json"
-        result = operator_read_json(result_path) if (result_path.exists() or result_path.is_symlink()) else None
-        verified_result = None
-        if result is not None and "result_schema_version" in result:
-            verified_result = _validated_terminal_result(run_dir)
-            if (status.get("status") in TERMINAL_RUN_STATUSES
-                    and status["status"] != verified_result["execution_status"]):
-                raise ProfileDelegateError("conflicting terminal evidence", "unsafe_artifact")
+        result = _validated_terminal_result(run_dir, allow_legacy=True)
+        verified_result = result if result is not None and "result_schema_version" in result else None
+        if (verified_result is not None and status.get("status") in TERMINAL_RUN_STATUSES
+                and status["status"] != verified_result["execution_status"]):
+            raise ProfileDelegateError("conflicting terminal evidence", "unsafe_artifact")
         # Snapshot both under the same cooperative publication lock.
         status = dict(status)
     persisted_origin = normalize_persisted_origin(status)

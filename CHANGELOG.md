@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- Status inspection validates and returns one bounded result snapshot under the publication lock, removing a duplicate file read and preventing mixed task verdicts after artifact replacement. Legacy inspection remains unverified; repair/publication remain strict.
+
 - Interactive session preparation and prompt submission consume one initialization budget; exhausted RPC budgets fail before sending a request.
 
 - CLI tasks and recovery use native `--query-file`, delivering the full prompt without a model tool call or exposing task text in argv. Named-profile selection and frozen approval remain unchanged.
