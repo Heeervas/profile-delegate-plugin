@@ -14,6 +14,27 @@ from pathlib import Path
 ORIGIN = {"ui_session_id": "ui-owned", "session_id": "sid-owned", "session_key": "lane"}
 
 
+def _dead_worker_run(tmp_path, task_id):
+    """Identical initial artifacts; fault injection and liveness mocks stay local."""
+    root = tmp_path / "runs"
+    root.mkdir(mode=0o700)
+    run = root / task_id
+    run.mkdir(mode=0o700)
+    status = {"task_id": run.name, "status": "running", "background_worker_mode": "detached",
+              "worker_pid": 113903}
+    core.json_safe_write(run / "status.json", status)
+    return root, run, status
+
+
+def _reconcile_exit(run, root):
+    parser = argparse.ArgumentParser()
+    cli.register_cli(parser)
+    with pytest.raises(SystemExit) as exc:
+        cli.profile_delegate_cli(parser.parse_args(["operator-reconcile", run.name,
+                                                    "--runs-root", str(root)]))
+    return exc
+
+
 def test_child_environment_scrubs_caller_execution_overlays(monkeypatch):
     for key in ("HERMES_TUI_TOOLSETS", "HERMES_TUI_SKILLS", "HERMES_TUI_MAX_TURNS",
                 "HERMES_MODEL", "HERMES_PROVIDER", "HERMES_MANAGED_DIR", "HERMES_MAX_ITERATIONS"):
@@ -193,13 +214,7 @@ def test_operator_cli_dispatch_legacy_oversize_and_symlink(tmp_path, monkeypatch
 @pytest.mark.parametrize("artifact", ["command", "ack"])
 @pytest.mark.parametrize("hazard", ["oversize", "symlink"])
 def test_operator_reconcile_rejects_unsafe_cancel_evidence(tmp_path, monkeypatch, capsys, artifact, hazard):
-    root = tmp_path / "runs"
-    root.mkdir(mode=0o700)
-    run = root / "pd_20260927_000003_abcdef"
-    run.mkdir(mode=0o700)
-    status = {"task_id": run.name, "status": "running", "background_worker_mode": "detached",
-              "worker_pid": 113903}
-    core.json_safe_write(run / "status.json", status)
+    root, run, status = _dead_worker_run(tmp_path, "pd_20260927_000003_abcdef")
     command = run / "control" / "commands" / "000000000001-deadbeef.json"
     ack = run / "control" / "acks" / command.name
     core.json_safe_write(command, {"type": "cancel", "command_id": "deadbeef", "seq": 1})
@@ -214,11 +229,7 @@ def test_operator_reconcile_rejects_unsafe_cancel_evidence(tmp_path, monkeypatch
     else:
         target.write_bytes(b" " * 1_048_577)
     monkeypatch.setattr(core, "probe_worker_alive", lambda _pid: False)
-    parser = argparse.ArgumentParser()
-    cli.register_cli(parser)
-    with pytest.raises(SystemExit) as exc:
-        cli.profile_delegate_cli(parser.parse_args(["operator-reconcile", run.name,
-                                                    "--runs-root", str(root)]))
+    exc = _reconcile_exit(run, root)
     assert exc.value.code == 3
     assert json.loads((run / "status.json").read_text()) == status
     assert not (run / "result.json").exists()
@@ -226,22 +237,13 @@ def test_operator_reconcile_rejects_unsafe_cancel_evidence(tmp_path, monkeypatch
 
 
 def test_operator_reconcile_rejects_unbounded_control_directory(tmp_path, monkeypatch):
-    root = tmp_path / "runs"
-    root.mkdir(mode=0o700)
-    run = root / "pd_20260927_000004_abcdef"
-    run.mkdir(mode=0o700)
-    core.json_safe_write(run / "status.json", {"task_id": run.name, "status": "running",
-                                               "background_worker_mode": "detached", "worker_pid": 113903})
+    root, run, status = _dead_worker_run(tmp_path, "pd_20260927_000004_abcdef")
     commands = run / "control" / "commands"
     commands.mkdir(parents=True)
     for index in range(130):
         (commands / f"{index:012d}-deadbeef.json").write_text("{}")
     monkeypatch.setattr(core, "probe_worker_alive", lambda _pid: False)
-    parser = argparse.ArgumentParser()
-    cli.register_cli(parser)
-    with pytest.raises(SystemExit) as exc:
-        cli.profile_delegate_cli(parser.parse_args(["operator-reconcile", run.name,
-                                                    "--runs-root", str(root)]))
+    exc = _reconcile_exit(run, root)
     assert exc.value.code == 3
     assert json.loads((run / "status.json").read_text())["status"] == "running"
     assert not (run / "result.json").exists()
@@ -252,13 +254,7 @@ def test_operator_reconcile_rejects_unbounded_control_directory(tmp_path, monkey
 def test_operator_reconcile_rejects_artifact_changed_after_preflight(
     tmp_path, monkeypatch, capsys, artifact, hazard,
 ):
-    root = tmp_path / "runs"
-    root.mkdir(mode=0o700)
-    run = root / "pd_20260927_000005_abcdef"
-    run.mkdir(mode=0o700)
-    status = {"task_id": run.name, "status": "running", "background_worker_mode": "detached",
-              "worker_pid": 113903}
-    core.json_safe_write(run / "status.json", status)
+    root, run, status = _dead_worker_run(tmp_path, "pd_20260927_000005_abcdef")
     original_result = {"status": "ok", "execution_status": "completed", "contract_status": "valid",
                        "summary": "done", "artifacts": [], "errors": [], "next_steps": []}
     core.write_result_artifact(run, original_result)
@@ -291,11 +287,7 @@ def test_operator_reconcile_rejects_artifact_changed_after_preflight(
     else:
         monkeypatch.setattr(core, "probe_worker_alive", lambda _pid: (replace_artifact(), False)[1])
 
-    parser = argparse.ArgumentParser()
-    cli.register_cli(parser)
-    with pytest.raises(SystemExit) as exc:
-        cli.profile_delegate_cli(parser.parse_args(["operator-reconcile", run.name,
-                                                    "--runs-root", str(root)]))
+    exc = _reconcile_exit(run, root)
     assert exc.value.code == 3
     assert (run / ("result.json" if artifact == "status" else "status.json")).read_bytes() == (
         before_result if artifact == "status" else before_status
@@ -309,20 +301,9 @@ def test_operator_reconcile_rejects_artifact_changed_after_preflight(
 
 
 def test_operator_cli_reconciles_normal_dead_worker(tmp_path, monkeypatch, capsys):
-    root = tmp_path / "runs"
-    root.mkdir(mode=0o700)
-    run = root / "pd_20260927_000006_abcdef"
-    run.mkdir(mode=0o700)
-    core.json_safe_write(run / "status.json", {
-        "task_id": run.name, "status": "running", "background_worker_mode": "detached",
-        "worker_pid": 113903,
-    })
+    root, run, status = _dead_worker_run(tmp_path, "pd_20260927_000006_abcdef")
     monkeypatch.setattr(core, "probe_worker_alive", lambda _pid: False)
-    parser = argparse.ArgumentParser()
-    cli.register_cli(parser)
-    with pytest.raises(SystemExit) as exc:
-        cli.profile_delegate_cli(parser.parse_args(["operator-reconcile", run.name,
-                                                    "--runs-root", str(root)]))
+    exc = _reconcile_exit(run, root)
     assert exc.value.code == 0
     diagnosis = json.loads(capsys.readouterr().out)
     assert diagnosis["reason"] == "worker_died"

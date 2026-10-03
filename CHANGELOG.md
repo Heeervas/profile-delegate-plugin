@@ -37,6 +37,7 @@ All notable changes to Profile Delegate are documented here.
 
 ### Verification
 
+- Consolidated notification and operator-repair test setup, removing 40 net lines while preserving each scenario, fault injection and assertion.
 - Added focused regressions for hostile environment, authorization, preflight, publication/repair races, recursion, transport cancellation, notification read safety, prose verdicts, and delayed steer settlement. The remaining test groups protect distinct owner boundaries; see `STATE.md`.
 - The default gateway's loaded-tool preflight succeeded after Alberto's restart, and Discord-origin detached interactive run `pd_20260927_183748_ynvczn` completed `ok` with `notification_status=delivered` on status readback. This does not claim parity on named-profile gateways, correlated steer delivery, tag, push, or publication.
 

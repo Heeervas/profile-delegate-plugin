@@ -44,6 +44,19 @@ def mock_delegate_admission(tmp_path, monkeypatch, *, hermes_bin=None):
     monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
 
 
+def _notification_run(tmp_path, *, status, **fields):
+    """Notification artifacts only; each test retains its native ledger behavior."""
+    run_dir = tmp_path / "runs" / "pd_20260101_010101_abc123"
+    run_dir.mkdir(parents=True)
+    request = {
+        "task_id": run_dir.name, "origin_session_key": "discord:guild:chan:thread",
+        "notify_on_complete": True, "dispatched_at_epoch": 1000.0, **fields,
+    }
+    core.json_safe_write(run_dir / "request.json", request)
+    core.json_safe_write(run_dir / "status.json", {**request, "status": status})
+    return run_dir, request
+
+
 def setup_function(_function):
     core._async_running = 0
     core.os.environ["PROFILE_DELEGATE_DEPTH"] = "0"
@@ -952,19 +965,10 @@ def test_push_profile_delegate_completion_queues_async_event(
     tmp_path, monkeypatch, final_success, task_status, expected_event_status,
 ):
     monkeypatch.setenv("PROFILE_DELEGATE_NOTIFY_MAX_SUMMARY_CHARS", "1000")
-    run_dir = tmp_path / "runs" / "pd_20260101_010101_abc123"
-    run_dir.mkdir(parents=True)
-    request = {
-        "task_id": run_dir.name,
-        "profile": "reviewer",
-        "session_title": "async smoke",
-        "session_mode": "new",
-        "origin_session_key": "discord:guild:chan:thread",
-        "notify_on_complete": True,
-        "dispatched_at_epoch": 1000.0,
-    }
-    core.json_safe_write(run_dir / "request.json", request)
-    core.json_safe_write(run_dir / "status.json", {**request, "status": "completed"})
+    run_dir, request = _notification_run(
+        tmp_path, status="completed", profile="reviewer",
+        session_title="async smoke", session_mode="new",
+    )
     final = {
         "success": final_success,
         "status": "completed",
@@ -1006,20 +1010,11 @@ def test_push_profile_delegate_completion_queues_async_event(
 def test_persist_profile_delegate_completion_survives_missing_live_queue(
     tmp_path, monkeypatch,
 ):
-    run_dir = tmp_path / "runs" / "pd_20260101_010101_abc123"
-    run_dir.mkdir(parents=True)
-    request = {
-        "task_id": run_dir.name,
-        "profile": "reviewer",
-        "session_title": "durable completion",
-        "session_mode": "new",
-        "origin_session_key": "discord:guild:chan:thread",
-        "origin": {"session_id": "expired-session", "ui_session_id": "expired-ui"},
-        "notify_on_complete": True,
-        "dispatched_at_epoch": 1000.0,
-    }
-    core.json_safe_write(run_dir / "request.json", request)
-    core.json_safe_write(run_dir / "status.json", {**request, "status": "completed"})
+    run_dir, request = _notification_run(
+        tmp_path, status="completed", profile="reviewer",
+        session_title="durable completion", session_mode="new",
+        origin={"session_id": "expired-session", "ui_session_id": "expired-ui"},
+    )
     final = {
         "success": True,
         "status": "completed",
@@ -1056,17 +1051,10 @@ def test_persist_profile_delegate_completion_survives_missing_live_queue(
 def test_register_durable_notification_uses_lane_not_expiring_session(
     tmp_path, monkeypatch,
 ):
-    run_dir = tmp_path / "runs" / "pd_20260101_010101_abc123"
-    run_dir.mkdir(parents=True)
-    request = {
-        "task_id": run_dir.name,
-        "origin_session_key": "discord:guild:chan:thread",
-        "origin": {"session_id": "old-session", "ui_session_id": "old-ui"},
-        "notify_on_complete": True,
-        "dispatched_at_epoch": 1000.0,
-    }
-    core.json_safe_write(run_dir / "request.json", request)
-    core.json_safe_write(run_dir / "status.json", {**request, "status": "running"})
+    run_dir, request = _notification_run(
+        tmp_path, status="running",
+        origin={"session_id": "old-session", "ui_session_id": "old-ui"},
+    )
     records = []
     fake_async = type("Async", (), {
         "_persist_dispatch": staticmethod(lambda record: records.append(record)),
@@ -1196,16 +1184,7 @@ def test_completion_after_session_end_routes_by_origin_lane(
 def test_completion_persistence_is_idempotent_across_worker_and_parent_watcher(
     tmp_path, monkeypatch,
 ):
-    run_dir = tmp_path / "runs" / "pd_20260101_010101_abc123"
-    run_dir.mkdir(parents=True)
-    request = {
-        "task_id": run_dir.name,
-        "origin_session_key": "discord:guild:chan:thread",
-        "notify_on_complete": True,
-        "dispatched_at_epoch": 1000.0,
-    }
-    core.json_safe_write(run_dir / "request.json", request)
-    core.json_safe_write(run_dir / "status.json", {**request, "status": "completed"})
+    run_dir, request = _notification_run(tmp_path, status="completed")
     row = {"state": "completed", "delivery_state": "pending", "origin_session": request["origin_session_key"]}
     persisted = []
     fake_async = type("Async", (), {
