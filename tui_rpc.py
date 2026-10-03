@@ -352,6 +352,8 @@ def start_session(client: Any, *, profile: str, mode: str, session_id: str,
                   title: str, cwd: str, model: str = "", provider: str = "",
                   reasoning_effort: str = "", timeout: float = 60.0,
                   on_event: Optional[Callable[[dict], None]] = None) -> dict[str, str]:
+    if reasoning_effort and reasoning_effort not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+        raise TuiProtocolError("reasoning selection must be an effort level, never a display command")
     deadline = time.monotonic() + timeout
     model_value = ""
     select_after_start = mode == "resume" or bool(provider and not model)

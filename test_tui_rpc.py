@@ -337,6 +337,7 @@ def test_session_flow_uses_create_resume_submit_and_native_controls():
     ("resume", {"model": "codex/example", "provider": "openai-api", "reasoning_effort": "high"}),
     ("resume", {"model": "codex/example"}), ("resume", {"provider": "openai-api"}),
     ("resume", {"reasoning_effort": "none"}), ("new", {"provider": "openai-api", "reasoning_effort": "high"}),
+    ("resume", {"reasoning_effort": "show"}),
 ])
 def test_session_applies_authorized_selection_without_config_writes(monkeypatch, mode, selection):
     from contextlib import nullcontext
@@ -363,7 +364,7 @@ def test_session_applies_authorized_selection_without_config_writes(monkeypatch,
         if isinstance(value, types.FunctionType) and value.__module__ in {gateway_model.__name__, methods_config_set.__name__}:
             namespace[name] = rebind(value, namespace)
     namespace.update(_current_model_runtime=lambda *args: ("openai-api", "codex/stored", "", ""), _sessions={"ui-resumed": session}, _write_config_key=forbidden_write,
-                     _save_cfg=forbidden_write, _resolve_model=lambda: "codex/stored",
+                     _save_cfg=forbidden_write, _load_cfg_raw=lambda: {}, _resolve_model=lambda: "codex/stored",
                      _ok=lambda rid, result: {"result": result},
                      _err=lambda rid, code, message: {"error": {"code": code, "message": message}},
                      _session_profile_runtime_scope=lambda session: nullcontext(),
@@ -386,6 +387,12 @@ def test_session_applies_authorized_selection_without_config_writes(monkeypatch,
             response = handler(1, params)
             assert "error" not in response, response
             return response["result"]
+    if selection.get("reasoning_effort") == "show":
+        with pytest.raises(tui_rpc.TuiProtocolError, match="reasoning"):
+            tui_rpc.start_session(Client(), profile="builder", mode=mode, session_id="durable-parent",
+                                  title="ignored", cwd="/ignored", **selection)
+        assert calls == []
+        return
     identity = tui_rpc.start_session(Client(), profile="builder", mode=mode, session_id="durable-parent",
                                      title="ignored", cwd="/ignored", **selection)
     assert identity["child_session_id"] == "durable-child"
