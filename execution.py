@@ -32,7 +32,12 @@ def bootstrap_command(request: Dict[str, Any], run_dir: Path) -> List[str]:
             "--blocked-tools", ",".join(ensure_text(item) for item in blocked)]
 
 
-def _hermes_command(request, run_dir, prompt_path, resume_session_id):
+def build_child_command(
+    request: Dict[str, Any], run_dir: Path, *,
+    prompt_path: Optional[Path] = None,
+    resume_session_id: Optional[str] = None,
+) -> List[str]:
+    prefix = bootstrap_command(request, run_dir)
     requested = request.get("effective_execution") or request.get("requested_execution") or {}
     hermes_cmd = [ensure_text(request.get("hermes_bin")), "-p", ensure_text(request.get("profile")),
                   "chat", "-q", f"@file:{prompt_path or (run_dir / 'prompt.txt')}", "-Q"]
@@ -52,14 +57,4 @@ def _hermes_command(request, run_dir, prompt_path, resume_session_id):
         hermes_cmd += ["--resume", effective_resume_id]
     hermes_cmd += ["--pass-session-id", "--source", "profile-delegate"]
 
-    return hermes_cmd, approval_mode
-
-
-def build_child_command(
-    request: Dict[str, Any], run_dir: Path, *,
-    prompt_path: Optional[Path] = None,
-    resume_session_id: Optional[str] = None,
-) -> List[str]:
-    prefix = bootstrap_command(request, run_dir)
-    hermes_cmd, _ = _hermes_command(request, run_dir, prompt_path, resume_session_id)
     return [*prefix, *(["--test-shim"] if request.get("test_shim") is True else []), "--", *hermes_cmd]

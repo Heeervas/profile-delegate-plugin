@@ -11,7 +11,7 @@ All notable changes to Profile Delegate are documented here.
 - Native durable dispatch is registered by the actual worker before profile execution, surviving launcher exit. Startup metadata failures reap the worker before releasing its status lock; duplicate workers and foreign completion origins are refused without replacing existing records. In-process workers preserve the caller home through native context propagation.
 
 - Detached workers own durable completion, including failure; parent watchers only offer matching pending records, and explicit dead-worker repair restores delivery.
-- CLI and TUI share child interpreter/approval/bootstrap and environment/reasoning preparation.
+- CLI and TUI share child interpreter/approval/bootstrap and environment/reasoning preparation. CLI argv is built once; child environment uses one whitelist and supervision failures reuse the shared result contract.
 - CLI and TUI share pure result contracts and terminal enrichment/publication, retaining transport-specific failure and recovery evidence.
 
 - Provider-only TUI creation and TUI resume apply authorized model/provider/reasoning selections through native session-scoped config.set, preserving stored workspace, frozen authority and operator confirmations.

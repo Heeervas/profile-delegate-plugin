@@ -2044,7 +2044,6 @@ def child_environment(
 ) -> Dict[str, str]:
     mode = coerce_child_approval_mode(child_approval_mode)
     # Target profile config/.env owns policy and defaults, not caller execution overlays.
-    inherited = os.environ
     passthrough = {
         "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE",
         "TERM", "TMPDIR", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR",
@@ -2064,40 +2063,20 @@ def child_environment(
         "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT",
         "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
         "AWS_REGION", "AWS_DEFAULT_REGION",
-    }
-    env = {key: value for key, value in inherited.items() if key in passthrough}
-    # Preserve explicit operator delegation bounds but not caller execution scope.
-    for key in (
+        # Explicit operator delegation bounds are also allowed; caller execution overlays are not.
         "PROFILE_DELEGATE_ALLOWED_PROFILES", "PROFILE_DELEGATE_ALLOW_ALL_PROFILES",
         "PROFILE_DELEGATE_ALLOWED_WORKDIRS", "PROFILE_DELEGATE_ALLOWED_TOOLSETS",
         "PROFILE_DELEGATE_ALLOWED_SKILLS", "PROFILE_DELEGATE_MAX_DEPTH",
         "PROFILE_DELEGATE_MAX_CONCURRENT", "PROFILE_DELEGATE_MAX_ASYNC",
         "PROFILE_DELEGATE_RUNS_ROOT", "PROFILE_DELEGATE_LOCKS_ROOT",
         "PROFILE_DELEGATE_HERMES_BIN",
-    ):
-        if key in inherited:
-            env[key] = inherited[key]
+    }
+    env = {key: value for key, value in os.environ.items() if key in passthrough}
     env["PROFILE_DELEGATE_DEPTH"] = str(parent_depth + 1)
     if parent_task_id:
         env["PROFILE_DELEGATE_PARENT_TASK_ID"] = ensure_text(parent_task_id)[:MAX_SESSION_ID_CHARS]
-    else:
-        env.pop("PROFILE_DELEGATE_PARENT_TASK_ID", None)
 
-    # The delegated Hermes subprocess is intentionally non-interactive: there
-    # is no approval callback wired for the child process, and inheriting the
-    # caller gateway/session env makes tools like execute_code emit approval
-    # prompts back to the user instead of just completing the bounded run.
-    for key in list(env):
-        if key.startswith("HERMES_SESSION_") or key in {
-            "HERMES_GATEWAY_SESSION",
-            "HERMES_EXEC_ASK",
-            "HERMES_INTERACTIVE",
-            "HERMES_CRON_SESSION",
-            "HERMES_YOLO_MODE",
-            "HERMES_ACCEPT_HOOKS",
-        }:
-            env.pop(key, None)
-
+    # The whitelist excludes caller session overlays, approval prompts and hook consent.
     if mode in {"approve_yolo", "yolo"}:
         env["HERMES_YOLO_MODE"] = "1"
     # Hook consent is target-owned (its existing native allowlist), never inferred
@@ -2943,24 +2922,18 @@ def delegate_profile(
         if background:
             try:
                 _start_background_run(run_dir)
-            except ProfileDelegateError as exc:
-                result, published = publish_terminal_run(run_dir, {
-                    "status": "failed", "summary": str(exc), "artifacts": [], "errors": [exc.code],
-                    "next_steps": ["Wait for another background profile_delegate run to finish or raise max_async."],
-                    "structured": True, "execution_status": "failed",
-                    "contract_status": "not_evaluated", "error_code": exc.code,
-                }, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": exc.code})
-                _persist_profile_delegate_completion(run_dir, {"status": published["status"], "result": result, "error_code": published.get("error_code")})
-                raise
             except Exception as exc:
-                result, published = publish_terminal_run(run_dir, {
-                    "status": "failed", "summary": f"Failed to start background profile_delegate run: {type(exc).__name__}: {exc}",
-                    "artifacts": [], "errors": ["background_start_failed"], "next_steps": [],
-                    "structured": True, "execution_status": "failed",
-                    "contract_status": "not_evaluated", "error_code": "background_start_failed",
-                }, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": "background_start_failed"})
+                known = isinstance(exc, ProfileDelegateError)
+                code = exc.code if known else "background_start_failed"
+                summary = str(exc) if known else f"Failed to start background profile_delegate run: {type(exc).__name__}: {exc}"
+                next_steps = ["Wait for another background profile_delegate run to finish or raise max_async."] if known else []
+                result, published = publish_terminal_run(
+                    run_dir, failure_result(summary, code, next_steps=next_steps),
+                    {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": code})
                 _persist_profile_delegate_completion(run_dir, {"status": published["status"], "result": result, "error_code": published.get("error_code")})
-                raise ProfileDelegateError(f"failed to start background run: {type(exc).__name__}: {exc}", "background_start_failed") from exc
+                if known:
+                    raise
+                raise ProfileDelegateError(f"failed to start background run: {type(exc).__name__}: {exc}", code) from exc
             return {
                 "success": True, "mode": "async", "task_id": task_id, "profile": validated.canonical,
                 "watch_command": spectator_watch_command(task_id, normalized_origin),
@@ -3129,20 +3102,10 @@ def _reconciled_failure_result(run_dir: Path, lifecycle: str, reason: str) -> Di
     else:
         summary = "Delegated profile worker exited before publishing a terminal result."
         errors = [reason]
-    return {
-        # The lifecycle failed or was cancelled, but no trustworthy final task
-        # verdict exists. Keep the task axis unknown instead of inventing failure.
-        "status": "unknown",
-        "execution_status": lifecycle,
-        "contract_status": "not_evaluated",
-        "summary": summary,
-        "artifacts": [],
-        "errors": errors,
-        "next_steps": ["Inspect preserved run artifacts before retrying the task."],
-        "structured": True,
-        "error_code": reason,
-        "reconciled": True,
-    }
+    # No trustworthy task verdict exists even when the lifecycle failed/cancelled.
+    return failure_result(summary, reason, execution_status=lifecycle, task_status="unknown",
+                          errors=errors, reconciled=True,
+                          next_steps=["Inspect preserved run artifacts before retrying the task."])
 
 
 def _operator_reconcile(task_id: str) -> Dict[str, Any]:
