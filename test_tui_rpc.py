@@ -683,6 +683,8 @@ def test_runner_readiness_timeout_persists_stage_and_failure(tmp_path, monkeypat
     status = json.loads((run / "status.json").read_text(encoding="utf-8"))
     assert result["success"] is False
     assert result["status"] == "failed"
+    assert result["result"]["execution_status"] == "failed"
+    assert result["result"]["contract_status"] == "not_evaluated"
     assert status["startup_readiness"]["state"] == "failed"
     assert status["startup_readiness"]["elapsed_ms"] >= 0
 
@@ -956,6 +958,8 @@ def test_runner_queued_steer_never_turns_quiet_into_success(tmp_path, monkeypatc
         "none": "steer_outcome_uncertain", "complete": None, "incomplete": "timeout",
     }[followup]
     if followup == "incomplete":
+        assert result["result"]["execution_status"] == "timed_out"
+        assert result["result"]["contract_status"] == "not_evaluated"
         assert result["result"]["raw_output_path"] == str(tmp_path / "pd_control_steer" / "stdout.txt")
     else:
         assert result["result"]["summary"] == ("follow-up" if followup == "complete" else "done")
@@ -1264,6 +1268,7 @@ def test_runner_cancel_timeout_is_authoritative_and_bounded(tmp_path, monkeypatc
     )
     assert result["status"] == "cancelled"
     assert result["result"]["execution_status"] == "cancelled"
+    assert result["result"]["contract_status"] == "not_evaluated"
     assert ack["state"] == "accepted"
     assert "delivery unknown" in ack["detail"]
     assert interrupt_timeouts and interrupt_timeouts[0] <= 0.005
@@ -1313,57 +1318,6 @@ def test_runner_cancel_failures_remain_authoritative(
     result, ack = _execute_with_control(tmp_path, monkeypatch, "cancel", arrange)
     assert result["status"] == "cancelled"
     assert result["result"]["execution_status"] == "cancelled"
+    assert result["result"]["contract_status"] == "not_evaluated"
     assert ack["state"] == "accepted"
     assert detail_fragment in ack["detail"]
-
-
-@pytest.mark.parametrize(
-    ("text", "message_status", "expected_task_status", "expected_contract", "success"),
-    [
-        ('{"status":"ok","summary":"done"}', "complete", "ok", "valid", True),
-        ('{"status":"blocked","summary":"wait"}', "complete", "blocked", "valid", False),
-        ("plain useful output", "complete", "unknown", "drifted", False),
-        ("OK\n{\"status\":\"ok\"}\n{\"status\":\"blocked\"}", "complete", "unknown", "drifted", False),
-    ],
-)
-def test_tui_and_legacy_normalization_wrapper_parity(
-    text, message_status, expected_task_status, expected_contract, success,
-):
-    parsed, meta = core.parse_json_result(text)
-    legacy = core.normalize_result(
-        parsed, "/tmp/stdout.txt", raw_output=text, parse_meta=meta,
-    )
-    tui = core.normalize_result(
-        parsed, "/tmp/stdout.txt", raw_output=text, parse_meta=meta,
-    )
-    if message_status != "complete":
-        tui["status"] = "failed"
-    core.apply_execution_status(tui, "completed")
-    assert (tui["status"], tui["contract_status"]) == (
-        legacy["status"], legacy["contract_status"],
-    )
-    assert core.wrapper_success("completed", tui) is success
-
-
-@pytest.mark.parametrize(
-    ("lifecycle", "contract_status"),
-    [
-        ("failed", "not_evaluated"),
-        ("cancelled", "not_evaluated"),
-        ("timed_out", "not_evaluated"),
-    ],
-)
-def test_manual_terminal_failure_results_have_complete_orthogonal_schema(
-    tmp_path, lifecycle, contract_status,
-):
-    run = tmp_path / f"pd_{lifecycle}"
-    run.mkdir()
-    result = {
-        "status": "failed", "execution_status": lifecycle,
-        "contract_status": contract_status, "summary": lifecycle,
-    }
-    core.write_result_artifact(run, result)
-    saved = json.loads((run / "result.json").read_text(encoding="utf-8"))
-    assert saved["status"] == "failed"
-    assert saved["execution_status"] == lifecycle
-    assert saved["contract_status"] == contract_status

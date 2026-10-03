@@ -1,0 +1,15 @@
+# Test retirement — native simplification
+
+All existing parameterized safety scenarios remain individually collected; no case was moved into a loop. Helpers remain in the identical tracked Python counting scope.
+
+| Retired coverage | Cases | Protected defect and surviving coverage |
+| --- | ---: | --- |
+| `test_tui_and_legacy_normalization_wrapper_parity` | 4 | Called `core.normalize_result` twice with identical arguments; exercised no transport adapter. Retained historical structured/blocked, Markdown recovery, prose drift, ambiguity and wrapper-success tests in `test_reliability_reset.py`, plus actual TUI completion/nonzero-exit tests. |
+| `test_manual_terminal_failure_results_have_complete_orthogonal_schema` | 3 | Serialized a locally constructed dictionary and checked unchanged values. Retained result artifact schema/identity validation; actual readiness failure, incomplete follow-up timeout and native cancel tests now assert execution and contract fields. |
+| Unused `current_grants` cross product in historical resume refusal | 6 | Configuration reads are forbidden by a `pytest.fail` trap before grants can matter. Retained all six historical selectors, both forbidden authority/config readers and unchanged persisted request assertions. |
+| Direct statusless custom JSON normalization | 1 | Same status/contract/extension preservation as whole statusless JSON test. Surviving parser-to-normalizer test additionally asserts verdict/findings and false wrapper success. |
+| Unused `wait_for_completion` queue helper (earlier batch) | 1 | No production consumer; helper removed. Actual detached worker/ledger/queue and notification recovery tests remain. |
+
+Thirteen delegate tests share only their identical seven admission monkeypatches. Their child behavior, process lifecycle, notifications, recovery and assertions remain local to each scenario. No global admission fixture or runtime permission bypass was introduced.
+
+Focused native gate after this batch: 306 passed under warnings-as-errors. The historical reduction requirements remain pending: unsafe 503 variants, frozen authority sources, compression edges, publication races and wrong-typed public fields protect distinct regressions. They were not discarded to meet a case count. This is a retirement rationale and local verification, not an independent coverage review.

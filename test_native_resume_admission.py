@@ -27,8 +27,7 @@ def test_resume_rejects_broad_frozen_policy_under_restricted_ancestor(tmp_path, 
 
 
 @pytest.mark.parametrize("stored", [None, "approve_yolo", "yolo", "profile", "inherit", "deny"])
-@pytest.mark.parametrize("current_grants", [[], ["newly granted command"]])
-def test_historical_resume_without_envelope_refuses_current_authority(tmp_path, monkeypatch, stored, current_grants):
+def test_historical_resume_without_envelope_refuses_current_authority(tmp_path, monkeypatch, stored):
     monkeypatch.delenv("PROFILE_DELEGATE_APPROVAL_REQUEST", raising=False)
     target = core.ValidatedProfile("worker", "worker", str(tmp_path / "worker"))
     run = tmp_path / "runs" / "old"
@@ -42,12 +41,6 @@ def test_historical_resume_without_envelope_refuses_current_authority(tmp_path, 
     monkeypatch.setattr(core, "resolve_native_approval", lambda *args: pytest.fail("must not read current authority"))
     from hermes_cli import config
     monkeypatch.setattr(config, "load_config_readonly", lambda: pytest.fail("must not read current config"))
-    target_home = tmp_path / "worker"
-    target_home.mkdir()
-    (target_home / "config.yaml").write_text(json.dumps({
-        "command_allowlist": current_grants,
-        "approvals": {"mode": "off", "single_query_mode": "approve"},
-    }))
     with pytest.raises(core.ProfileDelegateError, match="create a new session") as error:
         core.resume_native_approval(core.EffectivePolicy({}, {}), target, "old_session")
     assert error.value.code == "approval_policy_error"

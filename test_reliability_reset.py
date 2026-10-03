@@ -215,6 +215,7 @@ def test_whole_statusless_custom_json_is_valid_but_task_outcome_is_unknown():
     )
     assert result["status"] == "unknown"
     assert result["contract_status"] == "valid"
+    assert result["verdict"] == "PASS" and result["findings"] == []
     assert "raw_output_path" not in result
     assert core.wrapper_success("completed", result) is False
 

@@ -30,6 +30,17 @@ HERMES_TEST_PYTHON = Path(os.environ.get("PROFILE_DELEGATE_TEST_RUNTIME", "/opt/
 
 
 
+def mock_delegate_admission(tmp_path, monkeypatch):
+    """Isolate admission only; each test supplies its own child/process behavior."""
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
+    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
+    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
+    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+
+
 def setup_function(_function):
     core._async_running = 0
     core.os.environ["PROFILE_DELEGATE_DEPTH"] = "0"
@@ -93,13 +104,7 @@ def test_session_id_footer_helpers_only_strip_final_footer():
 
 
 def test_delegate_reads_session_footer_from_stderr(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+    mock_delegate_admission(tmp_path, monkeypatch)
 
     def fake_run_capped(cmd, **kwargs):
         core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
@@ -125,13 +130,6 @@ def test_normalize_result_parse_failure_coerces_plain_text():
     assert result["errors"] == []
 
 
-def test_normalize_result_statusless_custom_json_is_unknown_and_preserves_keys():
-    parsed = {"verdict": "PASS", "findings": [], "summary": "useful"}
-    result = core.normalize_result(parsed, "/tmp/stdout.txt")
-    assert result["status"] == "unknown"
-    assert result["contract_status"] == "valid"
-    assert result["verdict"] == "PASS"
-    assert result["findings"] == []
 
 
 def test_normalize_result_empty_parse_failure_stays_failed():
@@ -793,14 +791,8 @@ def test_tui_runtime_finishes_plugin_discovery_synchronously(monkeypatch):
 
 
 def test_delegate_uses_prompt_file_not_raw_prompt_in_argv(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    mock_delegate_admission(tmp_path, monkeypatch)
     monkeypatch.delenv("PROFILE_DELEGATE_HERMES_BIN", raising=False)
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     seen = {}
 
     def fake_run_capped(cmd, **kwargs):
@@ -897,14 +889,8 @@ def test_run_capped_subprocess_timeout_keeps_bounded_output(tmp_path, monkeypatc
 
 
 def test_delegate_background_returns_running_and_finishes(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    mock_delegate_admission(tmp_path, monkeypatch)
     monkeypatch.setenv("PROFILE_DELEGATE_BACKGROUND_MODE", "thread")
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     monkeypatch.setattr(core, "_push_profile_delegate_completion", lambda run_dir, final: None)
 
     def fake_run_capped(cmd, **kwargs):
@@ -935,13 +921,7 @@ def test_delegate_background_returns_running_and_finishes(tmp_path, monkeypatch)
 
 
 def test_delegate_background_start_failure_marks_run_failed(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+    mock_delegate_admission(tmp_path, monkeypatch)
     monkeypatch.setattr(core, "_start_background_run", lambda run_dir: (_ for _ in ()).throw(core.ProfileDelegateError("capacity", "async_concurrency_limit")))
     try:
         core.delegate_profile("reviewer", "task", session_title="async", background=True, origin_session_key="discord:guild:chan")
@@ -1169,13 +1149,7 @@ def test_native_async_ledger_compatibility_rejects_missing_columns(tmp_path, mon
 def test_background_notify_fails_before_run_creation_when_native_ledger_is_incompatible(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+    mock_delegate_admission(tmp_path, monkeypatch)
     monkeypatch.setattr(core, "native_async_ledger_compatibility", lambda: {
         "compatible": False, "reason": "missing native API",
     })
@@ -1535,15 +1509,9 @@ def test_transient_classifier_rejects_unsafe_native_503(overrides):
     ("native_other_stream_exclusion", False),
 ])
 def test_native_503_recovery_caller_preserves_complete_output(tmp_path, monkeypatch, case, should_resume):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    mock_delegate_admission(tmp_path, monkeypatch)
     monkeypatch.setenv("PROFILE_DELEGATE_MAX_STDOUT_CHARS", "200000")
     monkeypatch.setenv("PROFILE_DELEGATE_MAX_STDERR_CHARS", "100000")
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True})
     monkeypatch.setattr(core, "_wait_for_transient_resume", lambda *a: "ready")
     # Keep the real capture, caps, diagnostic tails and execution caller. Only
@@ -1595,13 +1563,7 @@ def test_native_503_recovery_caller_preserves_complete_output(tmp_path, monkeypa
 
 @pytest.mark.parametrize("output_mode", ["json", "markdown", "text"])
 def test_transient_failure_resumes_same_session(tmp_path, monkeypatch, output_mode):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+    mock_delegate_admission(tmp_path, monkeypatch)
     monkeypatch.setattr(core.time, "sleep", lambda _s: None)
     calls = []
     envelopes = []
@@ -1634,13 +1596,7 @@ def test_transient_failure_resumes_same_session(tmp_path, monkeypatch, output_mo
 
 
 def test_transient_failure_without_session_id_fails_closed(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+    mock_delegate_admission(tmp_path, monkeypatch)
     calls = []
 
     def fake_run(cmd, **kwargs):
@@ -1658,13 +1614,7 @@ def test_transient_failure_without_session_id_fails_closed(tmp_path, monkeypatch
 
 
 def test_delegate_resume_uses_resume_flag_and_skips_rename(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+    mock_delegate_admission(tmp_path, monkeypatch)
     seen = {}
 
     def fake_run_capped(cmd, **kwargs):
@@ -1692,14 +1642,8 @@ def test_delegate_resume_uses_resume_flag_and_skips_rename(tmp_path, monkeypatch
 
 
 def test_operator_configured_approve_yolo_adds_yolo_flag(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    mock_delegate_admission(tmp_path, monkeypatch)
     monkeypatch.setattr(core, "_plugin_entry", lambda: {"child_approval_mode": "approve_yolo"})
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     seen = {}
 
     def fake_run_capped(cmd, **kwargs):
@@ -1720,13 +1664,7 @@ def test_operator_configured_approve_yolo_adds_yolo_flag(tmp_path, monkeypatch):
 
 
 def test_delegate_new_renames_when_session_id_present(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+    mock_delegate_admission(tmp_path, monkeypatch)
     renamed = {}
 
     def fake_run_capped(cmd, **kwargs):
@@ -1749,13 +1687,7 @@ def test_delegate_new_renames_when_session_id_present(tmp_path, monkeypatch):
 
 
 def test_delegate_new_missing_session_id_keeps_success_without_rename(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
+    mock_delegate_admission(tmp_path, monkeypatch)
 
     def fake_run_capped(cmd, **kwargs):
         core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
@@ -2232,15 +2164,9 @@ def test_status_lock_merge_preserves_fields_and_terminal_is_immutable(tmp_path):
 
 def test_base_paths_and_launch_freeze_event_contract(tmp_path, monkeypatch):
     assert core.base_paths(tmp_path)["events"] == str(tmp_path / "events.jsonl")
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
+    mock_delegate_admission(tmp_path, monkeypatch)
     monkeypatch.setenv("PROFILE_DELEGATE_BACKGROUND_MODE", "thread")
     monkeypatch.setenv("PROFILE_DELEGATE_PERSIST_MESSAGE_TEXT", "true")
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda path, mode: True)
-    monkeypatch.setattr(core, "validate_profile", lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)))
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
     monkeypatch.setattr(core, "_start_background_run", lambda run_dir: None)
     result = core.delegate_profile("reviewer", "task", session_title="journal", background=True, transport_mode="simple")
     request = json.loads((Path(result["paths"]["run_dir"]) / "request.json").read_text())
