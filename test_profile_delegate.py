@@ -1028,7 +1028,7 @@ def test_persist_profile_delegate_completion_survives_missing_live_queue(
         "paths": core.base_paths(run_dir),
     }
     persisted = []
-    durable_rows = {}
+    durable_rows = {run_dir.name: {"state": "running", "origin_session": request["origin_session_key"]}}
 
     def persist_completion(event, result):
         persisted.append((event, result))
@@ -1071,6 +1071,7 @@ def test_register_durable_notification_uses_lane_not_expiring_session(
     records = []
     fake_async = type("Async", (), {
         "_persist_dispatch": staticmethod(lambda record: records.append(record)),
+        "get_durable_delegation": staticmethod(lambda task_id: {"state": "running", "origin_session": records[0]["session_key"]} if records else None),
     })
     monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_async)
 
@@ -1206,7 +1207,7 @@ def test_completion_persistence_is_idempotent_across_worker_and_parent_watcher(
     }
     core.json_safe_write(run_dir / "request.json", request)
     core.json_safe_write(run_dir / "status.json", {**request, "status": "completed"})
-    row = {"state": "completed", "delivery_state": "pending"}
+    row = {"state": "completed", "delivery_state": "pending", "origin_session": request["origin_session_key"]}
     persisted = []
     fake_async = type("Async", (), {
         "get_durable_delegation": staticmethod(lambda _task_id: row),

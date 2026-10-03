@@ -123,6 +123,7 @@ def test_dispatch_scans_foreign_stale_run_without_reconciliation(tmp_path, monke
              "request_fingerprint": "same", "created_at": core.now_iso()}
     core.json_safe_write(foreign / "status.json", stale)
     core.json_safe_write(own / "request.json", {"effective_policy": {"limits": {"max_async": 1}}})
+    core.json_safe_write(own / "status.json", {"task_id": own.name, "status": "running"})
     monkeypatch.setattr(core, "probe_worker_alive", lambda pid: False)
     monkeypatch.setattr(core, "_operator_reconcile", lambda task_id: pytest.fail("foreign run mutated"))
     monkeypatch.setattr(core.subprocess, "Popen", lambda *a, **kw: type("Worker", (), {"pid": 100})())

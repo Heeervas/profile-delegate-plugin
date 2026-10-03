@@ -1,6 +1,6 @@
 # Native simplification — final local candidate evidence
 
-Production candidate: `79427bc`. Documentation commits after it do not change executable code. Functional release remains v1.10.0; this is an unactivated local candidate. The Codex goal remains active because the full acceptance criteria below are pending.
+Production candidate: worker-ownership repair following `3fed48e` (superseding `79427bc`). Functional release remains v1.10.0; this is an unactivated local candidate. The Codex goal remains active because the full acceptance criteria below are pending.
 
 ## Exact scope and measurements
 
@@ -8,23 +8,25 @@ All tracked Python files are counted: root production including `cli_smoke.py`, 
 
 | Scope | Historical `a579142` physical / substantive | Initial `5ddc731` physical / substantive | Candidate physical / substantive |
 | --- | ---: | ---: | ---: |
-| Production (13 files) | 7643 / 6787 | 7658 / 6799 | 7252 / 6379 |
-| Tests (27 files) | 7948 / 6759 | 8006 / 6808 | 8011 / 6807 |
+| Production (13 files) | 7643 / 6787 | 7658 / 6799 | 7290 / 6413 |
+| Tests (27 files) | 7948 / 6759 | 8006 / 6808 | 8236 / 7015 |
 | Support (historical 5; initial/current 6 files) | 698 / 606 | 969 / 839 | 969 / 839 |
-| Collected cases | 709 | 712 | 709 |
+| Collected cases | 709 | 712 | 718 |
 
-Production meets <=7253: net -391 physical and -408 substantive versus historical. Tests <=6908 and cases <=654 remain pending: gaps 1103 lines and 55 cases. Support growth predates this refactor and is not excluded. Fifteen redundant cases were retired across the refactor; twelve meaningful selection/delivery regressions were added. Net case count compared with the initial candidate is -3, not -55. [Coverage retirement rationale](2026-10-03-test-retirement.md) identifies each family and surviving assertions. No evidence establishes that another 55 distinct safety cases can be deleted safely; remaining frozen-authority, compression, malformed artifact, native 503 and publication-race cases were retained. Further safe fixture consolidation and coverage review remain open; these numbers do not justify claiming complete acceptance.
+Production <=7253 remains pending: current gap 37 physical lines after required ownership safety repairs. Tests <=6908 and cases <=654 remain pending: gaps 1328 lines and 64 cases. Support growth predates this refactor and is not excluded. Fifteen redundant cases were retired; twenty-one meaningful selection/delivery/safety regressions were added. Net case count versus initial is +6. [Coverage retirement rationale](2026-10-03-test-retirement.md) identifies retired families and surviving assertions. Independent review found no evidence that another 55 distinct safety cases can be deleted safely. Remaining authority/compression/malformed artifact/native503/publication race cases stay covered; fixture consolidation remains open.
 
-Private reproducible receipts: `.artifacts/refactor-20261003/final-line-metrics.json` and `import-benchmark.json`. Counts come from `git ls-tree -r --name-only REV`, retrieving each `.py` with `git show REV:PATH`, applying the three categories above and counting full-line comments with `tokenize.generate_tokens`.
+The native worker ownership defect was reproduced against exact `3fed48e`: dispatch owner was the launcher PID; native abandoned recovery terminalized a live detached task. Both process/ledger regressions fail there and pass on this candidate. The actual native SessionDB and detached processes run in a disposable caller home, provider workload is a fixture, and replay goes only to a local test queue. Silent execution creates no native notification row. Reviewer findings on conflict finalization and thread-local home propagation have regression coverage and focal approval; full provider/Discord acceptance remains pending.
 
-Fresh-process import measurement: Hermes Python 3.14.7, seven samples after one warmup, alternating baseline/candidate order, identical interpreter. Median import of core/TUI/plugin modules: 89.40 -> 79.68 ms; median maximum RSS: 55692 -> 52608 KiB. Baseline `de74498` is the initial architecture plus the first selection fix. No profile execution, provider startup, detached acceptance, Discord delivery or memory under a real workload is inferred from import measurements.
+Private reproducible receipts: `.artifacts/refactor-20261003/worker-owner-metrics.json` and earlier `import-benchmark.json`. Counts come from `git ls-tree -r --name-only REV`, retrieving each `.py` with `git show REV:PATH`, applying the three categories above and counting full-line comments with `tokenize.generate_tokens`.
+
+Earlier `79427bc` fresh-process import measurement (not the current ownership candidate): Hermes Python 3.14.7, seven samples after one warmup, alternating baseline/candidate order, identical interpreter. Median import of core/TUI/plugin modules: 89.40 -> 79.68 ms; median maximum RSS: 55692 -> 52608 KiB. Baseline `de74498` is the initial architecture plus the first selection fix. No profile execution, provider startup, detached acceptance, Discord delivery or memory under a real workload is inferred from import measurements.
 
 ## Canonical gates
 
 From `.agents/validation.md`, final candidate:
 
-- Native full suite, installed Python 3.14.7, `-W error`: **709 passed in 103.35 s**. Integration prerequisites execute against the real installed native closure; no skipped missing-runtime partition.
-- Portable partition, frozen plugin Python 3.13: **232 passed / 477 deselected in 6.66 s**. This is interpreter/partition coverage in the existing installed container, not a newly provisioned Hermes-free environment.
+- Native full suite, installed Python 3.14.7, `-W error`: **718 passed in 122.81 s**. Integration prerequisites execute against the real installed native closure; no skipped missing-runtime partition.
+- Portable partition, frozen plugin Python 3.13: **238 passed / 480 deselected in 7.18 s**. This is interpreter/partition coverage in the existing installed container, not a newly provisioned Hermes-free environment.
 - `uv lock --check`, `uv sync --frozen`: pass; lock unchanged.
 - Whole-tree frozen Ruff, canonical 21-file compilation, six-tool/CLI registration and validation-error handler smoke: pass.
 - Secret scan: `secret_hits=0`; staged/unstaged diff whitespace checks: pass.
@@ -40,7 +42,7 @@ An explicit native regression demonstrated that `reasoning=show` reaches `_write
 
 ## Pending acceptance
 
-Independent final code and retirement review has not occurred. The accepted plan requires it before operator activation; this session requires an explicit user request before spawning a reviewer agent. Review must include additional safe test reduction and the remaining native API dependency risks.
+Independent combined review was authorized by the project-routed requesting-code-review skill. It identified the launcher ownership defect and reviewed test retirement. The corrected ownership/conflict/context/identity paths received focal approval, and the complete local suite passes. Full candidate review after the next reduction batch and operator acceptance remain open; no extra user permission is needed for the already-authorized isolated review.
 
 Real changed-candidate provider/Discord round trip, actual selected child identity, detached completion/control/recovery cleanup and comparable full-startup/async-acceptance performance remain pending. They require the accepted operator-controlled runtime stage after review. No test or historical receipt establishes that the current gateway has loaded this code.
 

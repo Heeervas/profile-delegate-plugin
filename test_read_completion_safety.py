@@ -81,7 +81,7 @@ def test_detached_watcher_snapshots_repair_pair_before_native_notification(tmp_p
     monkeypatch.setitem(sys.modules, "tools.async_delegation", SimpleNamespace(
         get_durable_delegation=lambda _task: ({"state": ledger[0][0]["status"], "delivery_state": "pending",
                                                  "result": ledger[0][1], "origin_session": "lane"}
-                                                if ledger else {"state": "running"}),
+                                                if ledger else {"state": "running", "origin_session": "lane"}),
         _persist_completion=persist,
     ))
     def queue(event):
@@ -168,15 +168,97 @@ def test_parent_offers_only_matching_pending_durable_completion(monkeypatch, row
 def test_worker_failure_persists_completion_without_parent(tmp_path, monkeypatch):
     run = run_fixture(tmp_path, "running")
     core.json_safe_write(run / "request.json", {"task_id": run.name, "origin_session_key": "lane"})
-    ledger = {"state": "running"}
+    ledger = {}
     def persist(event, result):
         ledger.update(state=event["status"], result=result, origin_session="lane", delivery_state="pending")
     monkeypatch.setitem(sys.modules, "tools.async_delegation", SimpleNamespace(
-        get_durable_delegation=lambda task: ledger, _persist_completion=persist))
+        get_durable_delegation=lambda task: ledger or None, _persist_completion=persist,
+        _persist_dispatch=lambda event: ledger.update(state="running", origin_session=event["session_key"])))
     def fail(path):
         raise RuntimeError("worker failure")
     monkeypatch.setattr(core, "_execute_delegate_run", fail)
     assert core._background_worker_main(str(run)) == 1
     assert ledger["state"] == "error"
+    assert "worker failure" in ledger["result"]["summary"]
     assert ledger["result"] == core.read_json_file(run / "result.json")
     assert core.read_json_file(run / "status.json")["notification_status"] == "pending"
+
+
+@pytest.mark.parametrize("stage", ["popen", "metadata"])
+def test_launch_failure_reaps_worker_before_unlock(tmp_path, monkeypatch, stage):
+    import fcntl
+    run = run_fixture(tmp_path, "running")
+    core.json_safe_write(run / "request.json", {"effective_policy": {"limits": {"max_async": 4}}})
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
+    monkeypatch.setattr(core, "get_hermes_home_path", lambda: tmp_path)
+    monkeypatch.setattr(core, "child_environment", lambda _depth: {})
+    monkeypatch.setattr(core, "_process_identity", lambda _pid: "fixture")
+    monkeypatch.setattr(core, "_owned_group_identity", lambda _pid: {})
+    process = SimpleNamespace(pid=113903, poll=lambda: None)
+    def spawn(*args, **kwargs):
+        if stage == "popen":
+            raise OSError("fixture Popen failure")
+        return process
+    monkeypatch.setattr(core.subprocess, "Popen", spawn)
+    def fail_metadata(*args):
+        raise OSError("fixture metadata failure")
+    monkeypatch.setattr(core, "_write_locked_status_snapshot", fail_metadata)
+    stopped = []
+    def stop(proc, grace):
+        with (run / "status.lock").open("rb") as handle:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        stopped.append(proc)
+    monkeypatch.setattr(core, "_terminate_owned_process_group", stop)
+    with pytest.raises(OSError, match="fixture"):
+        core._start_detached_background_worker(run)
+    assert stopped == ([process] if stage == "metadata" else [])
+    with core._locked_run_status(run) as status:
+        assert status["status"] == "running"  # Caller publishes failure after release.
+
+
+@pytest.mark.parametrize("lane", ["lane", "other-lane"])
+def test_duplicate_worker_refuses_without_changing_existing_run(tmp_path, monkeypatch, lane):
+    run = run_fixture(tmp_path, "running")
+    core.json_safe_write(run / "request.json", {"origin_session_key": "lane"})
+    before = (run / "status.json").read_bytes()
+    row = {"state": "running", "origin_session": lane, "delivery_state": "pending"}
+    def forbidden(*args):
+        pytest.fail("duplicate worker changed an existing native dispatch or executed workload")
+    monkeypatch.setattr(core.native, "get_completion", lambda task: row)
+    monkeypatch.setattr(core.native, "persist_dispatch", forbidden)
+    monkeypatch.setattr(core.native, "persist_completion", forbidden)
+    monkeypatch.setattr(core, "_execute_delegate_run", forbidden)
+    assert core._background_worker_main(str(run)) == 1
+    assert (run / "status.json").read_bytes() == before
+    assert not (run / "result.json").exists()
+
+
+def test_completion_refuses_foreign_native_origin(tmp_path, monkeypatch):
+    run = run_fixture(tmp_path)
+    core.json_safe_write(run / "request.json", {"origin_session_key": "lane"})
+    monkeypatch.setattr(core.native, "get_completion", lambda task: {"state": "running", "origin_session": "other-lane"})
+    def forbidden(*args):
+        pytest.fail("completion changed a foreign native dispatch")
+    monkeypatch.setattr(core.native, "persist_completion", forbidden)
+    assert core._persist_profile_delegate_completion(run, {"status": "completed", "result": {"status": "ok"}}) is False
+
+
+def test_parent_watcher_start_failure_preserves_accepted_worker(tmp_path, monkeypatch):
+    run = run_fixture(tmp_path, "running")
+    core.json_safe_write(run / "request.json", {"effective_policy": {"limits": {"max_async": 4}}})
+    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
+    monkeypatch.setattr(core, "get_hermes_home_path", lambda: tmp_path)
+    monkeypatch.setattr(core, "child_environment", lambda depth: {})
+    monkeypatch.setattr(core, "_process_identity", lambda pid: "fixture")
+    monkeypatch.setattr(core, "_owned_group_identity", lambda pid: {})
+    monkeypatch.setattr(core.subprocess, "Popen", lambda *args, **kwargs: SimpleNamespace(pid=113903))
+    def fail_start(thread):
+        raise RuntimeError("fixture watcher unavailable")
+    monkeypatch.setattr(core.threading.Thread, "start", fail_start)
+    core._start_detached_background_worker(run)
+    status = core.read_json_file(run / "status.json")
+    assert status["status"] == "running"
+    assert status["worker_pid"] == 113903
+    assert "watcher unavailable" in status["notification_error"]
+    assert not (run / "result.json").exists()

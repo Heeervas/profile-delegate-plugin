@@ -1832,6 +1832,19 @@ def _control_filename(seq: int, command_id: str) -> str:
     return f"{seq:012d}-{command_id}.json"
 
 
+def _require_detached_cli_identity(status: Dict[str, Any]) -> None:
+    if status.get("background_worker_mode") != "detached":
+        return
+    pid, identity = status.get("worker_pid"), status.get("process_group_identity")
+    if type(pid) is not int or not identity:
+        raise ProfileDelegateError(
+            "detached CLI identity pending; cancellation was not accepted; retry after identity is published",
+            "control_identity_pending")
+    if identity != _owned_group_identity(pid) or probe_worker_alive(pid) is not True:
+        raise ProfileDelegateError("detached CLI identity unavailable or changed; cancellation was not accepted",
+                                   "control_identity_unverifiable")
+
+
 def _write_control_command(run_dir: Path, command_type: str, payload: Dict[str, Any],
                            caller_origin: Optional[Dict[str, Any]], *,
                            lock_held: bool = False) -> Tuple[Path, Dict[str, Any]]:
@@ -1843,6 +1856,8 @@ def _write_control_command(run_dir: Path, command_type: str, payload: Dict[str, 
     if not cli_cancel and (not status.get("background") or status.get("transport") != "tui_stdio"):
         raise ProfileDelegateError("live controls require an active background TUI run", "control_unavailable")
     matched_by = authorize_run("control", caller_origin, status)
+    if cli_cancel:
+        _require_detached_cli_identity(status)
     root, commands, _ = _control_dirs(run_dir)
     lock_context = nullcontext() if lock_held else FingerprintLock(f"control-{run_dir.name}")
     with lock_context:
@@ -1852,21 +1867,8 @@ def _write_control_command(run_dir: Path, command_type: str, payload: Dict[str, 
         with _locked_run_status(run_dir) as current:
             if current.get("status") in TERMINAL_RUN_STATUSES:
                 raise ProfileDelegateError("run is already terminal", "run_terminal")
-            if cli_cancel and current.get("background_worker_mode") == "detached":
-                pid = current.get("worker_pid")
-                identity = current.get("process_group_identity")
-                if type(pid) is not int or not identity:
-                    raise ProfileDelegateError(
-                        "detached CLI identity pending; cancellation was not accepted; retry after identity is published",
-                        "control_identity_pending",
-                    )
-                if (type(pid) is not int or not identity or
-                        identity != _owned_group_identity(pid) or
-                        probe_worker_alive(pid) is not True):
-                    raise ProfileDelegateError(
-                        "detached CLI identity unavailable or changed; cancellation was not accepted",
-                        "control_identity_unverifiable",
-                    )
+            if cli_cancel:
+                _require_detached_cli_identity(current)
             seq_path = root / "next_seq.json"
             try:
                 seq = int(read_json_file(seq_path).get("next_seq") or 1)
@@ -2271,33 +2273,46 @@ def _notification_request(run_dir: Path) -> Optional[Dict[str, Any]]:
     return request
 
 
-def _register_durable_notification(run_dir: Path) -> bool:
-    """Create one idempotent durable delivery row before detached execution."""
-    request = _notification_request(run_dir)
-    if request is None:
-        return False
-    session_key = str(request["origin_session_key"]).strip()
+def _register_durable_notification(run_dir: Path, *, allow_terminal: bool = False) -> bool:
+    """Create an absent native row in its actual owner; never transfer by replacement."""
+    request = read_json_file(run_dir / "request.json")
+    session_key = str(request.get("origin_session_key") or "").strip()
     try:
-        dispatched_at = float(request.get("dispatched_at_epoch") or time.time())
-        native.persist_dispatch({
-            "delegation_id": run_dir.name, "session_key": session_key,
-            "origin_ui_session_id": "", "origin_session_id": "",
-            "parent_session_id": None, "goal": f"profile_delegate task {run_dir.name}",
-            "context": f"durable completion for {run_dir}",
-            "toolsets": ["profile_delegate"], "role": "profile",
-            "model": request.get("profile"), "is_batch": False,
-            "dispatched_at": dispatched_at,
-        })
-        merge_run_status(run_dir, {
-            "notification_status": "pending", "notification_delivery_id": run_dir.name,
-        })
+        with _locked_run_status(run_dir) as status:
+            if not allow_terminal and status.get("status") in TERMINAL_RUN_STATUSES:
+                raise ProfileDelegateError("background run already finalized", "native_dispatch_conflict")
+            if not request.get("notify_on_complete", True) or not session_key:
+                status["notification_status"] = "disabled" if not request.get("notify_on_complete", True) else "failed_unroutable"
+                _write_locked_status_snapshot(run_dir, status)
+                return False
+            existing = native.get_completion(run_dir.name)
+            if existing:
+                if allow_terminal and existing.get("origin_session") == session_key:
+                    return True
+                raise ProfileDelegateError("native dispatch already exists; refusing replacement", "native_dispatch_conflict")
+            native.persist_dispatch({
+                "delegation_id": run_dir.name, "session_key": session_key,
+                "origin_ui_session_id": "", "origin_session_id": "",
+                "parent_session_id": None, "goal": f"profile_delegate task {run_dir.name}",
+                "context": f"durable completion for {run_dir}",
+                "toolsets": ["profile_delegate"], "role": "profile",
+                "model": request.get("profile"), "is_batch": False,
+                "dispatched_at": float(request.get("dispatched_at_epoch") or time.time()),
+            })
+            row = native.get_completion(run_dir.name)
+            if not row or row.get("state") != "running" or row.get("origin_session") != session_key:
+                raise ProfileDelegateError("native dispatch readback failed", "native_notification_registration_failed")
+            status.update(notification_status="pending", notification_delivery_id=run_dir.name)
+            _write_locked_status_snapshot(run_dir, status)
         return True
     except Exception as exc:
-        merge_run_status(run_dir, {
-            "notification_status": "failed",
-            "notification_error": f"{type(exc).__name__}: {exc}"[:500],
-        })
-        return False
+        if isinstance(exc, ProfileDelegateError) and exc.code == "native_dispatch_conflict":
+            raise
+        merge_run_status_best_effort(run_dir, {"notification_status": "failed",
+                                             "notification_error": f"{type(exc).__name__}: {exc}"[:500]})
+        if isinstance(exc, ProfileDelegateError):
+            raise
+        raise ProfileDelegateError(f"native dispatch failed: {exc}", "native_notification_registration_failed") from exc
 
 
 def _persist_profile_delegate_completion(run_dir: Path, final: Dict[str, Any]) -> bool:
@@ -2307,6 +2322,11 @@ def _persist_profile_delegate_completion(run_dir: Path, final: Dict[str, Any]) -
         return False
     try:
         existing = native.get_completion(run_dir.name)
+        if existing is None:
+            _register_durable_notification(run_dir, allow_terminal=True)
+            existing = native.get_completion(run_dir.name)
+        if not existing or existing.get("origin_session") != request["origin_session_key"]:
+            return False
         # Explicit repair and retried worker completion never reset delivery state.
         if existing and existing.get("state") not in {"running", "finalizing"}:
             delivery_state = existing.get("delivery_state")
@@ -2570,19 +2590,23 @@ def _start_background_thread(run_dir: Path) -> None:
 
     def _worker() -> None:
         global _async_running
-        final: Dict[str, Any]
         try:
-            final = _execute_delegate_run(run_dir)
-            final["mode"] = "async"
-        except Exception as exc:
-            final = _mark_background_worker_failure(run_dir, exc)
-        try:
+            try:
+                _register_durable_notification(run_dir)
+                final = _execute_delegate_run(run_dir)
+                final["mode"] = "async"
+            except Exception as exc:
+                if isinstance(exc, ProfileDelegateError) and exc.code == "native_dispatch_conflict":
+                    return
+                final = _mark_background_worker_failure(run_dir, exc)
             _push_profile_delegate_completion(run_dir, final)
         finally:
             with _async_lock:
                 _async_running = max(0, _async_running - 1)
 
-    thread = threading.Thread(target=_worker, name=f"profile-delegate-{run_dir.name}", daemon=True)
+    from contextvars import copy_context
+    worker_context = copy_context()
+    thread = threading.Thread(target=lambda: worker_context.run(_worker), name=f"profile-delegate-{run_dir.name}", daemon=True)
     thread.start()
 
 
@@ -2628,17 +2652,26 @@ def _start_detached_background_worker(run_dir: Path) -> None:
         env["PROFILE_DELEGATE_DEPTH"] = str(int(request.get("delegate_depth") or 0))
         env["HERMES_HOME"] = str(get_hermes_home_path())
         env["PROFILE_DELEGATE_RUNS_ROOT"] = str(get_runs_root())
-        with stdout_path.open("a", encoding="utf-8") as out, stderr_path.open("a", encoding="utf-8") as err:
-            proc = subprocess.Popen(
-                cmd, cwd=str(Path.cwd()), env=env, stdin=subprocess.DEVNULL,
-                stdout=out, stderr=err, close_fds=True, start_new_session=True,
-            )
-        merge_run_status(run_dir, {
-            "background_worker_mode": "detached", "worker_pid": proc.pid,
-            "worker_started_at": now_iso(), "worker_identity": _process_identity(proc.pid), "worker_stdout": str(stdout_path),
-            "worker_stderr": str(stderr_path),
-            "process_group_identity": _owned_group_identity(proc.pid),
-        })
+        # Worker registration takes this lock first: no transport can start
+        # before launch metadata succeeds, including silent/unroutable runs.
+        with _locked_run_status(run_dir) as status:
+            proc = None
+            try:
+                with stdout_path.open("a", encoding="utf-8") as out, stderr_path.open("a", encoding="utf-8") as err:
+                    proc = subprocess.Popen(
+                        cmd, cwd=str(Path.cwd()), env=env, stdin=subprocess.DEVNULL,
+                        stdout=out, stderr=err, close_fds=True, start_new_session=True,
+                    )
+                status.update(
+                    background_worker_mode="detached", worker_pid=proc.pid,
+                    worker_started_at=now_iso(), worker_identity=_process_identity(proc.pid), worker_stdout=str(stdout_path),
+                    worker_stderr=str(stderr_path), process_group_identity=_owned_group_identity(proc.pid),
+                )
+                _write_locked_status_snapshot(run_dir, status)
+            except BaseException:
+                if proc is not None and proc.poll() is None:
+                    _terminate_owned_process_group(proc, 0.1)
+                raise
 
     def _watch_for_notification() -> None:
         try:
@@ -2669,8 +2702,11 @@ def _start_detached_background_worker(run_dir: Path) -> None:
 
     from contextvars import copy_context
     notification_context = copy_context()
-    threading.Thread(target=lambda: notification_context.run(_watch_for_notification),
-                     name=f"profile-delegate-notify-{run_dir.name}", daemon=True).start()
+    try:
+        threading.Thread(target=lambda: notification_context.run(_watch_for_notification),
+                         name=f"profile-delegate-notify-{run_dir.name}", daemon=True).start()
+    except Exception as exc:
+        merge_run_status_best_effort(run_dir, {"notification_error": f"parent watcher unavailable: {exc}"[:500]})
 
 
 def _start_background_run(run_dir: Path) -> None:
@@ -2684,6 +2720,7 @@ def _background_worker_main(run_dir_arg: str) -> int:
     run_dir = Path(run_dir_arg).expanduser().resolve()
     try:
         request = read_json_file(run_dir / "request.json")
+        _register_durable_notification(run_dir)
         selected = "interactive" if request.get("transport") == "tui_stdio" else "simple"
         merge_run_status(run_dir, {"selected_transport": selected, "transport_selection_state": "selected"})
         if selected == "interactive":
@@ -2698,6 +2735,8 @@ def _background_worker_main(run_dir_arg: str) -> int:
         _persist_profile_delegate_completion(run_dir, final)
         return 0
     except Exception as exc:
+        if isinstance(exc, ProfileDelegateError) and exc.code == "native_dispatch_conflict":
+            return 1
         final = _mark_background_worker_failure(run_dir, exc)
         _persist_profile_delegate_completion(run_dir, final)
         return 1
@@ -2903,7 +2942,6 @@ def delegate_profile(
 
         if background:
             try:
-                _register_durable_notification(run_dir)
                 _start_background_run(run_dir)
             except ProfileDelegateError as exc:
                 result, published = publish_terminal_run(run_dir, {

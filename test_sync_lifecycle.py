@@ -212,14 +212,14 @@ def test_natural_exit_wins_over_late_interrupt_while_pipes_drain(tmp_path):
     marker = tmp_path / "leader-exited"
     interrupted = threading.Event()
     code = (
-        "import pathlib,subprocess,sys; "
+        "import os,pathlib,subprocess,sys; "
         f"subprocess.Popen([sys.executable,'-c','import time; time.sleep(.3)']); "
-        f"pathlib.Path({str(marker)!r}).write_text('done')"
+        f"pathlib.Path({str(marker)!r}).write_text(str(os.getpid()))"
     )
 
     def late_interrupt() -> None:
         _wait_for(marker)
-        time.sleep(0.05)
+        assert _process_gone(int(marker.read_text()))
         interrupted.set()
 
     thread = threading.Thread(target=late_interrupt)

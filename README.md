@@ -250,7 +250,7 @@ Notes:
 - `background=true` returns immediately with `mode: "async"`, `task_id`, and run artifact paths; the delegated run continues in the configured thread or detached worker using persisted request data.
 - Identical active requests from the same resolved caller origin are reused under a per-fingerprint file lock. `duplicate_policy:"new"` permits intentional duplicate work. Completed runs are not silently reused.
 - Both synchronous and detached runs execute the same bootstrap path. If legacy/core output contains `Timeout — denying command`, the run is finalized as structured `approval_timeout` failure instead of being reported as successful or left active.
-- `notify_on_complete=true` registers a native Hermes `async_delegation` record before launch and persists completion from the detached worker, routed by origin lane `session_key`. Durable records support inspection/recovery but notification remains best effort: expiry, retry budgets or runtime failure can prevent delivery across reset/restart. Task-id deduplication is not an exactly-once receipt.
+- `notify_on_complete=true` has the detached worker register a native Hermes `async_delegation` record before profile execution and persist its completion, routed by origin lane `session_key`. Durable records support inspection/recovery but notification remains best effort: expiry, retry budgets or runtime failure can prevent delivery across reset/restart. Task-id deduplication is not an exactly-once receipt.
 
 Default result requested from the target profile:
 
