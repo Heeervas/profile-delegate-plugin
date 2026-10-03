@@ -1,6 +1,27 @@
 """Profile Delegate core. Usage: imported by plugin; delegates bounded tasks to Hermes profiles."""
 from __future__ import annotations
 
+if __package__:
+    from . import contracts
+else:
+    import contracts
+
+ensure_text = contracts.ensure_text
+ProfileDelegateError = contracts.ProfileDelegateError
+parse_json_result = contracts.parse_json_result
+extract_json_object = contracts.extract_json_object
+coerce_list = contracts.coerce_list
+summarize_unstructured_output = contracts.summarize_unstructured_output
+contract_status_for_parse = contracts.contract_status_for_parse
+apply_execution_status = contracts.apply_execution_status
+wrapper_success = contracts.wrapper_success
+normalize_result = contracts.normalize_result
+VALID_RESULT_STATUSES = contracts.VALID_RESULT_STATUSES
+VALID_CONTRACT_STATUSES = contracts.VALID_CONTRACT_STATUSES
+TERMINAL_RUN_STATUSES = contracts.TERMINAL_RUN_STATUSES
+failure_result = contracts.failure_result
+output_result = contracts.output_result
+
 import hashlib
 import importlib
 import inspect
@@ -70,8 +91,6 @@ DEFAULT_MAX_TRANSIENT_RESUMES = 2
 TRANSIENT_RESUME_DELAY_SECONDS = 10
 DIAGNOSTIC_TAIL_CHARS = 4_000
 DIAGNOSTIC_TAIL_LINES = 20
-VALID_RESULT_STATUSES = {"ok", "blocked", "failed", "unknown"}
-VALID_CONTRACT_STATUSES = {"valid", "recovered", "drifted", "empty", "not_evaluated"}
 VALID_OUTPUT_MODES = {"auto", "json", "markdown", "text"}
 VALID_SESSION_MODES = {"new", "resume"}
 VALID_CHILD_APPROVAL_MODES = {"deny", "profile", "inherit", "yolo", "approve_yolo"}
@@ -99,7 +118,6 @@ ORIGIN_FIELDS = ("platform", "source", "profile", "session_id", "ui_session_id",
 MAX_ORIGIN_VALUE_CHARS = 500
 VALID_INSPECTION_SCOPES = {"current_session", "current_lane", "all"}
 VALID_RUN_STATUSES = {"running", "cancelling", "completed", "failed", "cancelled", "timed_out", "corrupt"}
-TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
 TERMINAL_OWNED_STATUS_FIELDS = {
     "status", "phase", "ended_at", "error_code", "exit_code", "timed_out",
     "child_session_id", "transport_alive", "transport_pid", "terminal_reason",
@@ -142,15 +160,6 @@ TRANSIENT_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     ("remote_protocol_error", re.compile(r"^(?:[\w.]+\.)?RemoteProtocolError:\s*\S.*$", re.I)),
     ("connection_error", re.compile(r"^API call failed after \d+ retries:\s*Connection error\.?$", re.I)),
 )
-
-
-class ProfileDelegateError(Exception):
-    """Expected profile-delegate failure with a stable machine-readable code."""
-
-    def __init__(self, message: str, code: str = "profile_delegate_error", **details: Any) -> None:
-        super().__init__(message)
-        self.code = code
-        self.details = details
 
 
 class PreflightError(ProfileDelegateError):
@@ -695,14 +704,6 @@ def operator_tail_text(path: Path, max_chars: int) -> str:
         raise
     except OSError as exc:
         raise ProfileDelegateError(f"cannot read operator log {path.name}: {exc}", "unsafe_artifact") from exc
-
-
-def ensure_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
-    return str(value)
 
 
 def text_safe_write(path: Path, text: Any) -> None:
@@ -1336,14 +1337,12 @@ def resume_native_approval(policy, target, session_id):
     return resolve(policy, target, session_id)
 
 
-
 def resolve_native_approval(policy, target):
     if __package__:
         from .native_resolution import resolve_native_approval as resolve
     else:
         from native_resolution import resolve_native_approval as resolve
     return resolve(policy, target)
-
 
 
 def resolve_request_approval(policy, target, mode, resume_id, requested=None):
@@ -1804,367 +1803,6 @@ Requested output mode: {requested_mode}
 Resolved output mode: {resolved_mode}
 {final_rule}
 """
-
-
-def _candidate_score(obj: Any) -> int:
-    """Score only generic terminal-envelope signals; never profile-specific keys."""
-    if not isinstance(obj, dict):
-        return 0
-    status = ensure_text(obj.get("status")).strip().lower()
-    if status not in VALID_RESULT_STATUSES or not isinstance(obj.get("summary"), str):
-        return 0
-    score = 100
-    score += sum(5 for key in ("artifacts", "errors", "next_steps") if isinstance(obj.get(key), list))
-    return score
-
-
-def _top_level_json_candidates(
-    text: str,
-) -> Tuple[List[Tuple[Dict[str, Any], int, int, str]], int]:
-    decoder = json.JSONDecoder()
-    decoded: List[Tuple[Dict[str, Any], int, int, str]] = []
-    depth = 0
-    in_string = False
-    escaped = False
-    candidate_starts: List[int] = []
-    for idx, char in enumerate(text):
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            if depth == 0:
-                candidate_starts.append(idx)
-            depth += 1
-        elif char == "}" and depth:
-            depth -= 1
-    for idx in candidate_starts:
-        try:
-            obj, length = decoder.raw_decode(text[idx:])
-        except Exception:
-            continue
-        if isinstance(obj, dict):
-            decoded.append((obj, idx, idx + length, "embedded_json"))
-    # A candidate contained by a larger decoded object is nested data, not a
-    # competing terminal envelope. Report every failed top-level opening brace
-    # so malformed structured output can never fall through to textual success.
-    top_level = [
-        candidate for candidate in decoded
-        if not any(
-            other[1] <= candidate[1] and candidate[2] <= other[2]
-            and (other[1], other[2]) != (candidate[1], candidate[2])
-            for other in decoded
-        )
-    ]
-    return top_level, len(candidate_starts) - len(decoded)
-
-
-def parse_json_result(text: str) -> Tuple[Optional[Any], Dict[str, Any]]:
-    raw = text or ""
-    stripped = raw.strip()
-    empty = {"parse_method": "none", "candidate_count": 0, "selected_span": None, "parse_error": None}
-    if not stripped:
-        return None, empty
-    leading = len(raw) - len(raw.lstrip())
-    try:
-        obj = json.loads(stripped)
-        return obj, {
-            "parse_method": "whole_json", "candidate_count": 1,
-            "selected_span": [leading, leading + len(stripped)], "parse_error": None,
-        }
-    except Exception:
-        pass
-
-    candidates: List[Tuple[Dict[str, Any], int, int, str]] = []
-    fence_pattern = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
-    for match in fence_pattern.finditer(raw):
-        try:
-            obj = json.loads(match.group(1))
-        except Exception:
-            continue
-        if isinstance(obj, dict):
-            candidates.append((obj, match.start(1), match.end(1), "json_fence"))
-    embedded_candidates, malformed_candidate_count = _top_level_json_candidates(raw)
-    candidates.extend(embedded_candidates)
-
-    # Any malformed top-level JSON-like candidate makes structured parsing
-    # unresolved. Do not let an adjacent valid object or textual OK hide it.
-    if malformed_candidate_count:
-        return None, {
-            "parse_method": "malformed",
-            "candidate_count": len(candidates) + malformed_candidate_count,
-            "selected_span": None,
-            "parse_error": "malformed_json_candidate",
-        }
-
-    # Deduplicate a JSON object found both as fenced and embedded by exact span.
-    unique: Dict[Tuple[int, int], Tuple[Dict[str, Any], int, int, str]] = {}
-    for candidate in candidates:
-        unique.setdefault((candidate[1], candidate[2]), candidate)
-    candidates = list(unique.values())
-    scored = [(candidate, _candidate_score(candidate[0])) for candidate in candidates]
-    scored = [(candidate, score) for candidate, score in scored if score > 0]
-    if not scored:
-        # A single top-level custom object is useful structured output even when
-        # it omitted our task-status envelope. Preserve it as task_status=unknown;
-        # reject tiny numeric placeholder maps and multiple ambiguous objects.
-        if len(candidates) == 1:
-            obj, start, end, method = candidates[0]
-            keys = [ensure_text(key) for key in obj]
-            if len(keys) >= 2 and any(not key.isdigit() for key in keys):
-                return obj, {
-                    "parse_method": f"{method}_custom", "candidate_count": 1,
-                    "selected_span": [start, end], "parse_error": None,
-                }
-        if len(candidates) > 1:
-            return None, {
-                "parse_method": "ambiguous", "candidate_count": len(candidates),
-                "selected_span": None, "parse_error": "ambiguous_json_candidates",
-            }
-        return None, {**empty, "candidate_count": len(candidates)}
-    best_score = max(score for _candidate, score in scored)
-    best = [candidate for candidate, score in scored if score == best_score]
-    if len(best) != 1:
-        return None, {
-            "parse_method": "ambiguous", "candidate_count": len(best),
-            "selected_span": None, "parse_error": "ambiguous_json_candidates",
-        }
-    obj, start, end, method = best[0]
-    return obj, {
-        "parse_method": method, "candidate_count": len(scored),
-        "selected_span": [start, end], "parse_error": None,
-    }
-
-
-def extract_json_object(text: str) -> Optional[Any]:
-    """Backward-compatible object-only wrapper around deterministic parsing."""
-    return parse_json_result(text)[0]
-
-
-def coerce_list(value: Any) -> List[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [ensure_text(item) for item in value]
-    return [ensure_text(value)]
-
-
-def summarize_unstructured_output(raw_output: str, limit: int = 500) -> str:
-    text = (raw_output or "").strip()
-    if not text:
-        return ""
-    text = re.sub(r"^```(?:\w+)?\s*|\s*```$", "", text, flags=re.DOTALL).strip()
-    for line in text.splitlines():
-        candidate = line.strip(" \t`*-_")
-        if candidate:
-            return candidate[:limit]
-    return text[:limit]
-
-
-def _recover_text_status(raw_output: str, *, require_terminal: bool = False) -> Optional[str]:
-    """Recover one non-negated verdict; new prose contracts require the terminal marker."""
-    # Legacy first-line verdicts are accepted only when there is no terminal line.
-    lines = (raw_output or "").splitlines()
-    marker = re.compile(r"^PROFILE_DELEGATE_RESULT:\s*(ok|blocked|failed)$", re.I)
-    marker_lines = [(index, marker.fullmatch(line.strip())) for index, line in enumerate(lines)
-                    if "PROFILE_DELEGATE_RESULT:" in line.upper()]
-    if marker_lines:
-        if (len(marker_lines) != 1 or marker_lines[0][1] is None
-                or marker_lines[0][0] != len(lines) - 1
-                or sum(line.strip().startswith("```") for line in lines[:-1]) % 2):
-            return None
-        prefix = "\n".join(lines[:-1])
-        legacy = _recover_legacy_text_status(prefix)
-        if legacy and legacy != marker_lines[0][1].group(1).lower():
-            return None
-        if re.search(r"\b(?:not|never|without|isn't|wasn't|isnt|wasnt)\s+(?:PASS|OK|BLOCKED|FAILED)\b", prefix, re.I):
-            return None
-        return marker_lines[0][1].group(1).lower()
-    if require_terminal:
-        return None
-    return _recover_legacy_text_status(raw_output)
-
-
-def _recover_legacy_text_status(raw_output: str) -> Optional[str]:
-    """Historical explicit first-line verdict recovery."""
-    recovered: List[str] = []
-    lines = (raw_output or "").splitlines()
-    bounded_text = "\n".join(lines)
-    status_token = r"(?:PASS|OK|BLOCKED|FAILED)(?:_[A-Z0-9_]+)?"
-    if re.search(
-        rf"\b(?:not|never|without|isn't|wasn't|isnt|wasnt)\s+{status_token}\b",
-        bounded_text,
-        re.I,
-    ):
-        return None
-    for line in lines:
-        candidate = line.strip()
-        if not candidate:
-            continue
-        candidate = re.sub(r"^#{1,6}\s*", "", candidate).strip(" `*_: -")
-        match = re.fullmatch(
-            rf"(?:verdict|status)\s*[:=-]\s*(?P<label>{status_token})[.!]?|"
-            rf"(?P<token>{status_token})(?:[.!]|\s+[—-]\s+(?P<detail>.{{1,300}}))?",
-            candidate,
-            re.I,
-        )
-        if not match:
-            continue
-        token = match.group("label") or match.group("token")
-        detail = match.group("detail") or ""
-        # A prose detail may describe evidence, but must not smuggle in a second
-        # terminal token (for example "PASS — FAILED validation").
-        if detail and re.search(rf"\b{status_token}\b", detail, re.I):
-            return None
-        base = token.split("_", 1)[0].lower()
-        recovered.append(
-            {"pass": "ok", "ok": "ok", "blocked": "blocked", "failed": "failed"}[base]
-        )
-    return recovered[0] if len(recovered) == 1 else None
-
-
-def contract_status_for_parse(
-    parsed: Any, meta: Dict[str, Any], *, raw_output: str = "",
-) -> str:
-    """Classify output-contract conformance independently from task outcome."""
-    method = ensure_text(meta.get("parse_method")).strip().lower()
-    if meta.get("parse_error"):
-        return "drifted"
-    if isinstance(parsed, dict):
-        if method in {"", "whole_json"}:
-            return "valid"
-        if method.startswith(("json_fence", "embedded_json")):
-            return "recovered"
-        return "drifted"
-    if method == "none" and not raw_output.strip():
-        return "empty"
-    return "drifted"
-
-
-def apply_execution_status(result: Dict[str, Any], execution_status: str) -> Dict[str, Any]:
-    """Apply the authoritative terminal execution outcome to a result."""
-    normalized = ensure_text(execution_status).strip().lower()
-    if normalized not in TERMINAL_RUN_STATUSES:
-        raise ProfileDelegateError(
-            f"invalid terminal execution_status: {normalized or '<empty>'}",
-            "invalid_execution_status",
-        )
-    result["execution_status"] = normalized
-    return result
-
-
-def wrapper_success(execution_status: str, result: Dict[str, Any]) -> bool:
-    """True only for completed execution and trustworthy explicit/recovered OK."""
-    return (
-        ensure_text(execution_status).strip().lower() == "completed"
-        and result.get("execution_status") == "completed"
-        and result.get("status") == "ok"
-        and result.get("contract_status") in {"valid", "recovered"}
-        and not result.get("parse_error")
-    )
-
-
-def normalize_result(
-    parsed: Any,
-    stdout_path: str,
-    raw_output: str = "",
-    *,
-    parse_meta: Optional[Dict[str, Any]] = None,
-    output_mode: str = "json",
-    require_terminal_verdict: bool = False,
-) -> Dict[str, Any]:
-    meta = dict(parse_meta or {})
-    # Parse ambiguity/errors are authoritative. Never allow a caller-supplied
-    # object or a textual token to turn an unresolved parse into task success.
-    if meta.get("parse_error"):
-        parsed = None
-    # In prose modes, fenced/example JSON is content rather than the result
-    # envelope. Recover an explicit textual status from the whole response.
-    if output_mode in {"markdown", "text"}:
-        parsed = None
-    if not isinstance(parsed, dict):
-        summary = summarize_unstructured_output(raw_output)
-        if summary:
-            recovered_status = None if meta.get("parse_error") else _recover_text_status(
-                raw_output, require_terminal=require_terminal_verdict,
-            )
-            status = recovered_status or "unknown"
-            contract_status = (
-                "recovered" if recovered_status else contract_status_for_parse(
-                    parsed, meta, raw_output=raw_output,
-                )
-            )
-            errors = [] if status in {"ok", "unknown"} else [f"target_status:{status}"]
-            result = {
-                "status": status,
-                "execution_status": "completed",
-                "summary": summary,
-                "artifacts": [],
-                "errors": errors,
-                "next_steps": [],
-                "structured": False,
-                "contract_status": contract_status,
-                "raw_output_path": stdout_path,
-            }
-            if meta.get("parse_error"):
-                result["error_code"] = meta["parse_error"]
-            elif require_terminal_verdict and not recovered_status:
-                result["error_code"] = "missing_verdict"
-            elif output_mode == "json":
-                result["error_code"] = "unstructured_output"
-            result.update({key: value for key, value in meta.items() if value is not None})
-            return result
-        return {
-            "status": "failed",
-            "execution_status": "completed",
-            "summary": "Delegated profile returned empty output.",
-            "artifacts": [],
-            "errors": ["parse_failed"],
-            "next_steps": [],
-            "structured": False,
-            "contract_status": "empty",
-            "error_code": "parse_failed",
-            "raw_output_path": stdout_path,
-            **{key: value for key, value in meta.items() if value is not None},
-        }
-
-    explicit_status = "status" in parsed
-    raw_status = ensure_text(parsed.get("status")).strip().lower()
-    errors = coerce_list(parsed.get("errors"))
-    if not explicit_status:
-        raw_status = "unknown"
-    elif raw_status not in VALID_RESULT_STATUSES:
-        errors.append(f"invalid_status:{raw_status or '<empty>'}")
-        raw_status = "failed"
-
-    parse_contract_status = contract_status_for_parse(
-        parsed, meta, raw_output=raw_output,
-    )
-    result = dict(parsed)
-    result.update(
-        {
-            "status": raw_status,
-            "execution_status": "completed",
-            "summary": ensure_text(parsed.get("summary") or ""),
-            "artifacts": coerce_list(parsed.get("artifacts")),
-            "errors": errors,
-            "next_steps": coerce_list(parsed.get("next_steps")),
-            "structured": True,
-            "contract_status": parse_contract_status,
-        }
-    )
-    if parse_contract_status != "valid":
-        result["raw_output_path"] = stdout_path
-    result.update({key: value for key, value in meta.items() if value is not None})
-    if errors and "error_code" not in result:
-        result["error_code"] = "target_reported_errors"
-    return result
 
 
 def base_paths(run_dir: Path) -> Dict[str, str]:
@@ -2766,6 +2404,34 @@ def _push_profile_delegate_completion(run_dir: Path, final: Dict[str, Any]) -> N
             pass
 
 
+def finish_run(run_dir: Path, request: Dict[str, Any], result: Dict[str, Any],
+               updates: Dict[str, Any], *, mode: str, recovery_history=None) -> Dict[str, Any]:
+    nested = collect_nested_delegations(run_dir, request)
+    if nested:
+        result["nested_delegations"] = nested
+    if updates.get("child_session_id"):
+        result["session_id"] = updates["child_session_id"]
+    selection = {key: request.get(key) or {} for key in
+                 ("requested_execution", "effective_execution", "effective_capabilities", "approval_policy")}
+    history = recovery_history or []
+    result.update(**selection, recovery_history=history)
+    result, published = publish_terminal_run(run_dir, result, updates)
+    lifecycle = published["status"]
+    return {
+        "success": wrapper_success(lifecycle, result), "mode": mode,
+        "task_id": request.get("task_id", run_dir.name), "profile": request.get("profile"),
+        "status": lifecycle, "error_code": published.get("error_code"),
+        "session_title": request.get("session_title") or "", "session_mode": request.get("session_mode") or "new",
+        "requested_session_id": request.get("requested_session_id") or "",
+        "child_approval_mode": coerce_child_approval_mode(request.get("child_approval_mode")),
+        **selection, "child_session_id": published.get("child_session_id"),
+        "recovery_history": history, "result": result, "paths": base_paths(run_dir),
+        "exit_code": published.get("exit_code"), "timed_out": bool(published.get("timed_out")),
+        "stdout_truncated": published.get("stdout_truncated"), "stderr_truncated": published.get("stderr_truncated"),
+        **{key: value for key, value in published.items() if key.startswith(("rename_", "session_renamed"))},
+    }
+
+
 def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     request = read_json_file(run_dir / "request.json")
     profile = ensure_text(request.get("profile"))
@@ -2892,26 +2558,18 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
     if stop_reason in {"cancelled", "interrupted"}:
         error_code, final_status = "cancelled", "cancelled"
         summary = "Delegated profile was interrupted by its parent." if stop_reason == "interrupted" else "Delegated profile was cancelled."
-        result = {"status": "failed", "execution_status": final_status, "contract_status": "not_evaluated", "summary": summary, "artifacts": [], "errors": ["cancelled"], "next_steps": [], "structured": True, "error_code": error_code}
+        result = failure_result(summary, error_code, execution_status=final_status, errors=['cancelled'])
     elif timed_out:
         error_code, final_status = "timeout", "timed_out"
-        result = {"status": "failed", "execution_status": final_status, "contract_status": "not_evaluated", "summary": f"Delegated profile timed out after {timeout} seconds.", "artifacts": [], "errors": ["timeout"], "next_steps": [], "structured": True, "error_code": error_code}
+        result = failure_result(f'Delegated profile timed out after {timeout} seconds.', error_code, execution_status=final_status, errors=['timeout'])
     elif integrity_error:
         error_code, final_status = integrity_error, "failed"
-        result = {"status": "failed", "execution_status": final_status, "contract_status": "not_evaluated", "summary": f"Automatic recovery stopped safely: {integrity_error}.", "artifacts": [], "errors": [integrity_error], "next_steps": [], "structured": True, "error_code": error_code}
+        result = failure_result(f'Automatic recovery stopped safely: {integrity_error}.', error_code, execution_status=final_status, errors=[integrity_error])
     elif approval_timeout_marker:
         error_code, final_status = "approval_timeout", "failed"
-        result = {"status": "failed", "execution_status": final_status, "contract_status": "not_evaluated", "summary": "Delegated child reached an approval timeout.", "artifacts": [str(run_dir / "approval_events.jsonl")], "errors": ["approval_timeout_marker"], "next_steps": [], "structured": True, "error_code": error_code}
+        result = failure_result('Delegated child reached an approval timeout.', error_code, execution_status=final_status, errors=['approval_timeout_marker'], artifacts=[str(run_dir / 'approval_events.jsonl')])
     else:
-        parsed_result, parse_meta = parse_json_result(parse_stdout)
-        result = normalize_result(
-            parsed_result,
-            str(run_dir / "stdout.txt"),
-            raw_output=parse_stdout,
-            parse_meta=parse_meta,
-            output_mode=ensure_text(request.get("resolved_output_mode") or "json"),
-            require_terminal_verdict=bool(request.get("require_terminal_verdict", False)),
-        )
+        result = output_result(parse_stdout, str(run_dir / "stdout.txt"), request, "completed")
         error_code = result.get("error_code") if isinstance(result.get("error_code"), str) else None
         if exit_code != 0:
             result["status"] = "failed"
@@ -2939,19 +2597,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
                 rename_meta = {"session_renamed": False, "rename_error": f"{type(exc).__name__}: {exc}"}
         else:
             rename_meta["rename_skipped"] = "deadline_exhausted"
-    nested_delegations = collect_nested_delegations(run_dir, request)
-    if nested_delegations:
-        result["nested_delegations"] = nested_delegations
-    if child_session_id:
-        result["session_id"] = child_session_id
-    result.update({"requested_execution": request.get("requested_execution") or {}, "effective_execution": request.get("effective_execution") or {}, "effective_capabilities": request.get("effective_capabilities") or {}, "approval_policy": request.get("approval_policy") or {}, "recovery_history": history})
-    result, published = publish_terminal_run(run_dir, result, {"status": final_status, "phase": final_status, "ended_at": now_iso(), "exit_code": exit_code, "timed_out": timed_out, "error_code": error_code, "terminal_reason": stop_reason, "worker_alive": False, "cancellation_requested": stop_reason == "cancelled", "interrupted": stop_reason == "interrupted", "stdout_truncated": bool(run_meta.get("stdout_truncated")), "stderr_truncated": bool(run_meta.get("stderr_truncated")), "stdout_chars": run_meta.get("stdout_chars"), "stderr_chars": run_meta.get("stderr_chars"), "stdout_limit": run_meta.get("stdout_limit"), "stderr_limit": run_meta.get("stderr_limit"), "child_session_id": child_session_id, "recovery_history": history, **rename_meta})
-    final_status = published["status"]
-    error_code = published.get("error_code")
-    exit_code = published.get("exit_code")
-    timed_out = bool(published.get("timed_out"))
-    child_session_id = published.get("child_session_id")
-    return {"success": wrapper_success(final_status, result), "mode": "sync", "task_id": request.get("task_id", run_dir.name), "profile": profile, "status": final_status, "error_code": error_code, "session_title": title_text, "session_mode": mode, "requested_session_id": resume_id, "child_approval_mode": child_approval_mode, "requested_execution": request.get("requested_execution") or {}, "effective_execution": request.get("effective_execution") or {}, "effective_capabilities": request.get("effective_capabilities") or {}, "approval_policy": request.get("approval_policy") or {}, "child_session_id": child_session_id, "recovery_history": history, **rename_meta, "result": result, "paths": base_paths(run_dir), "exit_code": exit_code, "timed_out": timed_out, "stdout_truncated": run_meta.get("stdout_truncated"), "stderr_truncated": run_meta.get("stderr_truncated")}
+    return finish_run(run_dir, request, result, {"status": final_status, "phase": final_status, "ended_at": now_iso(), "exit_code": exit_code, "timed_out": timed_out, "error_code": error_code, "terminal_reason": stop_reason, "worker_alive": False, "cancellation_requested": stop_reason == "cancelled", "interrupted": stop_reason == "interrupted", "stdout_truncated": bool(run_meta.get("stdout_truncated")), "stderr_truncated": bool(run_meta.get("stderr_truncated")), "stdout_chars": run_meta.get("stdout_chars"), "stderr_chars": run_meta.get("stderr_chars"), "stdout_limit": run_meta.get("stdout_limit"), "stderr_limit": run_meta.get("stderr_limit"), "child_session_id": child_session_id, "recovery_history": history, **rename_meta}, mode="sync", recovery_history=history)
 
 
 _async_lock = threading.Lock()
@@ -2960,17 +2606,7 @@ _async_running = 0
 
 def _mark_background_worker_failure(run_dir: Path, exc: Exception) -> Dict[str, Any]:
     code = getattr(exc, "code", "background_worker_error")
-    result = {
-        "status": "failed",
-        "execution_status": "failed",
-        "contract_status": "not_evaluated",
-        "summary": f"Profile Delegate background worker failed: {type(exc).__name__}: {exc}",
-        "artifacts": [],
-        "errors": [f"{type(exc).__name__}: {exc}"],
-        "next_steps": [],
-        "structured": True,
-        "error_code": code,
-    }
+    result = failure_result(f'Profile Delegate background worker failed: {type(exc).__name__}: {exc}', code, execution_status='failed', errors=[f'{type(exc).__name__}: {exc}'])
     result, published = publish_terminal_run(run_dir, result, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": code})
     return {"success": wrapper_success(published["status"], result), "mode": "async", "task_id": run_dir.name, "status": published["status"], "error_code": published.get("error_code"), "result": result, "paths": base_paths(run_dir)}
 

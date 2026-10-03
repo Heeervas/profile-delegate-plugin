@@ -38,6 +38,7 @@ def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch):
 def test_preflight_conflicts_return_actionable_patch_without_run(tmp_path, monkeypatch):
     # This refusal contract must not inherit the invoking caller's live grant.
     monkeypatch.setattr(core, "_plugin_entry", lambda: {
+        "allowed_profiles": ["builder"],
         "allow_child_approval_override": False,
         "allow_reasoning_override": False,
     })

@@ -569,64 +569,17 @@ def execute(run_dir: Path) -> Dict[str, Any]:
     if client and not core.tail_text(run_dir / "stderr.txt", 1):
         core.text_safe_write(run_dir / "stderr.txt", client.stderr_tail)
     if timed_out:
-        result = {
-            "status": "failed", "summary": f"Delegated profile timed out after {timeout} seconds.",
-            "artifacts": [], "errors": ["timeout"], "next_steps": [], "structured": True,
-            "execution_status": "timed_out", "contract_status": "not_evaluated",
-            "error_code": "timeout",
-        }
+        result = core.failure_result(f"Delegated profile timed out after {timeout} seconds.", "timeout", execution_status="timed_out")
         if final_text.strip():
             result["raw_output_path"] = str(run_dir / "stdout.txt")
             result["errors"].append("last settled turn preserved; follow-up did not settle")
     elif cancelled:
-        result = {
-            "status": "failed", "summary": "Delegated profile was cancelled.",
-            "artifacts": [], "errors": ["cancelled"], "next_steps": [], "structured": True,
-            "execution_status": "cancelled", "contract_status": "not_evaluated",
-            "error_code": "cancelled",
-        }
+        result = core.failure_result("Delegated profile was cancelled.", "cancelled", execution_status="cancelled")
     elif final_status == "failed" and not final_text.strip():
-        transport_error = error_code or "tui_transport_error"
-        result = {
-            "status": "failed",
-            "summary": "Delegated profile transport failed before producing a result.",
-            "artifacts": [],
-            "errors": [transport_error],
-            "next_steps": [],
-            "structured": True,
-            "execution_status": "failed",
-            "contract_status": "not_evaluated",
-            "error_code": transport_error,
-        }
+        result = core.failure_result("Delegated profile transport failed before producing a result.", error_code or "tui_transport_error")
     else:
-        parsed_result, parse_meta = core.parse_json_result(final_text)
-        result = core.normalize_result(
-            parsed_result,
-            str(run_dir / "stdout.txt"),
-            raw_output=final_text,
-            parse_meta=parse_meta,
-            output_mode=core.ensure_text(request.get("resolved_output_mode") or "json"),
-            require_terminal_verdict=bool(request.get("require_terminal_verdict", False)),
-        )
-        if final_status != "completed" or message_status == "error":
-            result["status"] = "failed"
-            result["error_code"] = error_code or "tui_turn_error"
-            result["errors"] = core.coerce_list(result.get("errors")) + [result["error_code"]]
-        core.apply_execution_status(result, final_status)
-    nested_delegations = core.collect_nested_delegations(run_dir, request)
-    if nested_delegations:
-        result["nested_delegations"] = nested_delegations
-    if child_session_id:
-        result["session_id"] = child_session_id
-    result.update(
-        {
-            "requested_execution": request.get("requested_execution") or {},
-            "effective_execution": request.get("effective_execution") or {},
-            "effective_capabilities": request.get("effective_capabilities") or {},
-            "approval_policy": request.get("approval_policy") or {},
-            "recovery_history": [],
-        }
-    )
+        result = core.output_result(final_text, str(run_dir / "stdout.txt"), request, final_status,
+                                    error_code=(error_code or "tui_turn_error") if final_status != "completed" or message_status == "error" else None)
     if cancelled:
         result["session_identity_evidence"] = "post_interrupt_observed" if cancel_identity_observed else "last_observed_only"
         if cancel_transport_diagnostic:
@@ -642,30 +595,11 @@ def execute(run_dir: Path) -> Dict[str, Any]:
         "child_session_id": child_session_id,
         "transport_alive": False,
     }
-    result, published = core.publish_terminal_run(run_dir, result, {**terminal_updates, **journal.snapshot_fields()})
-    final_status = published["status"]
-    error_code = published.get("error_code")
-    exit_code = published.get("exit_code")
-    timed_out = bool(published.get("timed_out"))
-    child_session_id = published.get("child_session_id")
+    final = core.finish_run(run_dir, request, result, {**terminal_updates, **journal.snapshot_fields()}, mode="async")
+    final_status, error_code, child_session_id = final["status"], final["error_code"], final["child_session_id"]
     try:
         journal.finalize(final_status, error_code=error_code, child_session_id=child_session_id)
         merge_status(journal.snapshot_fields(), force=True)
     except Exception:
         merge_status({"observability_degraded": True}, force=True)
-    return {
-        "success": core.wrapper_success(final_status, result),
-        "mode": "async",
-        "task_id": request.get("task_id", run_dir.name),
-        "profile": profile,
-        "status": final_status,
-        "error_code": error_code,
-        "session_title": title,
-        "session_mode": mode,
-        "requested_session_id": resume_id,
-        "child_session_id": child_session_id,
-        "result": result,
-        "paths": core.base_paths(run_dir),
-        "exit_code": exit_code,
-        "timed_out": timed_out,
-    }
+    return final

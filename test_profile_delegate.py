@@ -539,7 +539,9 @@ def test_bootstrap_real_subprocess_deny_is_immediate_and_observable(tmp_path):
     script = f"""
 import json, pathlib, time
 import child_bootstrap
-child_bootstrap.install_policy('deny', pathlib.Path({str(events)!r}), [])
+from native_approval import snapshot
+envelope = snapshot('deny', 'fixture', 'caller', 'child', {{ }}, {{ }})
+child_bootstrap.install_policy('deny', pathlib.Path({str(events)!r}), [], envelope)
 from tools import terminal_tool
 started=time.monotonic()
 danger=terminal_tool._check_all_guards('git reset --hard HEAD', 'local')
@@ -551,6 +553,7 @@ print(json.dumps({{'danger': danger, 'safe': safe, 'code': code, 'elapsed': time
     completed = subprocess.run(
         [str(HERMES_TEST_PYTHON), "-c", script], cwd=str(PLUGIN_DIR), text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+        env=core.child_environment(0, "deny"),
     )
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout.strip().splitlines()[-1])
@@ -638,6 +641,7 @@ def test_plugin_config_child_approval_mode_reads_yaml(monkeypatch):
 
 
 def test_timeout_defaults_and_caps(monkeypatch):
+    monkeypatch.setattr(core, "_plugin_entry", lambda: {})
     expected_default = int(os.getenv("PROFILE_DELEGATE_DEFAULT_TIMEOUT_SECONDS", "1200"))
     assert core.DEFAULT_TIMEOUT_SECONDS == expected_default
     assert core.MAX_TIMEOUT_SECONDS >= core.DEFAULT_TIMEOUT_SECONDS

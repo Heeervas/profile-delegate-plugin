@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- CLI and TUI share pure result contracts and terminal enrichment/publication, retaining transport-specific failure and recovery evidence.
+
 - TUI resume applies authorized model/provider/reasoning selections through native session-scoped config.set, preserving stored workspace, frozen authority and operator confirmations.
 
 - Installed audit gate now invokes Hermes Python 3.14 directly with frozen native dev tooling and a hash-pinned YAML helper; fail-closed interpreter/closure checks and regressions added. Portable support remains 3.11–3.13. Installed execution/provisioning evidence remains blocked, not implicitly accepted.

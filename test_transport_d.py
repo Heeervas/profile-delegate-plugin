@@ -175,7 +175,13 @@ def test_control_write_refuses_terminal_race(tmp_path, monkeypatch):
 
 
 def test_group_identity_rejects_other_process_and_is_start_sensitive():
-    assert core._owned_group_identity(os.getpid()) is None  # caller is not a new session group leader
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+    try:
+        assert os.getpgid(other.pid) != other.pid
+        assert core._owned_group_identity(other.pid) is None
+    finally:
+        other.terminate()
+        other.wait(timeout=5)
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"], start_new_session=True)
     try:
         identity = core._owned_group_identity(proc.pid)
