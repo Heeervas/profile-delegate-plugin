@@ -1008,6 +1008,9 @@ def test_push_profile_delegate_completion_queues_async_event(
     fake_mod = types.SimpleNamespace(process_registry=Registry())
     monkeypatch.setitem(sys.modules, "tools.process_registry", fake_mod)
     monkeypatch.setattr(core, "_persist_profile_delegate_completion", lambda run_dir, final: True)
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", types.SimpleNamespace(
+        get_durable_delegation=lambda task_id: {"state": expected_event_status, "delivery_state": "pending",
+                                               "result": final["result"], "origin_session": request["origin_session_key"]}))
     core._push_profile_delegate_completion(run_dir, final)
     assert len(Registry.completion_queue.items) == 1
     evt = Registry.completion_queue.items[0]

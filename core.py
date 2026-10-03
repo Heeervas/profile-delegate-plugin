@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 if __package__:
-    from . import contracts
+    from . import contracts, native
 else:
     import contracts
+    import native
 
 ensure_text = contracts.ensure_text
 ProfileDelegateError = contracts.ProfileDelegateError
@@ -23,8 +24,6 @@ failure_result = contracts.failure_result
 output_result = contracts.output_result
 
 import hashlib
-import importlib
-import inspect
 import json
 import os
 import random
@@ -129,16 +128,8 @@ MAX_NESTED_SUMMARY_CHARS = 4_000
 SYNC_ACTIVITY_INTERVAL_SECONDS = 10.0
 SYNC_STATUS_INTERVAL_SECONDS = 2.0
 SYNC_TERMINATION_GRACE_SECONDS = 2.0
-NATIVE_ASYNC_LEDGER_APIS = {
-    "_persist_dispatch": ({},),
-    "_persist_completion": ({}, {}),
-    "get_durable_delegation": ("pd_compatibility_probe",),
-}
-NATIVE_ASYNC_LEDGER_COLUMNS = {
-    "delegation_id", "origin_session", "parent_session_id", "state",
-    "dispatched_at", "completed_at", "updated_at", "event_json", "result_json",
-    "delivery_state", "delivery_attempts", "delivered_at",
-}
+NATIVE_ASYNC_LEDGER_APIS = native.NATIVE_ASYNC_LEDGER_APIS
+NATIVE_ASYNC_LEDGER_COLUMNS = native.NATIVE_ASYNC_LEDGER_COLUMNS
 
 # Installed quiet CLI's exhausted_copy(overloaded) wraps the provider summary.
 # Match the entire native block, not provider-controlled "Provider said:" prose.
@@ -2220,59 +2211,7 @@ def async_completion_event_status(execution_status: Any, success: Any = False) -
 
 
 def native_async_ledger_compatibility() -> Dict[str, Any]:
-    """Validate the native durable-delivery contract without mutating state.db."""
-    report: Dict[str, Any] = {
-        "compatible": False,
-        "database_open_mode": "read_only",
-        "database": str(get_hermes_home_path() / "state.db"),
-        "missing_apis": [],
-        "incompatible_api_signatures": [],
-        "missing_columns": [],
-    }
-    try:
-        native = importlib.import_module("tools.async_delegation")
-    except Exception as exc:
-        report["reason"] = f"native async delegation import failed: {type(exc).__name__}: {exc}"
-        return report
-
-    for name, probe_args in NATIVE_ASYNC_LEDGER_APIS.items():
-        function = getattr(native, name, None)
-        if not callable(function):
-            report["missing_apis"].append(name)
-            continue
-        try:
-            inspect.signature(function).bind(*probe_args)
-        except (TypeError, ValueError):
-            report["incompatible_api_signatures"].append(name)
-    if report["missing_apis"] or report["incompatible_api_signatures"]:
-        report["reason"] = "required native async-delegation API is missing or incompatible"
-        return report
-
-    db_path = get_hermes_home_path() / "state.db"
-    if not db_path.is_file():
-        report["reason"] = "Hermes state.db does not exist; refusing to initialize it from the plugin"
-        return report
-    try:
-        uri = f"{db_path.as_uri()}?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True, timeout=2)) as conn:
-            conn.execute("PRAGMA query_only=ON")
-            table = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='async_delegations'"
-            ).fetchone()
-            if table is None:
-                report["reason"] = "native async_delegations table is absent"
-                return report
-            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(async_delegations)")}
-    except Exception as exc:
-        report["reason"] = f"read-only native ledger inspection failed: {type(exc).__name__}: {exc}"
-        return report
-    report["missing_columns"] = sorted(NATIVE_ASYNC_LEDGER_COLUMNS - columns)
-    if report["missing_columns"]:
-        report["reason"] = "native async_delegations schema is incompatible"
-        return report
-    report["compatible"] = True
-    report["reason"] = "compatible"
-    return report
+    return native.ledger_compatibility(get_hermes_home_path())
 
 
 def require_native_async_ledger_compatibility() -> Dict[str, Any]:
@@ -2324,20 +2263,25 @@ def _profile_delegate_completion_payload(
     return event, result
 
 
+def _notification_request(run_dir: Path) -> Optional[Dict[str, Any]]:
+    request = read_json_file(run_dir / "request.json")
+    reason = "disabled" if not request.get("notify_on_complete", True) else (
+        "failed_unroutable" if not str(request.get("origin_session_key") or "").strip() else None)
+    if reason:
+        merge_run_status(run_dir, {"notification_status": reason})
+        return None
+    return request
+
+
 def _register_durable_notification(run_dir: Path) -> bool:
     """Create one idempotent durable delivery row before detached execution."""
-    request = read_json_file(run_dir / "request.json")
-    if not bool(request.get("notify_on_complete", True)):
-        merge_run_status(run_dir, {"notification_status": "disabled"})
+    request = _notification_request(run_dir)
+    if request is None:
         return False
-    session_key = str(request.get("origin_session_key") or "").strip()
-    if not session_key:
-        merge_run_status(run_dir, {"notification_status": "failed_unroutable"})
-        return False
+    session_key = str(request["origin_session_key"]).strip()
     try:
-        from tools.async_delegation import _persist_dispatch
         dispatched_at = float(request.get("dispatched_at_epoch") or time.time())
-        _persist_dispatch({
+        native.persist_dispatch({
             "delegation_id": run_dir.name, "session_key": session_key,
             "origin_ui_session_id": "", "origin_session_id": "",
             "parent_session_id": None, "goal": f"profile_delegate task {run_dir.name}",
@@ -2360,18 +2304,12 @@ def _register_durable_notification(run_dir: Path) -> bool:
 
 def _persist_profile_delegate_completion(run_dir: Path, final: Dict[str, Any]) -> bool:
     """Commit completion to Hermes' restart-safe async-delivery ledger."""
-    request = read_json_file(run_dir / "request.json")
-    if not bool(request.get("notify_on_complete", True)):
-        merge_run_status(run_dir, {"notification_status": "disabled"})
-        return False
-    if not str(request.get("origin_session_key") or "").strip():
-        merge_run_status(run_dir, {"notification_status": "failed_unroutable"})
+    request = _notification_request(run_dir)
+    if request is None:
         return False
     try:
-        from tools.async_delegation import _persist_completion, get_durable_delegation
-        existing = get_durable_delegation(run_dir.name)
-        # The detached worker and its live parent watcher may both observe the
-        # same completion. Never reset an already-pending/delivered row.
+        existing = native.get_completion(run_dir.name)
+        # Explicit repair and retried worker completion never reset delivery state.
         if existing and existing.get("state") not in {"running", "finalizing"}:
             delivery_state = existing.get("delivery_state")
             merge_run_status(run_dir, {
@@ -2383,8 +2321,8 @@ def _persist_profile_delegate_completion(run_dir: Path, final: Dict[str, Any]) -
             })
             return True
         event, result = _profile_delegate_completion_payload(run_dir, final, request)
-        _persist_completion(event, result)
-        persisted = get_durable_delegation(run_dir.name)
+        native.persist_completion(event, result)
+        persisted = native.get_completion(run_dir.name)
         if not persisted or persisted.get("state") in {"running", "finalizing"}:
             raise RuntimeError("durable completion row was not committed")
         merge_run_status(run_dir, {
@@ -2399,30 +2337,24 @@ def _persist_profile_delegate_completion(run_dir: Path, final: Dict[str, Any]) -
         return False
 
 
-def _push_profile_delegate_completion(run_dir: Path, final: Dict[str, Any]) -> None:
-    """Persist first, then enqueue on the live native completion rail."""
+def _offer_profile_delegate_completion(run_dir: Path, final: Dict[str, Any]) -> None:
+    """The parent offers a coherent completion; it never persists one."""
     try:
-        request = read_json_file(run_dir / "request.json")
-        if not bool(request.get("notify_on_complete", True)):
-            merge_run_status(run_dir, {"notification_status": "disabled"})
+        request = _notification_request(run_dir)
+        if request is None:
             return
-        if not str(request.get("origin_session_key") or "").strip():
-            merge_run_status(run_dir, {"notification_status": "failed_unroutable"})
-            return
-        if not _persist_profile_delegate_completion(run_dir, final):
-            return
-        from tools.process_registry import process_registry
-        event, _result = _profile_delegate_completion_payload(run_dir, final, request)
-        process_registry.completion_queue.put(event)
-        merge_run_status(run_dir, {"notified_at": now_iso(), "notification_status": "queued"})
+        event, result = _profile_delegate_completion_payload(run_dir, final, request)
+        if native.offer_completion(event, result):
+            merge_run_status(run_dir, {"notified_at": now_iso(), "notification_status": "queued"})
     except Exception as exc:
-        try:
-            merge_run_status(run_dir, {
-                "notification_status": "pending",
-                "notification_error": f"{type(exc).__name__}: {exc}"[:500],
-            })
-        except Exception:
-            pass
+        merge_run_status_best_effort(run_dir, {"notification_status": "pending",
+                                             "notification_error": f"{type(exc).__name__}: {exc}"[:500]})
+
+
+def _push_profile_delegate_completion(run_dir: Path, final: Dict[str, Any]) -> None:
+    """In-process worker owns persistence before offering to its live parent."""
+    if _persist_profile_delegate_completion(run_dir, final):
+        _offer_profile_delegate_completion(run_dir, final)
 
 
 def finish_run(run_dir: Path, request: Dict[str, Any], result: Dict[str, Any],
@@ -2732,7 +2664,7 @@ def _start_detached_background_worker(run_dir: Path) -> None:
                 "result": result_after,
                 "paths": base_paths(run_dir),
             }
-            _push_profile_delegate_completion(run_dir, final)
+            _offer_profile_delegate_completion(run_dir, final)
         except Exception:
             # Artifact persistence is owned by the detached worker; notification is best effort.
             pass
@@ -2768,7 +2700,8 @@ def _background_worker_main(run_dir_arg: str) -> int:
         _persist_profile_delegate_completion(run_dir, final)
         return 0
     except Exception as exc:
-        _mark_background_worker_failure(run_dir, exc)
+        final = _mark_background_worker_failure(run_dir, exc)
+        _persist_profile_delegate_completion(run_dir, final)
         return 1
 
 
@@ -2975,20 +2908,22 @@ def delegate_profile(
                 _register_durable_notification(run_dir)
                 _start_background_run(run_dir)
             except ProfileDelegateError as exc:
-                publish_terminal_run(run_dir, {
+                result, published = publish_terminal_run(run_dir, {
                     "status": "failed", "summary": str(exc), "artifacts": [], "errors": [exc.code],
                     "next_steps": ["Wait for another background profile_delegate run to finish or raise max_async."],
                     "structured": True, "execution_status": "failed",
                     "contract_status": "not_evaluated", "error_code": exc.code,
                 }, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": exc.code})
+                _persist_profile_delegate_completion(run_dir, {"status": published["status"], "result": result, "error_code": published.get("error_code")})
                 raise
             except Exception as exc:
-                publish_terminal_run(run_dir, {
+                result, published = publish_terminal_run(run_dir, {
                     "status": "failed", "summary": f"Failed to start background profile_delegate run: {type(exc).__name__}: {exc}",
                     "artifacts": [], "errors": ["background_start_failed"], "next_steps": [],
                     "structured": True, "execution_status": "failed",
                     "contract_status": "not_evaluated", "error_code": "background_start_failed",
                 }, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": "background_start_failed"})
+                _persist_profile_delegate_completion(run_dir, {"status": published["status"], "result": result, "error_code": published.get("error_code")})
                 raise ProfileDelegateError(f"failed to start background run: {type(exc).__name__}: {exc}", "background_start_failed") from exc
             return {
                 "success": True, "mode": "async", "task_id": task_id, "profile": validated.canonical,
@@ -3243,9 +3178,19 @@ def _operator_reconcile(task_id: str) -> Dict[str, Any]:
                 status.update(updates)
                 _write_locked_status_snapshot(run_dir, status)
                 reconciled = True
-        return {"success": True, "task_id": run_dir.name, "reconciled": reconciled,
+        terminal_result = _validated_terminal_result(run_dir) if status.get("status") in TERMINAL_RUN_STATUSES else None
+        response = {"success": True, "task_id": run_dir.name, "reconciled": reconciled,
                 "status": status.get("status", "unknown"), "reason": reason,
                 "mode": "operator_repair"}
+
+    if terminal_result is not None:
+        final = {"status": status["status"], "error_code": status.get("error_code"),
+                 "result": terminal_result, "paths": base_paths(run_dir)}
+        try:
+            _persist_profile_delegate_completion(run_dir, final)
+        except ProfileDelegateError:
+            pass  # Historical repairs without a request cannot invent a route.
+    return response
 
 
 def _safe_event_metadata(status: Dict[str, Any]) -> Dict[str, Any]:
@@ -3296,8 +3241,7 @@ def _read_run_status(
     activity = derive_activity(status)
     durable_notification = None
     try:
-        from tools.async_delegation import get_durable_delegation
-        durable_notification = get_durable_delegation(task_id)
+        durable_notification = native.get_completion(task_id)
     except Exception:
         durable_notification = None
     notification_status = status.get("notification_status")

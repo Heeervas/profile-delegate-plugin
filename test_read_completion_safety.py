@@ -79,7 +79,8 @@ def test_detached_watcher_snapshots_repair_pair_before_native_notification(tmp_p
         ledger.append((event, result))
         notified.set()
     monkeypatch.setitem(sys.modules, "tools.async_delegation", SimpleNamespace(
-        get_durable_delegation=lambda _task: ({"state": "completed", "delivery_state": "pending"}
+        get_durable_delegation=lambda _task: ({"state": ledger[0][0]["status"], "delivery_state": "pending",
+                                                 "result": ledger[0][1], "origin_session": "lane"}
                                                 if ledger else {"state": "running"}),
         _persist_completion=persist,
     ))
@@ -130,7 +131,7 @@ def test_detached_watcher_refuses_nonterminal_or_incoherent_pair(tmp_path, monke
             return 0
     monkeypatch.setattr(core.subprocess, "Popen", lambda *args, **kwargs: Process())
     notifications = []
-    monkeypatch.setattr(core, "_push_profile_delegate_completion", lambda _run, final: notifications.append(final))
+    monkeypatch.setattr(core, "_offer_profile_delegate_completion", lambda _run, final: notifications.append(final))
     watched = threading.Event()
     original = core._locked_run_status
     @contextmanager
@@ -144,3 +145,38 @@ def test_detached_watcher_refuses_nonterminal_or_incoherent_pair(tmp_path, monke
     assert done.wait(5)
     assert watched.wait(5)
     assert notifications == []
+
+
+@pytest.mark.parametrize("row_kind", ["pending", "delivered", "mismatched"])
+def test_parent_offers_only_matching_pending_durable_completion(monkeypatch, row_kind):
+    import native
+    event = {"delegation_id": "task", "status": "completed", "session_key": "lane"}
+    result = {"status": "ok"}
+    row = {"state": "completed", "result": result, "origin_session": "lane", "delivery_state": "pending"}
+    if row_kind == "delivered":
+        row["delivery_state"] = "delivered"
+    elif row_kind == "mismatched":
+        row["origin_session"] = "other-lane"
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", SimpleNamespace(get_durable_delegation=lambda task: row))
+    queued = []
+    monkeypatch.setitem(sys.modules, "tools.process_registry", SimpleNamespace(
+        process_registry=SimpleNamespace(completion_queue=SimpleNamespace(put=queued.append))))
+    assert native.offer_completion(event, result) is (row_kind == "pending")
+    assert queued == ([event] if row_kind == "pending" else [])
+
+
+def test_worker_failure_persists_completion_without_parent(tmp_path, monkeypatch):
+    run = run_fixture(tmp_path, "running")
+    core.json_safe_write(run / "request.json", {"task_id": run.name, "origin_session_key": "lane"})
+    ledger = {"state": "running"}
+    def persist(event, result):
+        ledger.update(state=event["status"], result=result, origin_session="lane", delivery_state="pending")
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", SimpleNamespace(
+        get_durable_delegation=lambda task: ledger, _persist_completion=persist))
+    def fail(path):
+        raise RuntimeError("worker failure")
+    monkeypatch.setattr(core, "_execute_delegate_run", fail)
+    assert core._background_worker_main(str(run)) == 1
+    assert ledger["state"] == "error"
+    assert ledger["result"] == core.read_json_file(run / "result.json")
+    assert core.read_json_file(run / "status.json")["notification_status"] == "pending"

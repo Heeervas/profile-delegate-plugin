@@ -43,7 +43,7 @@ PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python -m pytest -q -o 'addopts=' t
 PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python -m pytest -q -o 'addopts=' -W error
 uv run --frozen ruff check .
 uv run --frozen python -m py_compile \
-  __init__.py child_bootstrap.py execution.py native_approval.py native_resolution.py cli.py cli_smoke.py core.py contracts.py \
+  __init__.py child_bootstrap.py execution.py native.py native_approval.py native_resolution.py cli.py cli_smoke.py core.py contracts.py \
   event_journal.py event_schema.py spectator.py tui_rpc.py tui_runner.py \
   scripts/validate_release.py \
   test_event_journal.py test_profile_delegate.py test_reliability_reset.py \

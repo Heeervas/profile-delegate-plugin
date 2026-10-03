@@ -589,19 +589,21 @@ def test_detached_notification_watcher_keeps_context_home(tmp_path, monkeypatch)
             assert released.wait(5)
             return 0
     monkeypatch.setattr(core.subprocess, 'Popen', lambda *args, **kwargs: Process())
-    native_push = core._push_profile_delegate_completion
+    native_push = core._offer_profile_delegate_completion
     def observed_push(*args):
         try:
             native_push(*args)
         finally:
             done.set()
-    monkeypatch.setattr(core, '_push_profile_delegate_completion', observed_push)
+    monkeypatch.setattr(core, '_offer_profile_delegate_completion', observed_push)
     token = set_hermes_home_override(caller)
     try:
         assert core._register_durable_notification(run)
         core._start_detached_background_worker(run)
         core.publish_terminal_run(run, {'status': 'ok', 'summary': 'notification home fixture', 'structured': True,
                                        'execution_status': 'completed', 'contract_status': 'valid'}, {'status': 'completed'})
+        published = core.read_json_file(run / 'result.json')
+        assert core._persist_profile_delegate_completion(run, {'status': 'completed', 'result': published})
         released.set()
         assert done.wait(5)
         record = async_delegation.get_durable_delegation(run.name)
