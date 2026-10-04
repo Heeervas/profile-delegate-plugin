@@ -113,9 +113,11 @@ def test_nested_policy_cannot_hop_or_gain_bypass():
     assert child["native"]["approvals"]["deny"] == ["git push*"]
 
 
-@pytest.mark.parametrize("mode", ["manual", "smart", "off"])
-@pytest.mark.parametrize("unattended", ["deny", "approve"])
-@pytest.mark.parametrize("selection", ["profile", "deny"])
+@pytest.mark.parametrize(
+    ("selection", "mode", "unattended"),
+    [("profile", mode, posture) for mode in ("manual", "smart", "off") for posture in ("deny", "approve")]
+    + [("deny", "off", "approve")],
+)
 def test_installed_native_guards_in_fresh_child(tmp_path, mode, unattended, selection):
     script = tmp_path / "probe.py"
     script.write_text('''import sys, os, json

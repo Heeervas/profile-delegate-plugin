@@ -45,6 +45,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Verification
 
+- Retired six duplicate deny checks after exact envelope and mutation verification; all distinct profile postures and retained guard assertions remain covered.
+
 - Shared repair/publication run setup and retired four duplicate phase/schema checks, removing 32 test lines while preserving producer, cancellation, authority and race coverage.
 
 - Consolidated notification and operator-repair test setup, removing 40 net lines while preserving each scenario, fault injection and assertion.

@@ -88,12 +88,6 @@ def test_nested_deny_narrows_bypass_without_importing_new_grants():
     assert child["native"]["approvals"]["deny"] == ["git push*"]
 
 
-def test_root_deny_does_not_use_target_bypass():
-    value = native_approval.snapshot("deny", "task", "a", "b", {}, {"approvals": {"mode": "off", "single_query_mode": "approve"}})
-    assert value["bypass"] is False
-    assert value["native"]["approvals"]["single_query_mode"] == "deny"
-
-
 def test_pytest_lineage_is_independent_of_invoking_parent():
     import os
     assert "PROFILE_DELEGATE_PARENT_TASK_ID" not in os.environ
