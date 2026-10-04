@@ -4,6 +4,8 @@ Current authority, implementation and validation: [STATE.md](../STATE.md).
 Accepted implementation: [native simplification plan](../docs/plans/2026-10-03-native-simplification.md).
 Canonical checks: [.agents/validation.md](../.agents/validation.md).
 
+Policy resolution now shares one field registry, with ordered values/sources and error priority verified. Runtime metrics and final gates are recorded in STATE.md.
+
 The latest CLI/TUI reasoning candidates were rejected; runtime files were restored. See STATE.md and the accepted plan for native restore/build limits before retrying overlay removal. Candidate-only gates are not release acceptance.
 
 Codex is the single implementation writer. Work proceeds in verified, scoped local commit batches with a clean checkout at boundaries. Preserve artifacts and unrelated changes. No Hermes-core/profile/global-config edits, push, publication or gateway restart. Optimization/integration and real net reduction take priority over complementary goal work.
@@ -48,6 +50,6 @@ Legacy prose recovery now retains one mapped verdict and its count instead of a 
 
 Policy and execution string lists now deduplicate with insertion-ordered dictionaries, preserving first-occurrence order, list return types and all validation/error guards. Execution still refuses more than 100 input items before normalization. This removes two physical/substantive production lines; all test/support bytes and 715 cases remain unchanged. Native actual-source comparisons cover 12,378 outcomes/errors across 6,187 inputs; independent review reproduces 50 boundary outcomes and confirms the remainder of the module is unchanged. Seven alternating native pairs: eight configuration names 2.15 -> 1.77 microseconds, 100 execution names 182 -> 92 microseconds, 5,000 configuration names 209.90 -> 0.96 ms. Peak temporary Python allocations increase by 392 / 3,616 / 114,000 bytes respectively; this is the explicit hash-table tradeoff, not provider/workload/RSS acceptance. Focused baseline/candidate: four passed / 175 deselected each. Native full: 715 passed / 109.72 s; portable: 234 passed / 481 deselected / 6.55 s. Private evidence: `.artifacts/refactor-20261003/ordered-list-normalization/receipt.json`.
 
-Current metrics supersede the prior production minimum: production 7293 (-350 historical), tests 8162, support 969, cases 715. Required gaps: 40 production lines, 1254 test lines and 61 cases. All tracked Python is +135 versus historical / -209 versus incoming. Prior batch paragraphs above are provenance, not latest acceptance. Continue actual optimization and coverage-preserving reduction; keep complementary native goal work secondary.
+Current metrics supersede the prior production minimum: production 7277 (-366 historical), tests 8162, support 969, cases 715. Required gaps: 24 production lines, 1254 test lines and 61 cases. All tracked Python is +119 versus historical / -225 versus incoming. Prior batch paragraphs above are provenance, not latest acceptance. Continue actual optimization and coverage-preserving reduction; keep complementary native goal work secondary.
 
 Latest exact candidate evidence and pending acceptance: [validation receipt](../docs/plans/2026-10-03-validation.md). The current Codex goal remains active; do not mark it complete or pause it based on historical Hermes checkpoints.

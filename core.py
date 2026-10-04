@@ -796,59 +796,43 @@ def load_effective_policy() -> EffectivePolicy:
     duplicate = entry.get("duplicate_guard", {}) or {}
     if not isinstance(duplicate, dict):
         raise ProfileDelegateError("duplicate_guard must be a mapping", "configuration_error")
-    defaults: Dict[str, Any] = {
-        "allowed_profiles": [], "allow_all_profiles": False, "allowed_workdirs": [],
-        "allowed_toolsets": [], "allowed_skills": [], "allow_model_override": True,
-        "allow_provider_override": True, "allow_reasoning_override": True,
-        "allow_child_approval_override": False, "child_approval_mode": "profile",
-        "child_approval_modes_by_profile": {},
-        "max_depth": DEFAULT_MAX_DEPTH, "max_concurrent": DEFAULT_MAX_CONCURRENT,
-        "max_async": DEFAULT_MAX_ASYNC, "default_timeout_seconds": 1200,
-        "max_timeout_seconds": 1800, "max_transient_resumes": DEFAULT_MAX_TRANSIENT_RESUMES,
-        "duplicate_guard_enabled": True, "duplicate_active_window_seconds": 120,
+    # One declaration owns type, default and supported environment override.
+    specs = {
+        "allowed_profiles": ("list", [], "ALLOWED_PROFILES"),
+        "allow_all_profiles": ("bool", False, "ALLOW_ALL_PROFILES"),
+        "allowed_workdirs": ("list", [], "ALLOWED_WORKDIRS"),
+        "allowed_toolsets": ("list", [], "ALLOWED_TOOLSETS"),
+        "allowed_skills": ("list", [], "ALLOWED_SKILLS"),
+        "allow_model_override": ("bool", True, None),
+        "allow_provider_override": ("bool", True, None),
+        "allow_reasoning_override": ("bool", True, None),
+        "allow_child_approval_override": ("bool", False, None),
+        "child_approval_mode": (None, "profile", None),
+        "child_approval_modes_by_profile": (None, {}, None),
+        "max_depth": ("int", DEFAULT_MAX_DEPTH, "MAX_DEPTH"),
+        "max_concurrent": ("int", DEFAULT_MAX_CONCURRENT, "MAX_CONCURRENT"),
+        "max_async": ("int", DEFAULT_MAX_ASYNC, "MAX_ASYNC"),
+        "default_timeout_seconds": ("int", 1200, "DEFAULT_TIMEOUT_SECONDS"),
+        "max_timeout_seconds": ("timeout", 1800, "MAX_TIMEOUT_SECONDS"),
+        "max_transient_resumes": ("resume", DEFAULT_MAX_TRANSIENT_RESUMES, "MAX_TRANSIENT_RESUMES"),
+        "duplicate_guard_enabled": ("bool", True, "DUPLICATE_GUARD_ENABLED"),
+        "duplicate_active_window_seconds": ("window", 120, "DUPLICATE_WINDOW_SECONDS"),
     }
-    values = dict(defaults)
+    values = {key: default for key, (_, default, _) in specs.items()}
     sources = {key: "default" for key in values}
-    yaml_specs = {
-        "allowed_profiles": ("list", entry.get("allowed_profiles")),
-        "allow_all_profiles": ("bool", entry.get("allow_all_profiles")),
-        "allowed_workdirs": ("list", entry.get("allowed_workdirs")),
-        "allowed_toolsets": ("list", entry.get("allowed_toolsets")),
-        "allowed_skills": ("list", entry.get("allowed_skills")),
-        "allow_model_override": ("bool", entry.get("allow_model_override")),
-        "allow_provider_override": ("bool", entry.get("allow_provider_override")),
-        "allow_reasoning_override": ("bool", entry.get("allow_reasoning_override")),
-        "allow_child_approval_override": ("bool", entry.get("allow_child_approval_override")),
-        "max_depth": ("int", entry.get("max_depth")),
-        "max_concurrent": ("int", entry.get("max_concurrent")),
-        "max_async": ("int", entry.get("max_async")),
-        "default_timeout_seconds": ("int", entry.get("default_timeout_seconds")),
-        "max_timeout_seconds": ("timeout", entry.get("max_timeout_seconds")),
-        "max_transient_resumes": ("resume", entry.get("max_transient_resumes")),
-        "duplicate_guard_enabled": ("bool", duplicate.get("enabled")),
-        "duplicate_active_window_seconds": ("window", duplicate.get("active_window_seconds")),
-    }
+    yaml_values = {key: entry.get(key) for key, (kind, _, _) in specs.items() if kind}
+    yaml_values.update(duplicate_guard_enabled=duplicate.get("enabled"),
+                       duplicate_active_window_seconds=duplicate.get("active_window_seconds"))
     native_approval.configure_selector(entry, values, sources, coerce_child_approval_mode)
-    for key, (kind, raw) in yaml_specs.items():
+    for key, (kind, _, _) in specs.items():
+        raw = yaml_values.get(key)
         if raw is not None:
             values[key] = _policy_value(key, kind, raw, "yaml")
             sources[key] = "yaml"
-    env_specs = {
-        "PROFILE_DELEGATE_ALLOWED_PROFILES": ("allowed_profiles", "list"),
-        "PROFILE_DELEGATE_ALLOW_ALL_PROFILES": ("allow_all_profiles", "bool"),
-        "PROFILE_DELEGATE_ALLOWED_WORKDIRS": ("allowed_workdirs", "list"),
-        "PROFILE_DELEGATE_ALLOWED_TOOLSETS": ("allowed_toolsets", "list"),
-        "PROFILE_DELEGATE_ALLOWED_SKILLS": ("allowed_skills", "list"),
-        "PROFILE_DELEGATE_MAX_DEPTH": ("max_depth", "int"),
-        "PROFILE_DELEGATE_MAX_CONCURRENT": ("max_concurrent", "int"),
-        "PROFILE_DELEGATE_MAX_ASYNC": ("max_async", "int"),
-        "PROFILE_DELEGATE_DEFAULT_TIMEOUT_SECONDS": ("default_timeout_seconds", "int"),
-        "PROFILE_DELEGATE_MAX_TIMEOUT_SECONDS": ("max_timeout_seconds", "timeout"),
-        "PROFILE_DELEGATE_MAX_TRANSIENT_RESUMES": ("max_transient_resumes", "resume"),
-        "PROFILE_DELEGATE_DUPLICATE_GUARD_ENABLED": ("duplicate_guard_enabled", "bool"),
-        "PROFILE_DELEGATE_DUPLICATE_WINDOW_SECONDS": ("duplicate_active_window_seconds", "window"),
-    }
-    for env_name, (key, kind) in env_specs.items():
+    for key, (kind, _, env_suffix) in specs.items():
+        if env_suffix is None:
+            continue
+        env_name = "PROFILE_DELEGATE_" + env_suffix
         if env_name not in os.environ:
             continue
         raw = os.environ[env_name]

@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- Policy loading shares one field registry for defaults and YAML/environment resolution, preserving supported overrides, source precedence and validation errors.
+
 - Policy and execution list normalization uses insertion-ordered dictionary deduplication, preserving validation and input order while avoiding repeated linear membership scans.
 
 - Prose verdict recovery retains a value and count instead of every match, reducing repeated-verdict allocations while preserving ambiguity, validation and malformed-token errors.
