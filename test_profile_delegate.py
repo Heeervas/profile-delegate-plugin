@@ -58,6 +58,16 @@ def _capped_output(kwargs, stdout, stderr="", **overrides):
     }
 
 
+def _mock_native_async_apis(tmp_path, monkeypatch):
+    fake_async = type("Async", (), {
+        "_persist_dispatch": staticmethod(lambda record: None),
+        "_persist_completion": staticmethod(lambda event, result: None),
+        "get_durable_delegation": staticmethod(lambda delegation_id: None),
+    })
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_async)
+    monkeypatch.setattr(core, "get_hermes_home_path", lambda: tmp_path)
+
+
 def _notification_run(tmp_path, *, status, **fields):
     """Notification artifacts only; each test retains its native ledger behavior."""
     run_dir = tmp_path / "runs" / "pd_20260101_010101_abc123"
@@ -1081,13 +1091,7 @@ def test_native_async_ledger_compatibility_is_read_only_and_accepts_current_cont
             delivery_attempts INTEGER NOT NULL, delivered_at REAL
         )""")
         conn.commit()
-    fake_async = type("Async", (), {
-        "_persist_dispatch": staticmethod(lambda record: None),
-        "_persist_completion": staticmethod(lambda event, result: None),
-        "get_durable_delegation": staticmethod(lambda delegation_id: None),
-    })
-    monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_async)
-    monkeypatch.setattr(core, "get_hermes_home_path", lambda: tmp_path)
+    _mock_native_async_apis(tmp_path, monkeypatch)
 
     report = core.native_async_ledger_compatibility()
 
@@ -1121,13 +1125,7 @@ def test_native_async_ledger_compatibility_rejects_missing_columns(tmp_path, mon
     with closing(sqlite3.connect(db)) as conn:
         conn.execute("CREATE TABLE async_delegations (delegation_id TEXT PRIMARY KEY)")
         conn.commit()
-    fake_async = type("Async", (), {
-        "_persist_dispatch": staticmethod(lambda record: None),
-        "_persist_completion": staticmethod(lambda event, result: None),
-        "get_durable_delegation": staticmethod(lambda delegation_id: None),
-    })
-    monkeypatch.setitem(sys.modules, "tools.async_delegation", fake_async)
-    monkeypatch.setattr(core, "get_hermes_home_path", lambda: tmp_path)
+    _mock_native_async_apis(tmp_path, monkeypatch)
 
     report = core.native_async_ledger_compatibility()
 

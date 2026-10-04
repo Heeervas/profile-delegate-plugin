@@ -51,6 +51,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Verification
 
+- Shared fresh TUI completion frames and native-ledger compatibility API setup, removing eight net test lines with identical assertions, parametrizations and incomplete-API refusal coverage.
+
 - Shared CLI output artifact/report fixtures and existing lifecycle admission setup, removing 30 net test lines while preserving all scenarios, metadata overrides and assertions.
 
 - Retired six duplicate deny checks after exact envelope and mutation verification; all distinct profile postures and retained guard assertions remain covered.

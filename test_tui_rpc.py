@@ -73,6 +73,15 @@ def runner_slot(_limit):
     yield type("Slot", (), {"slot": 0})()
 
 
+def runner_complete(text='{"status":"ok","summary":"done"}'):
+    return {
+        "method": "event", "params": {
+            "type": "message.complete", "session_id": "ui-1",
+            "payload": {"status": "complete", "text": text},
+        },
+    }
+
+
 class CompleteClient:
     """Existing complete-event fixture, shared without adding gateway behavior."""
     stderr_tail = ""
@@ -604,12 +613,7 @@ def test_runner_publishes_ready_status_transitions_after_success(tmp_path, monke
 
     monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", runner_slot)
 
-    complete = {
-        "method": "event", "params": {
-            "type": "message.complete", "session_id": "ui-1",
-            "payload": {"status": "complete", "text": '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}'},
-        },
-    }
+    complete = runner_complete('{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
 
 
     monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", lambda **kwargs: CompleteClient(complete, exit_code=0))
@@ -732,12 +736,7 @@ def test_runner_nonzero_transport_exit_overrides_complete_ok(tmp_path, monkeypat
     monkeypatch.setattr(tui_runner, "_environment", lambda request, run_dir: {})
 
     monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", runner_slot)
-    complete = {
-        "method": "event", "params": {
-            "type": "message.complete", "session_id": "ui-1",
-            "payload": {"status": "complete", "text": '{"status":"ok","summary":"done"}'},
-        },
-    }
+    complete = runner_complete()
 
 
     monkeypatch.setattr(tui_runner.tui_rpc, "launch_gateway", lambda **kwargs: CompleteClient(complete, exit_code=17))
@@ -782,12 +781,7 @@ def _execute_with_control(
     monkeypatch.setattr(tui_runner, "_environment", lambda request, run_dir: {})
 
     monkeypatch.setattr(tui_runner.core, "acquire_concurrency_slot", runner_slot)
-    complete = {
-        "method": "event", "params": {
-            "type": "message.complete", "session_id": "ui-1",
-            "payload": {"status": "complete", "text": '{"status":"ok","summary":"done"}'},
-        },
-    }
+    complete = runner_complete()
 
 
     client = client_factory(complete) if client_factory else CompleteClient(complete)
