@@ -25,7 +25,7 @@ policy:
   required_adapter_failure: incomplete
 exceptions:
   - id: managed-scope-regression-file-size
-    selector: {path: test_profile_delegate.py, language: python, symbol: "<module>", kind: file}
+    selector: {path: tests/test_profile_delegate.py, language: python, symbol: "<module>", kind: file}
     metric: python_ast_v1.file_logical_lines
     allowance: {maximum: 1965}
     rationale: Necessary host-independent security regression adds five logical lines to existing module debt; restructuring would expand this repair.

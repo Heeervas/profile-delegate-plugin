@@ -56,4 +56,4 @@ Provide bounded, model-callable delegation between Hermes profiles without the c
 
 ## Current accepted direction
 
-P0/P1 reliability remediation is complete. P2–P4 remain deferred in `TODO.md`; P3 transport changes require real post-fix evidence before implementation.
+P0/P1 and native-ledger notification work are implemented. Current unresolved audit findings and evidence-led transport/observability follow-up live in `TODO.md`; historical phase checkboxes do not establish current missing features. Housekeeping does not authorize product changes.

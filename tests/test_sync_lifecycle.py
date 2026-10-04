@@ -1,4 +1,4 @@
-"""Focused synchronous lifecycle regressions. Usage: pytest test_sync_lifecycle.py -q"""
+"""Focused synchronous lifecycle regressions. Usage: pytest tests/test_sync_lifecycle.py -q"""
 from __future__ import annotations
 
 import json

@@ -91,7 +91,7 @@ def test_model_callable_surfaces_cannot_request_operator_bypass(tmp_path, monkey
         core.profile_delegate_list(operator=True)
     assert not hasattr(core, "profile_delegate_reconcile")
     assert not hasattr(core, "profile_delegate_prune")
-    spec = importlib.util.spec_from_file_location("profile_delegate_plugin_boundary", Path(__file__).with_name("__init__.py"))
+    spec = importlib.util.spec_from_file_location("profile_delegate_plugin_boundary", Path(__file__).parent.parent / "__init__.py")
     assert spec is not None and spec.loader is not None
     plugin = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(plugin)

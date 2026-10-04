@@ -9,9 +9,10 @@ Profile Delegate is a standalone Hermes user-plugin repository. Keep runtime imp
 3. `STATE.md` — current release state, blockers, and next action.
 4. `TODO.md` — prioritized deferred work.
 5. `docs/plans/2026-07-22-plugin-only-reliability-reset-p0-p4.md` — accepted reliability direction.
-6. `decisions/` — durable architectural decisions.
-7. `.agents/validation.md` and `.agents/skill-routing.md` — canonical validation and workflow routes.
-8. `.hermes/` — Hermes-specific navigation and handoff context.
+6. `docs/README.md` — plan/audit/archive status and relocation navigation; `CONTRIBUTING.md` — contributor entry.
+7. `decisions/` — durable architectural decisions.
+8. `.agents/validation.md` and `.agents/skill-routing.md` — canonical validation and workflow routes.
+9. `.hermes/` — Hermes-specific navigation and handoff context.
 
 ## Durable rules
 

@@ -38,8 +38,7 @@ jobs:
           execution.py native.py native_approval.py contracts.py
           event_journal.py spectator.py tui_rpc.py tui_runner.py
           scripts/validate_release.py
-          test_event_journal.py test_profile_delegate.py test_reliability_reset.py
-          test_spectator.py test_tui_rpc.py
+          tests/*.py
       - name: Validate plugin registration and release metadata
         run: uv run --frozen python scripts/validate_release.py
       - name: Run tests

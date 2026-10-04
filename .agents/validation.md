@@ -11,7 +11,7 @@ uv sync --frozen
 
 `pyproject.toml` and `uv.lock` retain the plugin Python 3.11–3.13 support window.
 Portable tests use `-m 'not integration'`; native-coupled mixed modules are marked
-integration conservatively in `conftest.py`. Both partitions are mandatory; no
+integration conservatively in `tests/conftest.py`. Both partitions are mandatory; no
 missing-runtime skip is permitted. Installed CI provisions immutable Hermes
 `e8c97320ac8691d4de92af49f98459f9ef9ddb08` on Python 3.14 with its own frozen
 lock and explicit `--group dev` (pytest is not a default runtime dependency).
@@ -23,8 +23,9 @@ CI additionally installs the hash-pinned PyYAML helper from
 wheel, `--only-binary :all:`, hash from pinned Hermes lock). No
 unlocked tooling resolver or plugin package install on 3.14 is used.
 Never add another Python version's site-packages to PYTHONPATH. This does not
-broaden the plugin interpreter contract. Local isolated
-provisioning and truly Hermes-free container validation are pending (see audit).
+broaden the plugin interpreter contract. Exact-baseline GitHub CI passed both
+partitions; local runtime equality with the CI pin is not established. Historical
+provisioning blockers in the audit are not current CI status.
 
 ```bash
 uv run --frozen python -m pytest -m 'not integration' -q -o 'addopts=' -W error
@@ -34,7 +35,7 @@ PROFILE_DELEGATE_TEST_RUNTIME=/opt/hermes PYTHONPATH=/opt/hermes /opt/hermes/.ve
 ## Fast feedback
 
 ```bash
-PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python -m pytest -q -o 'addopts=' test_reliability_reset.py test_tui_rpc.py
+PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python -m pytest -q -o 'addopts=' tests/test_reliability_reset.py tests/test_tui_rpc.py
 ```
 
 ## Release gate
@@ -42,12 +43,7 @@ PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python -m pytest -q -o 'addopts=' t
 ```bash
 PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python -m pytest -q -o 'addopts=' -W error
 uv run --frozen ruff check .
-uv run --frozen python -m py_compile \
-  __init__.py child_bootstrap.py execution.py native.py native_approval.py cli.py cli_smoke.py core.py contracts.py \
-  event_journal.py spectator.py tui_rpc.py tui_runner.py \
-  scripts/validate_release.py \
-  test_event_journal.py test_profile_delegate.py test_reliability_reset.py \
-  test_run_reconciliation.py test_spectator.py test_sync_lifecycle.py test_tui_rpc.py
+uv run --frozen python -m py_compile *.py scripts/*.py tests/*.py
 git diff --check
 ```
 
@@ -85,13 +81,32 @@ Record the latest release-gate result in `STATE.md` and residual work in `.herme
 
 Policy: `.agents/quality.yaml`; schema: `.agents/schemas/quality-policy-v1.schema.json`.
 Immutable CI-repair baseline: `e46c84910ea00e0f4b8795cd2bfcc35378ce1cee`.
-Stock STANDARD thresholds, no exceptions. The installed builder-assurance tools
+Stock STANDARD thresholds with the existing independently approved, expiring
+managed-scope test-module-size exception (now `tests/test_profile_delegate.py`).
+The installed builder-assurance tools
 require PyYAML/jsonschema (available in the selected local Hermes venv).
 This local prerequisite is not a new GitHub job or plugin dependency.
 
 ```bash
-/opt/hermes/.venv/bin/python /opt/data/profiles/builder/skills/software-development/builder-assurance/scripts/validate_quality_policy.py .agents/quality.yaml --schema .agents/schemas/quality-policy-v1.schema.json
-/opt/hermes/.venv/bin/python /opt/data/profiles/builder/skills/software-development/builder-assurance/scripts/quality_report.py --repo . --base e46c84910ea00e0f4b8795cd2bfcc35378ce1cee --scope all --level standard --config .agents/quality.yaml --format json > .artifacts/ci-repair/quality-final.json
+mkdir -p .artifacts/quality
+# Set BUILDER_ASSURANCE_SCRIPTS to your installed builder-assurance scripts directory.
+/opt/hermes/.venv/bin/python "$BUILDER_ASSURANCE_SCRIPTS/validate_quality_policy.py" .agents/quality.yaml --schema .agents/schemas/quality-policy-v1.schema.json
+/opt/hermes/.venv/bin/python "$BUILDER_ASSURANCE_SCRIPTS/quality_report.py" --repo . --base e46c84910ea00e0f4b8795cd2bfcc35378ce1cee --scope all --level standard --config .agents/quality.yaml --format json > .artifacts/quality/quality-final.json
 ```
 
 Other operators substitute installed tool paths, preserving baseline/policy/scope.
+
+## Relocation checks
+
+```bash
+PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python -m pytest --collect-only -q -o 'addopts='
+PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python -m pytest tests --collect-only -q -o 'addopts='
+uv run --frozen python scripts/scan_secrets.py
+```
+
+Compare node IDs to the immutable pre-move collection after removing only the
+`tests/` prefix. All scenarios, parametrizations, assertions and marker partitions
+must survive. Stage intentional relocations before rename-aware quality reporting.
+Housekeeping receipt records the command/tool paths actually used. No browser,
+frontend build or provider smoke is applicable to documentation/test relocation;
+operator runtime harnesses remain separately authorized, never approval bypasses.

@@ -3,7 +3,7 @@ import sys
 import threading
 from pathlib import Path
 import pytest
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import core
 from test_run_reconciliation import replace_run_on_lock, run_fixture
 

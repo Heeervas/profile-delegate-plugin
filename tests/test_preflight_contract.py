@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import core
 from test_profile_delegate import mock_delegate_admission
 
 
 def _plugin():
-    spec = importlib.util.spec_from_file_location("profile_delegate_preflight_plugin", Path(__file__).parent / "__init__.py")
+    spec = importlib.util.spec_from_file_location("profile_delegate_preflight_plugin", Path(__file__).parents[1] / "__init__.py")
     plugin = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(plugin)
     return plugin

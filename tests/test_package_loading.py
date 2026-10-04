@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def test_package_loading_resolves_native_helpers(tmp_path):
-    entry = Path(__file__).resolve().parent / "__init__.py"
+    entry = Path(__file__).resolve().parents[1] / "__init__.py"
     code = """
 import importlib.util
 import pathlib

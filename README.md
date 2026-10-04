@@ -159,10 +159,10 @@ Precedence is safe hardcoded bounds/defaults, then YAML, then explicitly present
 - New omitted configuration selects `profile`; historical stored requests with omitted selectors retain legacy `deny`. Explicit `deny` refuses fresh ordinary approval, retains permanent command grants and forces non-bypass deny unattended posture.
 - `profile` freezes target native posture/grants; `inherit` freezes caller posture/permanent grants with target and ancestor denies. Transient session grants are excluded.
 - `yolo` (`approve_yolo` alias) bypasses ordinary consent while native terminal floors remain. Approval bypass no longer implicitly consents to hooks.
-- Operator target-map entries take precedence over global YAML. See [native approval operator contract](docs/plans/2026-10-01-native-approval-modes/OPERATOR.md) for snapshot/resume, nested restrictions, unattended smart limitations and activation consequences. This is a local candidate, not production activation.
+- Operator target-map entries take precedence over global YAML. See [native approval operator contract](docs/plans/2026-10-01-native-approval-modes/OPERATOR.md) for snapshot/resume, nested restrictions, unattended smart limitations and activation consequences. Published source does not prove activation in a running gateway.
 - `strip_only` migration: new tool calls reject it. A legacy YAML value is read as `deny` so existing installations fail closed; update configuration to `deny` explicitly.
 
-Model-facing `child_approval_mode` selects the mode **per task**. `profile`, `inherit`, and `yolo` require the trusted caller plugin entry's `allow_child_approval_override: true`; its default is false. This is delegated authority, independent of the configured omission default and native approval posture. `deny` is available as narrowing without that grant. Task selection overrides the target default map, never target admission, explicit denies or frozen ancestry. Nested calls permit exact frozen inheritance or deny narrowing; incomparable source switches refuse. Resume cannot change its frozen selector. See [repair contract and pending runtime matrix](docs/plans/2026-10-01-native-approval-modes/PER_TASK_REPAIR.md). This local working tree is not gateway-loaded or released.
+Model-facing `child_approval_mode` selects the mode **per task**. `profile`, `inherit`, and `yolo` require the trusted caller plugin entry's `allow_child_approval_override: true`; its default is false. This is delegated authority, independent of the configured omission default and native approval posture. `deny` is available as narrowing without that grant. Task selection overrides the target default map, never target admission, explicit denies or frozen ancestry. Nested calls permit exact frozen inheritance or deny narrowing; incomparable source switches refuse. Resume cannot change its frozen selector. See [repair contract and historical runtime matrix](docs/plans/2026-10-01-native-approval-modes/PER_TASK_REPAIR.md). Current source/validation status is in [STATE.md](STATE.md); running installations require separate readback.
 
 Local-power-user override, not recommended for shared installs:
 
@@ -495,8 +495,8 @@ The hash-pinned native PyYAML helper is in `scripts/native-test-tooling.txt`;
 `scripts/native_prerequisite.py` fails closed on interpreter/closure mismatch.
 The portable matrix
 remains 3.11/3.12/3.13. Missing runtime/imports fail integration rather than skip.
-Source availability was verified, but isolated provisioning and GitHub execution
-remain unvalidated locally; see `docs/audits/independent-current/IMPLEMENTATION.md`.
+Exact-baseline GitHub CI passed all four jobs; see [STATE.md](STATE.md).
+Historical local provisioning blockers remain in the audit, not current CI status.
 Canonical compilation and behavioral gates: `.agents/validation.md`.
 
 Operator runtime smokes require separate authorization; do not run the acceptance
@@ -504,13 +504,13 @@ harness from frozen delegated authority or treat registration's FakeContext as
 installed discovery.
 
 
-## Roadmap
+## Contributing and remaining work
 
-- Cancellation controls for active async runs.
-- Optional no-prompt-storage mode or redacted prompt artifacts.
-- Automatic retention/TTL cleanup.
-- First-class Hermes plugin preview API support when available.
-- Richer install packaging through the Hermes plugin registry.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [contribution opportunities](docs/contribution-opportunities.md)
+and the reconciled [TODO.md](TODO.md). Cancellation already exists; unresolved
+parser/RPC/UTF-8 findings require focused reproduction and maintainer coordination.
+Tests live under `tests/`; runtime modules intentionally remain at root. Plans,
+audits and archived provenance are indexed in [docs/README.md](docs/README.md).
 
 ## License
 

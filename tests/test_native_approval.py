@@ -132,7 +132,7 @@ from tools import approval
 result={'terminal':approval.check_all_command_guards('rm -rf /tmp/disposable-never-executed','local')['approved'], 'code':approval.check_execute_code_guard('print(1)','local')['approved'], 'isolated':approval.check_execute_code_guard('print(1)','docker')['approved'], 'host':approval.check_execute_code_guard('print(1)','docker',has_host_access=True)['approved'], 'floor':approval.check_all_command_guards('git push origin main','local')['approved'], 'queues':len(approval._gateway_queues),'pending':len(approval._pending)}
 print(json.dumps(result))
 assert approval.check_all_command_guards('rm -rf /tmp/permanent-grant-never-executed','local')['approved']
-'''.replace('REPO', repr(str(Path(__file__).parent))).replace('MODE', repr(mode)).replace('POSTURE', repr(unattended)).replace('SELECTION', repr(selection)).replace('EVENTS', "__import__('pathlib').Path("+repr(str(tmp_path/'events.jsonl'))+")"))
+'''.replace('REPO', repr(str(Path(__file__).parents[1]))).replace('MODE', repr(mode)).replace('POSTURE', repr(unattended)).replace('SELECTION', repr(selection)).replace('EVENTS', "__import__('pathlib').Path("+repr(str(tmp_path/'events.jsonl'))+")"))
     env = dict(os.environ)
     env.pop("HERMES_YOLO_MODE", None)
     home = tmp_path / "home"

@@ -10,7 +10,7 @@ def test_runtime_fixture_command_is_flagged_and_not_compound(tmp_path, monkeypat
     from tools.approval_detection import detect_dangerous_command
     from tools.approval_floors import _has_allowlist_shell_operator
     spec = importlib.util.spec_from_file_location(
-        "runtime_fixture_commands", Path(__file__).parent / "scripts" / "accept_task_approval_runtime.py",
+        "runtime_fixture_commands", Path(__file__).parents[1] / "scripts" / "accept_task_approval_runtime.py",
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

@@ -41,7 +41,7 @@ def test_native_prerequisite_actual_closure_and_foreign_interpreter(tmp_path):
         with pytest.raises(ModuleNotFoundError, match="unavailable native contracts"):
             check_runtime(home)
     (tmp_path / "native-prerequisite.json").write_text(json.dumps(receipt, indent=2))
-    portable = Path(__file__).parent / ".venv/bin/python"
+    portable = Path(__file__).parents[1] / ".venv/bin/python"
     foreign = str(portable) if portable.is_file() else getattr(sys, "_base_executable")
     completed = subprocess.run(
         [foreign, "scripts/native_prerequisite.py"],
