@@ -10,11 +10,12 @@ if str(PLUGIN_DIR) not in sys.path:
 import core
 
 
-def run_fixture(tmp_path: Path, *, status: str = "running", result: dict | None = None) -> Path:
+def run_fixture(tmp_path: Path, *, status: str = "running", result: dict | None = None,
+                worker_pid: int = 113903) -> Path:
     run = tmp_path / "pd_20260927_220206_aokwr9"
     run.mkdir()
     core.json_safe_write(run / "status.json", {"task_id": run.name, "status": status,
-                                                "background_worker_mode": "detached", "worker_pid": 113903})
+                                                "background_worker_mode": "detached", "worker_pid": worker_pid})
     if result is not None:
         core.write_result_artifact(run, result)
     return run

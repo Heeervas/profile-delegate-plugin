@@ -9,20 +9,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import core
-
-
-def run_fixture(tmp_path, status="completed"):
-    run = tmp_path / "pd_20260927_220206_aokwr9"
-    run.mkdir()
-    core.json_safe_write(run / "status.json", {"task_id": run.name, "status": status,
-                                                 "background_worker_mode": "detached", "worker_pid": 113903})
-    return run
+from test_run_reconciliation import run_fixture
 
 
 @pytest.mark.parametrize("schema", [None, "bad", 1])
 @pytest.mark.parametrize("operator", [False, True])
 def test_unverified_result_never_projects_task_success(tmp_path, monkeypatch, schema, operator):
-    run = run_fixture(tmp_path)
+    run = run_fixture(tmp_path, status="completed")
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
     candidate = {"status": "ok", "execution_status": "completed", "contract_status": "valid"}
     if schema is not None:
@@ -46,7 +39,7 @@ def test_unverified_result_never_projects_task_success(tmp_path, monkeypatch, sc
 
 
 def test_detached_watcher_snapshots_repair_pair_before_native_notification(tmp_path, monkeypatch):
-    run = run_fixture(tmp_path, "running")
+    run = run_fixture(tmp_path, status="running")
     core.json_safe_write(run / "request.json", {"effective_policy": {"limits": {"max_async": 4}},
                                                    "notify_on_complete": True, "origin_session_key": "lane"})
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
@@ -115,7 +108,7 @@ def test_detached_watcher_snapshots_repair_pair_before_native_notification(tmp_p
 
 @pytest.mark.parametrize("terminal", [False, True])
 def test_detached_watcher_refuses_nonterminal_or_incoherent_pair(tmp_path, monkeypatch, terminal):
-    run = run_fixture(tmp_path, "completed" if terminal else "running")
+    run = run_fixture(tmp_path, status="completed" if terminal else "running")
     core.json_safe_write(run / "request.json", {"effective_policy": {"limits": {"max_async": 4}}})
     if terminal:
         core.write_result_artifact(run, {"status": "ok", "execution_status": "failed",
@@ -166,7 +159,7 @@ def test_parent_offers_only_matching_pending_durable_completion(monkeypatch, row
 
 
 def test_worker_failure_persists_completion_without_parent(tmp_path, monkeypatch):
-    run = run_fixture(tmp_path, "running")
+    run = run_fixture(tmp_path, status="running")
     core.json_safe_write(run / "request.json", {"task_id": run.name, "origin_session_key": "lane"})
     ledger = {}
     def persist(event, result):
@@ -187,7 +180,7 @@ def test_worker_failure_persists_completion_without_parent(tmp_path, monkeypatch
 @pytest.mark.parametrize("stage", ["popen", "metadata"])
 def test_launch_failure_reaps_worker_before_unlock(tmp_path, monkeypatch, stage):
     import fcntl
-    run = run_fixture(tmp_path, "running")
+    run = run_fixture(tmp_path, status="running")
     core.json_safe_write(run / "request.json", {"effective_policy": {"limits": {"max_async": 4}}})
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
     monkeypatch.setattr(core, "get_hermes_home_path", lambda: tmp_path)
@@ -219,7 +212,7 @@ def test_launch_failure_reaps_worker_before_unlock(tmp_path, monkeypatch, stage)
 
 @pytest.mark.parametrize("lane", ["lane", "other-lane"])
 def test_duplicate_worker_refuses_without_changing_existing_run(tmp_path, monkeypatch, lane):
-    run = run_fixture(tmp_path, "running")
+    run = run_fixture(tmp_path, status="running")
     core.json_safe_write(run / "request.json", {"origin_session_key": "lane"})
     before = (run / "status.json").read_bytes()
     row = {"state": "running", "origin_session": lane, "delivery_state": "pending"}
@@ -235,7 +228,7 @@ def test_duplicate_worker_refuses_without_changing_existing_run(tmp_path, monkey
 
 
 def test_completion_refuses_foreign_native_origin(tmp_path, monkeypatch):
-    run = run_fixture(tmp_path)
+    run = run_fixture(tmp_path, status="completed")
     core.json_safe_write(run / "request.json", {"origin_session_key": "lane"})
     monkeypatch.setattr(core.native, "get_completion", lambda task: {"state": "running", "origin_session": "other-lane"})
     def forbidden(*args):
@@ -245,7 +238,7 @@ def test_completion_refuses_foreign_native_origin(tmp_path, monkeypatch):
 
 
 def test_parent_watcher_start_failure_preserves_accepted_worker(tmp_path, monkeypatch):
-    run = run_fixture(tmp_path, "running")
+    run = run_fixture(tmp_path, status="running")
     core.json_safe_write(run / "request.json", {"effective_policy": {"limits": {"max_async": 4}}})
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
     monkeypatch.setattr(core, "get_hermes_home_path", lambda: tmp_path)

@@ -7,14 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import core
-
-
-def fixture(tmp_path):
-    run = tmp_path / "pd_20260927_220206_aokwr9"
-    run.mkdir()
-    core.json_safe_write(run / "status.json", {"task_id": run.name, "status": "running",
-                                                "background_worker_mode": "detached", "worker_pid": -1})
-    return run
+from test_run_reconciliation import run_fixture
 
 
 def success():
@@ -27,7 +20,7 @@ def publish(run):
 
 
 def test_failure_cannot_replace_worker_result_or_terminal_fields(tmp_path):
-    run = fixture(tmp_path)
+    run = run_fixture(tmp_path, worker_pid=-1)
     publish(run)
     original = (run / "result.json").read_bytes()
     final = core._mark_background_worker_failure(run, RuntimeError("late"))
@@ -39,7 +32,7 @@ def test_failure_cannot_replace_worker_result_or_terminal_fields(tmp_path):
 
 
 def test_result_before_status_crash_preserves_authority(tmp_path, monkeypatch):
-    run = fixture(tmp_path)
+    run = run_fixture(tmp_path, worker_pid=-1)
     real = core._write_locked_status_snapshot
     def crash(path, snapshot):
         if snapshot["status"] == "completed":
@@ -63,7 +56,7 @@ def test_result_before_status_crash_preserves_authority(tmp_path, monkeypatch):
 
 
 def test_invalid_result_never_overwritten(tmp_path):
-    run = fixture(tmp_path)
+    run = run_fixture(tmp_path, worker_pid=-1)
     core.json_safe_write(run / "result.json", {"status": "ok"})
     original = (run / "result.json").read_bytes()
     with pytest.raises(core.ProfileDelegateError, match="invalid terminal result evidence"):
@@ -74,7 +67,7 @@ def test_invalid_result_never_overwritten(tmp_path):
 
 @pytest.mark.parametrize("replace", ["lock", "run"])
 def test_waiting_publication_rejects_replaced_lock_or_run(tmp_path, monkeypatch, replace):
-    run = fixture(tmp_path)
+    run = run_fixture(tmp_path, worker_pid=-1)
     original = core.fcntl.flock
     switched = False
     def flock(fd, operation):
@@ -94,7 +87,7 @@ def test_waiting_publication_rejects_replaced_lock_or_run(tmp_path, monkeypatch,
 
 
 def test_paired_read_waits_for_publication(tmp_path, monkeypatch):
-    run = fixture(tmp_path)
+    run = run_fixture(tmp_path, worker_pid=-1)
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
     inside = threading.Event()
     proceed = threading.Event()

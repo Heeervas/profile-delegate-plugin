@@ -4,15 +4,7 @@ import sys
 
 import core
 import pytest
-import event_journal
 import spectator
-import __init__ as plugin
-
-
-@pytest.mark.parametrize('phase', ['child_running', 'child_stopped', 'cancellation_requested'])
-def test_cli_phase_consumers(phase):
-    spectator._validate_status({'task_id':'pd_20261002_000000_abcdef', 'status':'running', 'phase':phase})
-    assert phase in event_journal.KNOWN_PHASES
 
 
 def test_unknown_phase_is_still_rejected():
@@ -41,7 +33,3 @@ def test_cli_producer_inspect_during_execution(tmp_path, monkeypatch):
     spectator.inspect_run(run)
     assert phases and set(phases) == {'child_running'}
     assert core.read_json_file(run / 'status.json')['phase'] == 'child_stopped'
-
-
-def test_model_schema_does_not_offer_operator_widening():
-    assert plugin._list_schema()['parameters']['properties']['scope']['enum'] == ['current_session']

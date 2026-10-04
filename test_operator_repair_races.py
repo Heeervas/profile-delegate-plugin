@@ -5,14 +5,7 @@ from pathlib import Path
 import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import core
-
-
-def run_fixture(tmp_path):
-    run = tmp_path / "pd_20260927_220206_aokwr9"
-    run.mkdir()
-    core.json_safe_write(run / "status.json", {"task_id": run.name, "status": "running",
-                                                "background_worker_mode": "detached", "worker_pid": 113903})
-    return run
+from test_run_reconciliation import run_fixture
 
 
 def worker(run):
