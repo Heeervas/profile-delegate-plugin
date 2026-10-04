@@ -184,7 +184,8 @@ def _recover_text_status(raw_output: str, *, require_terminal: bool = False) -> 
 
 def _recover_legacy_text_status(raw_output: str) -> Optional[str]:
     """Historical explicit first-line verdict recovery."""
-    recovered: List[str] = []
+    recovered: Optional[str] = None
+    verdict_count = 0
     lines = (raw_output or "").splitlines()
     bounded_text = "\n".join(lines)
     status_token = r"(?:PASS|OK|BLOCKED|FAILED)(?:_[A-Z0-9_]+)?"
@@ -214,10 +215,9 @@ def _recover_legacy_text_status(raw_output: str) -> Optional[str]:
         if detail and re.search(rf"\b{status_token}\b", detail, re.I):
             return None
         base = token.split("_", 1)[0].lower()
-        recovered.append(
-            {"pass": "ok", "ok": "ok", "blocked": "blocked", "failed": "failed"}[base]
-        )
-    return recovered[0] if len(recovered) == 1 else None
+        recovered = {"pass": "ok", "ok": "ok", "blocked": "blocked", "failed": "failed"}[base]
+        verdict_count += 1
+    return recovered if verdict_count == 1 else None
 
 def contract_status_for_parse(
     parsed: Any, meta: Dict[str, Any], *, raw_output: str = "",

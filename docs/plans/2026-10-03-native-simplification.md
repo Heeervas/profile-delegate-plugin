@@ -4,7 +4,7 @@ Status: accepted for complete local implementation and commit batches. Preserve 
 
 ## Architecture and priority
 
-Keep independent detached workers and Hermes-owned durable delivery. Herald's HTTP gateway and in-process subagent executors do not replace the installed profile/context, isolation and silent-notification contracts. The public async dispatcher has no notification suppression and its finalizer depends on the parent. Optimization/integration and net reduction take precedence over complementary goal integration.
+Keep independent detached workers and Hermes-owned durable delivery. Herald's HTTP gateway and in-process subagent executors do not replace the installed profile/context, isolation and silent-notification contracts. Installed public single and batch async dispatchers accept a runner and finalize on a daemon executor. Single dispatch allocates an ID; batch dispatch accepts a caller-provided ID but uses batch result/completion formatting. The returned handle does not expose an executor join. Replacement must prove plugin result compatibility, completion persistence before dispatcher exit and silent-notification behavior; callback or ID support alone is insufficient. Native process completion waiting covers registered processes, not these async records. Optimization/integration and net reduction take precedence over complementary goal integration.
 
 Use one preflight, one execution supervisor and one terminal-result decision/publication path, with distinct CLI and TUI evidence adapters. Keep execution, task, contract, transport and notification separate. Retain profile/model/provider/reasoning choice and frozen resume authority. No new orchestrator, bus, database, polling monitor or simulator.
 
@@ -12,7 +12,7 @@ Use one preflight, one execution supervisor and one terminal-result decision/pub
 
 A. Verify clean baseline, consumers and reproducible metrics; reuse relevant previous evidence.
 B. Consolidate terminal result construction, enrichment, publication and artifact/event validation. Keep transport-specific evidence and fail-closed publication races.
-C. Share child preparation and preserve exact selection. Cover ignored TUI resume overrides with a focused regression; apply supported native session-scoped config.set before prompt.submit, respecting policy and native confirmation/error semantics.
+C. Share child preparation and preserve exact selection. Cover ignored TUI resume overrides with a focused regression; apply supported native session-scoped config.set before prompt.submit, respecting policy and native confirmation/error semantics, with no profile/global YAML writes.
 D. Make detached worker the only durable completion producer; parent watcher only offers coherent published completion. Keep thread mode, notify=false, compatibility circuit breaker and recovery.
 E. Remove proven redundant test families; measure net product and support reduction. Add only native GoalManager waiting for exact active caller/verified worker where supported; do not broaden architecture for silent/multiple/compression/new limitations.
 F. Full canonical validation, independent final code/coverage review, then operator-controlled restart and affected real Discord/provider acceptance.

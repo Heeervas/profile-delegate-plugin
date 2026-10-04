@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- Prose verdict recovery retains a value and count instead of every match, reducing repeated-verdict allocations while preserving ambiguity, validation and malformed-token errors.
+
 - Repair and terminal-publication regressions share identical lock-replacement setup while retaining separate scenarios and fail-closed assertions.
 
 - Journal and spectator consume shared event schema constants directly, preserving bounds, constructor defaults, validation and supported imports.
