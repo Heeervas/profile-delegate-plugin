@@ -1772,7 +1772,7 @@ def test_reasoning_override_rejects_existing_scope_before_run_mutation(tmp_path,
         },
     }
     core.json_safe_write(run_dir / "request.json", request)
-    original_status = {**request, "status": "running"}
+    original_status = {**request, "task_id": run_dir.name, "status": "running"}
     core.json_safe_write(run_dir / "status.json", original_status)
     core.text_safe_write(run_dir / "prompt.txt", "prompt")
     monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))

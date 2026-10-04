@@ -8,6 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import core
+from test_profile_delegate import mock_delegate_admission
 
 
 def _plugin():
@@ -17,7 +18,16 @@ def _plugin():
     return plugin
 
 
-def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch):
+@pytest.fixture
+def preflight_admission(tmp_path, tmp_path_factory, monkeypatch):
+    # Admission is a fixture; native policy/config resolution remains real.
+    home = tmp_path_factory.mktemp("preflight-caller")
+    mock_delegate_admission(home, monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(core, "_plugin_entry", lambda: {"allowed_profiles": ["builder"]})
+
+
+def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch, preflight_admission):
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
     monkeypatch.delenv("PROFILE_DELEGATE_PARENT_TASK_ID", raising=False)
     monkeypatch.delenv("PROFILE_DELEGATE_APPROVAL_REQUEST", raising=False)
@@ -35,7 +45,7 @@ def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch):
     assert "preflight" in plugin._schema()["parameters"]["properties"]
 
 
-def test_preflight_conflicts_return_actionable_patch_without_run(tmp_path, monkeypatch):
+def test_preflight_conflicts_return_actionable_patch_without_run(tmp_path, monkeypatch, preflight_admission):
     # This refusal contract must not inherit the invoking caller's live grant.
     monkeypatch.setattr(core, "_plugin_entry", lambda: {
         "allowed_profiles": ["builder"],

@@ -9,6 +9,10 @@ from test_preflight_contract import _plugin
 
 @pytest.fixture
 def admitted(tmp_path, monkeypatch):
+    home = tmp_path / "caller"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
     monkeypatch.delenv("PROFILE_DELEGATE_APPROVAL_REQUEST", raising=False)
     monkeypatch.delenv("PROFILE_DELEGATE_PARENT_TASK_ID", raising=False)
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))

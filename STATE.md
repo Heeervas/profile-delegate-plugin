@@ -1,5 +1,23 @@
 # Profile Delegate project state
 
+## Scoped CI repair at e46c849
+
+Authorized local repair only: stale CI compile target removed; native guard
+probes receive disposable homes; preflight/selector/provider-error fixtures
+isolate admission prerequisites; managed-scope refusal seeds valid status identity.
+All original assertions and test cases remain; production runtime code is unchanged.
+Minimal STANDARD quality policy/schema added with stock thresholds, no exceptions.
+Nested reviewer `pd_20261004_123918_rovtmb`: PASS_WITH_NOTES, no concrete finding.
+Local native full: **715 passed / 147.82s**; portable: **234 passed / 481 deselected / 7.15s**.
+Lock/sync, Ruff, corrected CI compile, registration, secret scan and diff checks pass.
+
+Clean-environment native gate against the exact CI pin remains controller-owned:
+delegated security rejected PYTHONPATH before execution, not retried or bypassed.
+Local `/opt/hermes` is not a Git checkout; equality with the CI pin is unproven.
+No complete CI acceptance, push, tag, release, activation or restart claim.
+Private ignored evidence: `.artifacts/ci-repair/native-full.log` and
+`.artifacts/ci-repair/quality-final.json`.
+
 ## Native simplification — current execution
 
 Implementation authority: complete-target local plugin implementation and verified commit batches. Hermes core, real profile/global configuration, push/publication and gateway restart remain outside this work's write scope. Functional release remains v1.10.0; current work is an unactivated review candidate.

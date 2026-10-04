@@ -80,3 +80,18 @@ P3 transport work cannot ship from unit tests alone.
 ## Result reporting
 
 Record the latest release-gate result in `STATE.md` and residual work in `.hermes/handoff.md`.
+
+## Changed-code quality
+
+Policy: `.agents/quality.yaml`; schema: `.agents/schemas/quality-policy-v1.schema.json`.
+Immutable CI-repair baseline: `e46c84910ea00e0f4b8795cd2bfcc35378ce1cee`.
+Stock STANDARD thresholds, no exceptions. The installed builder-assurance tools
+require PyYAML/jsonschema (available in the selected local Hermes venv).
+This local prerequisite is not a new GitHub job or plugin dependency.
+
+```bash
+/opt/hermes/.venv/bin/python /opt/data/profiles/builder/skills/software-development/builder-assurance/scripts/validate_quality_policy.py .agents/quality.yaml --schema .agents/schemas/quality-policy-v1.schema.json
+/opt/hermes/.venv/bin/python /opt/data/profiles/builder/skills/software-development/builder-assurance/scripts/quality_report.py --repo . --base e46c84910ea00e0f4b8795cd2bfcc35378ce1cee --scope all --level standard --config .agents/quality.yaml --format json > .artifacts/ci-repair/quality-final.json
+```
+
+Other operators substitute installed tool paths, preserving baseline/policy/scope.

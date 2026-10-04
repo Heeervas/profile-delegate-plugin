@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- CI compilation drops deleted event_schema.py; native regression fixtures isolate disposable homes, admission prerequisites and valid run identity, retaining all assertions and cases.
+
 - Policy loading shares one field registry for defaults and YAML/environment resolution, preserving supported overrides, source precedence and validation errors.
 
 - Policy and execution list normalization uses insertion-ordered dictionary deduplication, preserving validation and input order while avoiding repeated linear membership scans.

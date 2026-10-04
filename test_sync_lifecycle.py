@@ -434,11 +434,7 @@ def test_interrupt_during_transient_retry_delay_prevents_resume(tmp_path, monkey
 
 
 def test_provider_realm_mismatch_fails_without_session_retry(tmp_path, monkeypatch):
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core.shutil, "which", lambda _name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda _path, _mode: True)
+    mock_sync_admission(tmp_path, monkeypatch)
     attempts = 0
     diagnostic = "HTTP 409: Reasoning chain belongs to a different provider realm; start a new session or branch"
 

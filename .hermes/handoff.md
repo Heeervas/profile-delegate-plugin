@@ -1,5 +1,10 @@
 # Profile Delegate handoff
 
+Publication CI repair is locally tested and focal-reviewed; see STATE.md and
+.agents/validation.md. Parent must run clean native integration against the
+workflow-pinned Hermes revision through normal approval, then publish if green.
+Do not retry/bypass frozen-policy PYTHONPATH rejection. All assertions/cases retained.
+
 Current authority, implementation and validation: [STATE.md](../STATE.md).
 Accepted implementation: [native simplification plan](../docs/plans/2026-10-03-native-simplification.md).
 Canonical checks: [.agents/validation.md](../.agents/validation.md).

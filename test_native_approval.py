@@ -135,6 +135,9 @@ assert approval.check_all_command_guards('rm -rf /tmp/permanent-grant-never-exec
 '''.replace('REPO', repr(str(Path(__file__).parent))).replace('MODE', repr(mode)).replace('POSTURE', repr(unattended)).replace('SELECTION', repr(selection)).replace('EVENTS', "__import__('pathlib').Path("+repr(str(tmp_path/'events.jsonl'))+")"))
     env = dict(os.environ)
     env.pop("HERMES_YOLO_MODE", None)
+    home = tmp_path / "home"
+    home.mkdir()
+    env["HERMES_HOME"] = str(home)
     observed = subprocess.run([str(Path(os.environ.get("PROFILE_DELEGATE_TEST_RUNTIME", "/opt/hermes")) / ".venv/bin/python"), str(script)], env=env, text=True, capture_output=True, timeout=30)
     assert observed.returncode == 0, observed.stderr
     result = json.loads(observed.stdout.splitlines()[-1])
