@@ -20,25 +20,13 @@ if __package__:
 else:
     import contracts
 
-EVENT_IDENTIFIER_MAX_CHARS = contracts.EVENT_IDENTIFIER_MAX_CHARS
-EVENT_JOURNAL_MAX_BYTES = contracts.EVENT_JOURNAL_MAX_BYTES
-EVENT_MESSAGE_MAX_CHARS = contracts.EVENT_MESSAGE_MAX_CHARS
-EVENT_METADATA_MAX_CHARS = contracts.EVENT_METADATA_MAX_CHARS
-EVENT_SCHEMA_VERSION = contracts.EVENT_SCHEMA_VERSION
-EVENT_TIMESTAMP_MAX_CHARS = contracts.EVENT_TIMESTAMP_MAX_CHARS
-VALID_PHASES = contracts.KNOWN_PHASES
-MESSAGE_STATUSES = contracts.MESSAGE_STATUSES
-STATUS_KINDS = contracts.STATUS_KINDS
-COMMON_EVENT_KEYS = contracts.COMMON_KEYS
-TERMINAL = contracts.TERMINAL_RUN_STATUSES
-VALID_STATUSES = contracts.LIFECYCLE_STATUSES
 
 TASK_ID_RE = re.compile(r"pd_\d{8}_\d{6}_[a-z0-9]{6,12}\Z")
 FAILED = {"failed", "cancelled", "timed_out"}
 READABLE_ARTIFACTS = {"status.json", "events.jsonl", "result.json", "request.json"}
 MAX_JSON_BYTES = 262_144
 MAX_INSPECT_EVENTS = 100
-MAX_TEXT_CHARS = EVENT_MESSAGE_MAX_CHARS
+MAX_TEXT_CHARS = contracts.EVENT_MESSAGE_MAX_CHARS
 TTY_EVENT_RING = 20
 EVENT_PAYLOAD_KEYS = {
     "lifecycle": ({"status", "phase"}, {"status", "phase"}),
@@ -173,19 +161,19 @@ def _valid_usage(value: Any) -> bool:
 def _validate_event(
     item: Any, *, allow_message_text: bool, expected_task_id: str = "",
 ) -> Dict[str, Any]:
-    if not isinstance(item, dict) or set(item) != COMMON_EVENT_KEYS:
+    if not isinstance(item, dict) or set(item) != contracts.COMMON_KEYS:
         raise SpectatorError("corrupt events.jsonl record schema", 4)
-    if item.get("schema_version") != EVENT_SCHEMA_VERSION or not isinstance(item.get("seq"), int) or item["seq"] < 1:
+    if item.get("schema_version") != contracts.EVENT_SCHEMA_VERSION or not isinstance(item.get("seq"), int) or item["seq"] < 1:
         raise SpectatorError("corrupt events.jsonl common fields", 4)
     if (
         not isinstance(item.get("task_id"), str)
-        or len(item["task_id"]) > EVENT_IDENTIFIER_MAX_CHARS
+        or len(item["task_id"]) > contracts.EVENT_IDENTIFIER_MAX_CHARS
         or (expected_task_id and item["task_id"] != expected_task_id)
     ):
         raise SpectatorError("corrupt events.jsonl task identity", 4)
-    if not isinstance(item.get("at"), str) or len(item["at"]) > EVENT_TIMESTAMP_MAX_CHARS:
+    if not isinstance(item.get("at"), str) or len(item["at"]) > contracts.EVENT_TIMESTAMP_MAX_CHARS:
         raise SpectatorError("corrupt events.jsonl timestamp", 4)
-    if item.get("phase") not in VALID_PHASES or not isinstance(item.get("redacted"), bool):
+    if item.get("phase") not in contracts.KNOWN_PHASES or not isinstance(item.get("redacted"), bool):
         raise SpectatorError("corrupt events.jsonl phase/redaction metadata", 4)
     dropped = item.get("dropped_fields")
     if not isinstance(dropped, list) or len(dropped) > 20 or any(
@@ -210,7 +198,7 @@ def _validate_event(
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise SpectatorError("corrupt events.jsonl truncation sequence", 4)
         elif not isinstance(value, str) or len(value) > (
-            EVENT_MESSAGE_MAX_CHARS if key == "text" else EVENT_METADATA_MAX_CHARS
+            contracts.EVENT_MESSAGE_MAX_CHARS if key == "text" else contracts.EVENT_METADATA_MAX_CHARS
         ):
             raise SpectatorError("corrupt events.jsonl bounded string", 4)
     if "role" in payload and payload["role"] != "assistant":
@@ -221,11 +209,11 @@ def _validate_event(
         raise SpectatorError("corrupt events.jsonl tool class", 4)
     if kind == "tool.complete" and payload["outcome"] not in {"complete", "unknown"}:
         raise SpectatorError("corrupt events.jsonl tool outcome", 4)
-    if kind == "message.complete" and payload["status"] not in MESSAGE_STATUSES:
+    if kind == "message.complete" and payload["status"] not in contracts.MESSAGE_STATUSES:
         raise SpectatorError("corrupt events.jsonl message status", 4)
-    if kind == "status.update" and payload["kind"] not in STATUS_KINDS:
+    if kind == "status.update" and payload["kind"] not in contracts.STATUS_KINDS:
         raise SpectatorError("corrupt events.jsonl status kind", 4)
-    if kind in {"lifecycle", "terminal"} and payload["status"] not in VALID_STATUSES:
+    if kind in {"lifecycle", "terminal"} and payload["status"] not in contracts.LIFECYCLE_STATUSES:
         raise SpectatorError("corrupt events.jsonl lifecycle status", 4)
     return neutralize_terminal(item)
 
@@ -237,10 +225,10 @@ def iter_events(
     """Yield complete, exactly validated JSONL records newer than ``after_seq``."""
     try:
         with path.open("rb") as handle:
-            raw = handle.read(EVENT_JOURNAL_MAX_BYTES + 1)
+            raw = handle.read(contracts.EVENT_JOURNAL_MAX_BYTES + 1)
     except OSError as exc:
         raise SpectatorError(f"cannot read events.jsonl: {exc}", 4) from None
-    if len(raw) > EVENT_JOURNAL_MAX_BYTES:
+    if len(raw) > contracts.EVENT_JOURNAL_MAX_BYTES:
         raise SpectatorError("events.jsonl exceeds spectator bound", 4)
     complete = raw if raw.endswith(b"\n") else raw.rsplit(b"\n", 1)[0] + (b"\n" if b"\n" in raw else b"")
     for line in complete.splitlines():
@@ -269,22 +257,22 @@ def _bounded_counter(value: Any, *, nullable: bool = False) -> bool:
 
 def _validate_status(status: Dict[str, Any], *, expected_task_id: str = "") -> Dict[str, Any]:
     status_name = status.get("status")
-    if not isinstance(status_name, str) or status_name not in VALID_STATUSES:
+    if not isinstance(status_name, str) or status_name not in contracts.LIFECYCLE_STATUSES:
         raise SpectatorError("corrupt status.json: missing or unknown status", 4)
     phase = status.get("phase")
-    if phase is not None and (not isinstance(phase, str) or phase not in VALID_PHASES):
+    if phase is not None and (not isinstance(phase, str) or phase not in contracts.KNOWN_PHASES):
         raise SpectatorError("corrupt status.json: unknown phase", 4)
     task_id = status.get("task_id")
-    if not _bounded_string(task_id, EVENT_IDENTIFIER_MAX_CHARS) or (
+    if not _bounded_string(task_id, contracts.EVENT_IDENTIFIER_MAX_CHARS) or (
         expected_task_id and task_id != expected_task_id
     ):
         raise SpectatorError("corrupt status.json: task identity mismatch", 4)
     string_fields = {
-        "created_at": EVENT_TIMESTAMP_MAX_CHARS, "started_at": EVENT_TIMESTAMP_MAX_CHARS,
-        "ended_at": EVENT_TIMESTAMP_MAX_CHARS, "delegated_profile": EVENT_METADATA_MAX_CHARS,
-        "profile": EVENT_METADATA_MAX_CHARS, "model": EVENT_METADATA_MAX_CHARS,
-        "provider": EVENT_METADATA_MAX_CHARS, "error_code": EVENT_IDENTIFIER_MAX_CHARS,
-        "child_session_id": EVENT_IDENTIFIER_MAX_CHARS,
+        "created_at": contracts.EVENT_TIMESTAMP_MAX_CHARS, "started_at": contracts.EVENT_TIMESTAMP_MAX_CHARS,
+        "ended_at": contracts.EVENT_TIMESTAMP_MAX_CHARS, "delegated_profile": contracts.EVENT_METADATA_MAX_CHARS,
+        "profile": contracts.EVENT_METADATA_MAX_CHARS, "model": contracts.EVENT_METADATA_MAX_CHARS,
+        "provider": contracts.EVENT_METADATA_MAX_CHARS, "error_code": contracts.EVENT_IDENTIFIER_MAX_CHARS,
+        "child_session_id": contracts.EVENT_IDENTIFIER_MAX_CHARS,
     }
     nullable_strings = {"ended_at", "error_code", "child_session_id"}
     for key, limit in string_fields.items():
@@ -314,7 +302,7 @@ def _validate_result(
     if not legacy and current_schema != 1:
         raise SpectatorError("corrupt result.json: missing schema version", 4)
     if (not legacy or current_schema is not None) and (
-        not _bounded_string(result.get("task_id"), EVENT_IDENTIFIER_MAX_CHARS)
+        not _bounded_string(result.get("task_id"), contracts.EVENT_IDENTIFIER_MAX_CHARS)
         or result.get("task_id") != expected_task_id
     ):
         raise SpectatorError("corrupt result.json: task identity mismatch", 4)
@@ -325,16 +313,16 @@ def _validate_result(
         raise SpectatorError("corrupt result.json: invalid status", 4)
     for key in ("error_code", "session_id"):
         if key in result and not _bounded_string(
-            result[key], EVENT_IDENTIFIER_MAX_CHARS, nullable=key == "error_code",
+            result[key], contracts.EVENT_IDENTIFIER_MAX_CHARS, nullable=key == "error_code",
         ):
             raise SpectatorError(f"corrupt result.json: invalid {key}", 4)
-    if "summary" in result and not _bounded_string(result["summary"], EVENT_MESSAGE_MAX_CHARS):
+    if "summary" in result and not _bounded_string(result["summary"], contracts.EVENT_MESSAGE_MAX_CHARS):
         raise SpectatorError("corrupt result.json: invalid summary", 4)
     for key in ("artifacts", "errors", "next_steps"):
         if key in result:
             value = result[key]
             if not isinstance(value, list) or len(value) > 100 or any(
-                not _bounded_string(item, EVENT_MESSAGE_MAX_CHARS) for item in value
+                not _bounded_string(item, contracts.EVENT_MESSAGE_MAX_CHARS) for item in value
             ):
                 raise SpectatorError(f"corrupt result.json: invalid {key}", 4)
     return result
@@ -503,7 +491,7 @@ def watch_run(
             elif mode == "plain" and status_text != last_status:
                 print(status_text, file=out, flush=True)
             last_status = status_text
-            if status_name in TERMINAL:
+            if status_name in contracts.TERMINAL_RUN_STATUSES:
                 return _terminal_code(status_name)
             if status_name in {"running", "cancelling"} and status.get("worker_pid") and not _pid_alive(status.get("worker_pid")):
                 if stale_since is None:

@@ -20,19 +20,6 @@ if __package__:
 else:
     import contracts
 
-EVENT_JOURNAL_MAX_BYTES = contracts.EVENT_JOURNAL_MAX_BYTES
-EVENT_MESSAGE_MAX_CHARS = contracts.EVENT_MESSAGE_MAX_CHARS
-EVENT_METADATA_MAX_CHARS = contracts.EVENT_METADATA_MAX_CHARS
-EVENT_RECORD_MAX_BYTES = contracts.EVENT_RECORD_MAX_BYTES
-EVENT_SCHEMA_VERSION = contracts.EVENT_SCHEMA_VERSION
-EVENT_TEXT_FRAGMENT_MAX_CHARS = contracts.EVENT_TEXT_FRAGMENT_MAX_CHARS
-KNOWN_PHASES = contracts.KNOWN_PHASES
-MESSAGE_STATUSES = contracts.MESSAGE_STATUSES
-STATUS_KINDS = contracts.STATUS_KINDS
-COMMON_KEYS = contracts.COMMON_KEYS
-TERMINAL_STATUSES = contracts.TERMINAL_RUN_STATUSES
-LIFECYCLE_STATUSES = contracts.LIFECYCLE_STATUSES
-SCHEMA_VERSION = contracts.EVENT_SCHEMA_VERSION
 sanitize_text = contracts.sanitize_text
 
 USAGE_KEYS = {"input", "output", "reasoning", "total", "calls"}
@@ -76,11 +63,11 @@ class EventJournal:
 
     def __init__(
         self, run_dir: Path, *, task_id: str = "", ui_session_id: str = "",
-        persist_message_text: bool = False, max_bytes: int = EVENT_JOURNAL_MAX_BYTES,
+        persist_message_text: bool = False, max_bytes: int = contracts.EVENT_JOURNAL_MAX_BYTES,
         terminal_reserve_bytes: int = 4_096, max_events: int = 10_000,
-        max_record_bytes: int = EVENT_RECORD_MAX_BYTES,
-        max_text_fragment_chars: int = EVENT_TEXT_FRAGMENT_MAX_CHARS,
-        max_message_chars: int = EVENT_MESSAGE_MAX_CHARS, flush_interval_s: float = 0.1,
+        max_record_bytes: int = contracts.EVENT_RECORD_MAX_BYTES,
+        max_text_fragment_chars: int = contracts.EVENT_TEXT_FRAGMENT_MAX_CHARS,
+        max_message_chars: int = contracts.EVENT_MESSAGE_MAX_CHARS, flush_interval_s: float = 0.1,
         coalesce_chars: int = 4_096, max_pre_session_events: int = 32,
         max_pre_session_bytes: int = 65_536,
     ) -> None:
@@ -199,7 +186,7 @@ class EventJournal:
             kinds = []
             for seq, line in enumerate(lines, 1):
                 item = json.loads(line)
-                if not isinstance(item, dict) or set(item) != COMMON_KEYS:
+                if not isinstance(item, dict) or set(item) != contracts.COMMON_KEYS:
                     raise ValueError("invalid record schema")
                 if int(item["seq"]) != seq:
                     raise ValueError("invalid sequence")
@@ -292,7 +279,7 @@ class EventJournal:
         elif kind == "message.complete":
             message_id = _bounded(payload.get("message_id") or payload.get("id"))
             status_value = _bounded(payload.get("status") or "complete", 32).lower()
-            if status_value not in MESSAGE_STATUSES:
+            if status_value not in contracts.MESSAGE_STATUSES:
                 status_value = "error"
             allowed = {"status": status_value}
             if message_id:
@@ -330,7 +317,7 @@ class EventJournal:
             allowed = {}
             for key in ("profile", "model", "provider"):
                 source_key = "profile_name" if key == "profile" else key
-                value = _bounded(payload.get(source_key), EVENT_METADATA_MAX_CHARS)
+                value = _bounded(payload.get(source_key), contracts.EVENT_METADATA_MAX_CHARS)
                 if value:
                     allowed[key] = value
                     setattr(self, key, value)
@@ -338,7 +325,7 @@ class EventJournal:
             phase = "session_ready"
         elif kind == "status.update":
             status_kind = _bounded(payload.get("kind"), 64).lower()
-            if status_kind not in STATUS_KINDS:
+            if status_kind not in contracts.STATUS_KINDS:
                 return None
             allowed = {"kind": status_kind}
             if "text" in payload:
@@ -346,9 +333,9 @@ class EventJournal:
         elif kind == "lifecycle":
             status_value = _bounded(payload.get("status"), 32).lower()
             phase_value = _bounded(payload.get("phase"), 64).lower()
-            if status_value not in LIFECYCLE_STATUSES:
+            if status_value not in contracts.LIFECYCLE_STATUSES:
                 return None
-            allowed = {"status": status_value, "phase": phase_value if phase_value in KNOWN_PHASES else status_value}
+            allowed = {"status": status_value, "phase": phase_value if phase_value in contracts.KNOWN_PHASES else status_value}
             phase = allowed["phase"]
         else:
             return None
@@ -411,7 +398,7 @@ class EventJournal:
                 self._degrade(f"fsync:{type(exc).__name__}")
 
     def _record_bytes(self, projected: Dict[str, Any], seq: int) -> bytes:
-        record = {"schema_version": SCHEMA_VERSION, "task_id": self.task_id, "seq": seq, "at": _now(), **projected}
+        record = {"schema_version": contracts.EVENT_SCHEMA_VERSION, "task_id": self.task_id, "seq": seq, "at": _now(), **projected}
         return (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8", "replace")
 
     def _append_projected(self, projected: Dict[str, Any], *, terminal: bool = False, internal: bool = False) -> bool:
@@ -489,7 +476,7 @@ class EventJournal:
     def finalize(self, status: str, *, error_code: Any = "", child_session_id: Any = "") -> bool:
         self.flush(force=True)
         clean_status = _bounded(status, 32).lower()
-        if clean_status not in TERMINAL_STATUSES:
+        if clean_status not in contracts.TERMINAL_RUN_STATUSES:
             clean_status = "failed"
         payload = {"status": clean_status, "error_code": _bounded(error_code, 128), "child_session_id": _bounded(child_session_id, 128)}
         projected = {"type": "terminal", "phase": clean_status, "payload": payload, "redacted": False, "dropped_fields": []}
@@ -509,7 +496,7 @@ class EventJournal:
 
     def snapshot_fields(self) -> Dict[str, Any]:
         fields: Dict[str, Any] = {
-            "event_schema_version": SCHEMA_VERSION, "event_seq": self.seq,
+            "event_schema_version": contracts.EVENT_SCHEMA_VERSION, "event_seq": self.seq,
             "event_stream_truncated": self.truncated, "turn_count": self.turn_count,
             "tool_calls": len(self.tool_ids), "api_calls": self.api_calls,
         }

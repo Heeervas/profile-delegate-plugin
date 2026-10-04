@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- Journal and spectator consume shared event schema constants directly, preserving bounds, constructor defaults, validation and supported imports.
+
 - Embedded JSON discovery scans structural characters with positional escaping, reducing parser overhead while preserving nesting, source spans and malformed-output handling.
 
 - TUI teardown shares an explicit TERM/KILL escalation sequence, preserving cancellation deadlines, process fallbacks and descriptor cleanup.
