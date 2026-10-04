@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- Journal recovery grows one bounded mutable buffer and shares usage projection across completion/session events, preserving short-read/error recovery and authoritative counters.
+
 - Journal and spectator share a compiled terminal-control filter, reducing sanitization overhead while preserving ANSI handling, Unicode replacement and output bounds.
 
 - Embedded JSON candidates decode by index in the original input, removing suffix copies while preserving absolute spans, ambiguity and malformed-output handling.

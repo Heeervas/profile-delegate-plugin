@@ -180,14 +180,13 @@ class EventJournal:
         if size == 0:
             return
         os.lseek(self.fd, 0, os.SEEK_SET)
-        data = b""
-        remaining = size
-        while remaining:
-            chunk = os.read(self.fd, min(65_536, remaining))
+        data = bytearray()
+        while len(data) < size:
+            chunk = os.read(self.fd, min(65_536, size - len(data)))
             if not chunk:
                 break
-            data += chunk
-            remaining -= len(chunk)
+            data.extend(chunk)
+        data = bytes(data)
         last_newline = data.rfind(b"\n")
         if last_newline < len(data) - 1:
             os.ftruncate(self.fd, last_newline + 1 if last_newline >= 0 else 0)
@@ -298,11 +297,7 @@ class EventJournal:
             allowed = {"status": status_value}
             if message_id:
                 allowed["message_id"] = message_id
-            clean_usage = self._clean_usage(payload.get("usage"))
-            if clean_usage:
-                allowed["usage"] = clean_usage
-                self.usage = clean_usage
-                self.api_calls = clean_usage.get("calls", self.api_calls)
+            self._project_usage(payload.get("usage"), allowed)
             if self.persist_message_text and message_id not in self.message_had_delta and payload.get("text"):
                 text, redacted = _redact(sanitize_text(payload.get("text"), self.max_message_chars))
                 if text:
@@ -339,11 +334,7 @@ class EventJournal:
                 if value:
                     allowed[key] = value
                     setattr(self, key, value)
-            clean_usage = self._clean_usage(payload.get("usage"))
-            if clean_usage:
-                allowed["usage"] = clean_usage
-                self.usage = clean_usage
-                self.api_calls = clean_usage.get("calls", self.api_calls)
+            self._project_usage(payload.get("usage"), allowed)
             phase = "session_ready"
         elif kind == "status.update":
             status_kind = _bounded(payload.get("kind"), 64).lower()
@@ -364,13 +355,16 @@ class EventJournal:
         self.phase = phase
         return {"type": kind, "phase": phase, "payload": allowed, "redacted": redacted, "dropped_fields": dropped}
 
-    @staticmethod
-    def _clean_usage(value: Any) -> Dict[str, int]:
-        usage = value if isinstance(value, dict) else {}
-        return {
-            key: item for key, item in usage.items()
+    def _project_usage(self, value: Any, payload: Dict[str, Any]) -> None:
+        source = value if isinstance(value, dict) else {}
+        usage = {
+            key: item for key, item in source.items()
             if key in USAGE_KEYS and isinstance(item, int) and not isinstance(item, bool) and item >= 0
         }
+        if usage:
+            payload["usage"] = usage
+            self.usage = usage
+            self.api_calls = usage.get("calls", self.api_calls)
 
     def _pending_projection(self) -> Optional[Dict[str, Any]]:
         if not self.pending_text:
