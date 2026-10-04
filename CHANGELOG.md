@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- Approval snapshots share one ancestor-copy and deny-normalization path, preserving frozen authority, ordered deny rules and exact fingerprints.
+
 - Interactive steering recognizes same-turn native consumption, including concatenated corrections and compression. Read-only raw occurrence evidence excludes old replayed corrections and future session tips; unavailable or expired evidence preserves fail-closed outcomes.
 
 - Status inspection validates and returns one bounded result snapshot under the publication lock, removing a duplicate file read and preventing mixed task verdicts after artifact replacement. Legacy inspection remains unverified; repair/publication remain strict.

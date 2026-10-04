@@ -63,8 +63,6 @@ def snapshot(mode: str, provenance: str, caller: str, target: str,
     target_native = subset(target_config)
     denies = list(dict.fromkeys(native["approvals"]["deny"] + target_native["approvals"]["deny"]))
     bypass = mode != "deny" and (mode == "yolo" or (mode == "inherit" and caller_yolo) or native["approvals"]["mode"] == "off")
-    if mode == "deny":
-        native["approvals"].update(mode="manual", single_query_mode="deny", unattended_mode="deny")
     if ancestor:
         validate(ancestor)
         # No inference of incomparable policies or glob containment. Nested
@@ -72,17 +70,13 @@ def snapshot(mode: str, provenance: str, caller: str, target: str,
         if ancestor["effective"] == "deny":
             if mode != "deny":
                 raise ValueError("deny ancestry requires deny")
-            native = copy.deepcopy(ancestor["native"])
-            bypass = False
-            native["approvals"].update(mode="manual", single_query_mode="deny", unattended_mode="deny")
         elif mode not in {"inherit", "deny"}:
             raise ValueError("nested delegation must inherit the frozen ancestor policy")
-        else:
-            native = copy.deepcopy(ancestor["native"])
-            bypass = ancestor["bypass"] if mode == "inherit" else False
-            if mode == "deny":
-                native["approvals"].update(mode="manual", single_query_mode="deny", unattended_mode="deny")
+        native = copy.deepcopy(ancestor["native"])
+        bypass = ancestor["bypass"] if mode == "inherit" else False
         denies = list(dict.fromkeys(denies + ancestor["native"]["approvals"]["deny"]))
+    if mode == "deny":
+        native["approvals"].update(mode="manual", single_query_mode="deny", unattended_mode="deny")
     native["approvals"]["deny"] = denies
     payload = {"schema_version": VERSION, "effective": mode, "source": provenance,
                "caller": caller, "target": target, "native": native,
