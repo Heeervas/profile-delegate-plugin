@@ -2781,10 +2781,6 @@ def delegate_profile(
     requested_output_mode, resolved_output_mode = resolve_output_mode(output_mode, contract_text)
     child_approval_explicit = child_approval_mode is not None
     if child_approval_explicit:
-        if __package__:
-            from . import native_approval
-        else:
-            import native_approval
         try:
             child_approval_mode = native_approval.selector(child_approval_mode)
         except ValueError as exc:

@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- Plugin entrypoint and approval selection reuse existing module imports, preserving qualified module identity, validation order and frozen authority.
+
 - Journal recovery grows one bounded mutable buffer and shares usage projection across completion/session events, preserving short-read/error recovery and authoritative counters.
 
 - Journal and spectator share a compiled terminal-control filter, reducing sanitization overhead while preserving ANSI handling, Unicode replacement and output bounds.

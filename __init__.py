@@ -20,9 +20,6 @@ if __package__ and __package__ in sys.modules:
         profile_delegate_steer as profile_delegate_steer,
     )
 else:  # direct import / pytest from plugin directory
-    import sys
-    from pathlib import Path
-
     plugin_dir = str(Path(__file__).resolve().parent)
     if plugin_dir not in sys.path:
         sys.path.insert(0, plugin_dir)
