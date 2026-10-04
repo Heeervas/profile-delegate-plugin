@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- Journal recovery retains event types instead of full decoded records and removes an unused truncate wrapper, preserving corruption handling, locking and terminal reservation.
+
 - Approval snapshots share one ancestor-copy and deny-normalization path, preserving frozen authority, ordered deny rules and exact fingerprints.
 
 - Interactive steering recognizes same-turn native consumption, including concatenated corrections and compression. Read-only raw occurrence evidence excludes old replayed corrections and future session tips; unavailable or expired evidence preserves fail-closed outcomes.

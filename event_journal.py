@@ -197,17 +197,17 @@ class EventJournal:
         if not lines:
             return
         try:
-            parsed = [json.loads(line) for line in lines]
-            if any(not isinstance(item, dict) or set(item) != COMMON_KEYS for item in parsed):
-                raise ValueError("invalid record schema")
-            seqs = [int(item["seq"]) for item in parsed]
-            if seqs != list(range(1, len(seqs) + 1)):
-                raise ValueError("invalid sequence")
-            self.seq = seqs[-1]
-            self.event_count = sum(
-                item["type"] not in {"journal.truncated", "terminal"} for item in parsed
-            )
-            self.truncation_marker_written = any(item["type"] == "journal.truncated" for item in parsed)
+            kinds = []
+            for seq, line in enumerate(lines, 1):
+                item = json.loads(line)
+                if not isinstance(item, dict) or set(item) != COMMON_KEYS:
+                    raise ValueError("invalid record schema")
+                if int(item["seq"]) != seq:
+                    raise ValueError("invalid sequence")
+                kinds.append(item["type"])
+            self.seq = len(kinds)
+            self.event_count = sum(kind not in {"journal.truncated", "terminal"} for kind in kinds)
+            self.truncation_marker_written = "journal.truncated" in kinds
             self.truncated = self.truncation_marker_written
         except Exception:
             self._degrade("corrupt_complete_record")
@@ -472,19 +472,6 @@ class EventJournal:
         written = os.write(self.fd, data)
         if written != len(data):
             raise OSError("short journal write")
-
-    def _truncate(self, reason: str) -> None:
-        if self.disabled or self.fd is None or self.lock_fd is None or fcntl is None:
-            return
-        try:
-            fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
-            try:
-                self._recover_locked()
-                self._truncate_locked(reason)
-            finally:
-                fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
-        except Exception as exc:
-            self._degrade(f"truncate:{type(exc).__name__}")
 
     def _truncate_locked(self, reason: str) -> None:
         """Append the unique marker while the caller holds ``events.lock``."""
