@@ -305,23 +305,19 @@ class TuiRpcClient:
             # reap a stubborn child; normal completion gets the full grace.
             if wait_bounded(fraction=0.5 if deadline is not None else 1.0):
                 return
-            try:
-                os.killpg(self.process.pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, AttributeError):
+            for signum, fallback, fraction in (
+                (signal.SIGTERM, "terminate", 0.5),
+                (signal.SIGKILL, "kill", 1.0),
+            ):
                 try:
-                    self.process.terminate()
-                except Exception:
-                    pass
-            if wait_bounded(fraction=0.5):
-                return
-            try:
-                os.killpg(self.process.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, AttributeError):
-                try:
-                    self.process.kill()
-                except Exception:
-                    pass
-            wait_bounded()
+                    os.killpg(self.process.pid, signum)
+                except (ProcessLookupError, PermissionError, AttributeError):
+                    try:
+                        getattr(self.process, fallback)()
+                    except Exception:
+                        pass
+                if wait_bounded(fraction=fraction):
+                    return
         finally:
             # Popen.wait() reaps the process but deliberately leaves the three
             # pipe objects open. Detached workers are short-lived, yet callers
