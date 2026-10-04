@@ -49,6 +49,11 @@ receipt (resolved) and stale sync-lifecycle usage docstring (path-only corrected
 Reviewer confirmed unchanged production/test behavior, coherent conftest/CI paths,
 preserved quality policy/exception and historical-vs-current documentation.
 
-Committed-scope quality outcome is recorded after verification. Parent owns
-exact-candidate CI, push and final announcement; historical audit findings remain
-unresolved product work.
+Committed-scope report at `7c4b470949f191408f25411d1f078882a1f18d8c` also returns
+**QUALITY_FAIL**, preserving the same edited-rename addition classification.
+This task does not claim a quality pass or repair the external collector. Parent
+must resolve/review the measurement gap before publication acceptance; do not
+change the baseline, thresholds or scenarios to make it green. The reviewed local
+housekeeping commit is preserved for inspection, not a release certification.
+Parent owns exact-candidate CI, push and final announcement; historical audit
+findings remain unresolved product work.

@@ -14,6 +14,14 @@ Runtime Python stays at the plugin root for discovery. All test modules and pyte
 
 Canonical commands: [.agents/validation.md](.agents/validation.md). Housekeeping scope, path map and gate receipt: [review evidence](docs/reviews/2026-10-04-housekeeping.md).
 
+Housekeeping validation retains all **716** ordered collected cases; portable
+**234** and native **482** partitions pass, serial full **716** passes after one
+retained existing cancel timing failure. Independent scoped review found no
+behavior blocker. Deterministic quality remains **QUALITY_FAIL**: the external
+collector maps edited relocations as additions in all/index/committed scopes;
+no policy/baseline waiver or publication acceptance is claimed. Parent owns this
+measurement gate and exact-candidate CI before pushing.
+
 ## Remaining work
 
 The public repairs isolated preflight/native fixtures (`6cd0434`) and fixed inherited managed-scope admission (`9089f86`). They did **not** resolve:
