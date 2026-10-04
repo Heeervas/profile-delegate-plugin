@@ -44,6 +44,20 @@ def mock_delegate_admission(tmp_path, monkeypatch, *, hermes_bin=None):
     monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
 
 
+_OK_OUTPUT = '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}'
+
+
+def _capped_output(kwargs, stdout, stderr="", **overrides):
+    """Write the existing CLI fixture artifacts; retain explicit metadata overrides."""
+    core.text_safe_write(kwargs["stdout_path"], stdout)
+    core.text_safe_write(kwargs["stderr_path"], stderr)
+    return {
+        "exit_code": 0, "timed_out": False, "stdout_truncated": False,
+        "stderr_truncated": False, "stdout_chars": len(stdout), "stderr_chars": len(stderr),
+        "stdout_limit": 200000, "stderr_limit": 100000, **overrides,
+    }
+
+
 def _notification_run(tmp_path, *, status, **fields):
     """Notification artifacts only; each test retains its native ledger behavior."""
     run_dir = tmp_path / "runs" / "pd_20260101_010101_abc123"
@@ -123,9 +137,7 @@ def test_delegate_reads_session_footer_from_stderr(tmp_path, monkeypatch):
     mock_delegate_admission(tmp_path, monkeypatch)
 
     def fake_run_capped(cmd, **kwargs):
-        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
-        core.text_safe_write(kwargs["stderr_path"], 'session_id: sid_stderr')
-        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 74, "stderr_chars": 22, "stdout_limit": 200000, "stderr_limit": 100000}
+        return _capped_output(kwargs, _OK_OUTPUT, 'session_id: sid_stderr', stdout_chars=74, stderr_chars=22)
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True, "rename_exit_code": 0, "rename_error": None})
@@ -470,13 +482,7 @@ def test_sync_delegate_surfaces_nested_delegation_result(tmp_path, monkeypatch):
             "summary": "review passed", "artifacts": [], "errors": [], "next_steps": [],
         }), encoding="utf-8")
         stdout = '{"status":"ok","summary":"built","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: child_sid'
-        core.text_safe_write(kwargs["stdout_path"], stdout)
-        core.text_safe_write(kwargs["stderr_path"], "")
-        return {
-            "exit_code": 0, "timed_out": False, "stdout_truncated": False,
-            "stderr_truncated": False, "stdout_chars": len(stdout), "stderr_chars": 0,
-            "stdout_limit": 200000, "stderr_limit": 100000,
-        }
+        return _capped_output(kwargs, stdout)
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     monkeypatch.setattr(core, "rename_session", lambda *args, **kwargs: {"session_renamed": True})
@@ -629,9 +635,7 @@ def test_approval_timeout_marker_becomes_structured_failure(tmp_path, monkeypatc
     mock_delegate_admission(tmp_path, monkeypatch, hermes_bin="/usr/bin/hermes")
 
     def fake_run(_cmd, **kwargs):
-        core.text_safe_write(kwargs["stdout_path"], "Timeout — denying command\n")
-        core.text_safe_write(kwargs["stderr_path"], "")
-        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 27, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+        return _capped_output(kwargs, 'Timeout — denying command\n', stdout_chars=27)
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run)
     result = core.delegate_profile("reviewer", "task", session_title="timeout marker")
@@ -809,9 +813,7 @@ def test_delegate_uses_prompt_file_not_raw_prompt_in_argv(tmp_path, monkeypatch)
     def fake_run_capped(cmd, **kwargs):
         seen["cmd"] = cmd
         seen["env"] = kwargs.get("env")
-        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: sid999')
-        core.text_safe_write(kwargs["stderr_path"], "")
-        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 74, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+        return _capped_output(kwargs, _OK_OUTPUT + '\n\nsession_id: sid999', stdout_chars=74)
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     result = core.delegate_profile("reviewer", "PRIVATE TASK TEXT", session_title="private task")
@@ -860,9 +862,10 @@ def test_delegate_reports_truncated_output(tmp_path, monkeypatch):
     mock_delegate_admission(tmp_path, monkeypatch, hermes_bin=sys.executable)
 
     def fake_run_capped(cmd, **kwargs):
-        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: sid999')
-        core.text_safe_write(kwargs["stderr_path"], "")
-        return {"exit_code": 0, "timed_out": False, "stdout_truncated": True, "stderr_truncated": False, "stdout_chars": 5, "stderr_chars": 0, "stdout_limit": 5, "stderr_limit": 5}
+        return _capped_output(
+            kwargs, _OK_OUTPUT + '\n\nsession_id: sid999',
+            stdout_truncated=True, stdout_chars=5, stdout_limit=5, stderr_limit=5,
+        )
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     result = core.delegate_profile("reviewer", "task", session_title="smoke")
@@ -906,9 +909,7 @@ def test_delegate_background_returns_running_and_finishes(tmp_path, monkeypatch)
     monkeypatch.setattr(core, "_push_profile_delegate_completion", lambda run_dir, final: None)
 
     def fake_run_capped(cmd, **kwargs):
-        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: sid_async')
-        core.text_safe_write(kwargs["stderr_path"], "")
-        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 92, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+        return _capped_output(kwargs, _OK_OUTPUT + '\n\nsession_id: sid_async', stdout_chars=92)
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True, "rename_exit_code": 0, "rename_error": None})
@@ -1560,9 +1561,7 @@ def test_transient_failure_resumes_same_session(tmp_path, monkeypatch, output_mo
                 assert "PROFILE_DELEGATE_RESULT: ok|blocked|failed" in prompt
                 assert "JSON" not in prompt
             stdout, code = ('{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}' if output_mode == "json" else 'Done\nPROFILE_DELEGATE_RESULT: ok') + '\nsession_id: stable_sid', 0
-        core.text_safe_write(kwargs["stdout_path"], stdout)
-        core.text_safe_write(kwargs["stderr_path"], "")
-        return {"exit_code": code, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": len(stdout), "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000, "stdout_diagnostic_tail": stdout, "stderr_diagnostic_tail": ""}
+        return _capped_output(kwargs, stdout, exit_code=code, stdout_diagnostic_tail=stdout, stderr_diagnostic_tail='')
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run)
     monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True})
@@ -1581,9 +1580,7 @@ def test_transient_failure_without_session_id_fails_closed(tmp_path, monkeypatch
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
         stdout = "API call failed after 3 retries: Connection error."
-        core.text_safe_write(kwargs["stdout_path"], stdout)
-        core.text_safe_write(kwargs["stderr_path"], "")
-        return {"exit_code": 1, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": len(stdout), "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000, "stdout_diagnostic_tail": stdout, "stderr_diagnostic_tail": ""}
+        return _capped_output(kwargs, stdout, exit_code=1, stdout_diagnostic_tail=stdout, stderr_diagnostic_tail='')
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run)
     result = core.delegate_profile("reviewer", "task", session_title="safe failure")
@@ -1598,9 +1595,7 @@ def test_delegate_resume_uses_resume_flag_and_skips_rename(tmp_path, monkeypatch
 
     def fake_run_capped(cmd, **kwargs):
         seen["cmd"] = cmd
-        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: sid123')
-        core.text_safe_write(kwargs["stderr_path"], "")
-        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 92, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+        return _capped_output(kwargs, _OK_OUTPUT + '\n\nsession_id: sid123', stdout_chars=92)
 
     import native_approval
     previous = tmp_path / "runs" / "frozen-seed"
@@ -1628,9 +1623,7 @@ def test_operator_configured_approve_yolo_adds_yolo_flag(tmp_path, monkeypatch):
     def fake_run_capped(cmd, **kwargs):
         seen["cmd"] = cmd
         seen["env"] = kwargs["env"]
-        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: sid_yolo')
-        core.text_safe_write(kwargs["stderr_path"], "")
-        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 92, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+        return _capped_output(kwargs, _OK_OUTPUT + '\n\nsession_id: sid_yolo', stdout_chars=92)
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     monkeypatch.setattr(core, "rename_session", lambda *a, **k: {"session_renamed": True, "rename_exit_code": 0, "rename_error": None})
@@ -1647,9 +1640,7 @@ def test_delegate_new_renames_when_session_id_present(tmp_path, monkeypatch):
     renamed = {}
 
     def fake_run_capped(cmd, **kwargs):
-        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: sid999')
-        core.text_safe_write(kwargs["stderr_path"], "")
-        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 92, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+        return _capped_output(kwargs, _OK_OUTPUT + '\n\nsession_id: sid999', stdout_chars=92)
 
     def fake_rename(hermes_bin, profile, session_id, title, cwd, env, timeout=30):
         renamed.update({"profile": profile, "session_id": session_id, "title": title})
@@ -1669,9 +1660,7 @@ def test_delegate_new_missing_session_id_keeps_success_without_rename(tmp_path, 
     mock_delegate_admission(tmp_path, monkeypatch)
 
     def fake_run_capped(cmd, **kwargs):
-        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
-        core.text_safe_write(kwargs["stderr_path"], "")
-        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False, "stdout_chars": 74, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+        return _capped_output(kwargs, _OK_OUTPUT, stdout_chars=74)
 
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     result = core.delegate_profile("reviewer", "task", session_title="smoke")
@@ -1819,10 +1808,7 @@ def test_reasoning_override_without_scope_keeps_canonical_home_and_session(tmp_p
     seen = {}
     def fake_run(cmd, **kwargs):
         seen["run_env"] = kwargs["env"]
-        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}\n\nsession_id: canonical_sid')
-        core.text_safe_write(kwargs["stderr_path"], "")
-        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False,
-                "stdout_chars": 1, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+        return _capped_output(kwargs, _OK_OUTPUT + '\n\nsession_id: canonical_sid', stdout_chars=1)
     def fake_rename(*args, **kwargs):
         seen["rename_env"] = args[5]
         return {"session_renamed": True}
@@ -1855,10 +1841,7 @@ def test_default_profile_reasoning_override_rejected_before_run_dir(tmp_path, mo
 def test_execution_metadata_persisted_sync(tmp_path, monkeypatch):
     mock_delegate_admission(tmp_path, monkeypatch, hermes_bin="/usr/bin/hermes")
     def fake_run(cmd, **kwargs):
-        core.text_safe_write(kwargs["stdout_path"], '{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}')
-        core.text_safe_write(kwargs["stderr_path"], "")
-        return {"exit_code": 0, "timed_out": False, "stdout_truncated": False, "stderr_truncated": False,
-                "stdout_chars": 1, "stderr_chars": 0, "stdout_limit": 200000, "stderr_limit": 100000}
+        return _capped_output(kwargs, _OK_OUTPUT, stdout_chars=1)
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run)
     result = core.delegate_profile("reviewer", "task", session_title="override", model=" demo ", max_turns=3)
     run_dir = Path(result["paths"]["run_dir"])

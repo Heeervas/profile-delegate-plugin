@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import core
+from test_profile_delegate import mock_delegate_admission as mock_sync_admission
 
 
 def _wait_for(path: Path, timeout: float = 3.0) -> None:
@@ -46,20 +47,6 @@ def _status_fixture(run_dir: Path, *, origin: dict[str, str] | None = None) -> N
         "transport": "cli",
         "origin": origin or {"session_key": "origin-lane"},
     })
-
-
-def mock_sync_admission(tmp_path, monkeypatch):
-    """Two lifecycle tests isolate admission; all other scenarios retain their gates."""
-    monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
-    monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
-    monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")
-    monkeypatch.setattr(core.shutil, "which", lambda _name: "/usr/bin/hermes")
-    monkeypatch.setattr(core.os, "access", lambda _path, _mode: True)
-    monkeypatch.setattr(
-        core, "validate_profile",
-        lambda profile, policy=None: core.ValidatedProfile(profile, profile, str(tmp_path / profile)),
-    )
-    monkeypatch.setattr(core, "resolve_workdir", lambda workdir="", policy=None: tmp_path)
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])

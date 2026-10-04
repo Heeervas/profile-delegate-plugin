@@ -47,6 +47,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Verification
 
+- Shared CLI output artifact/report fixtures and existing lifecycle admission setup, removing 30 net test lines while preserving all scenarios, metadata overrides and assertions.
+
 - Retired six duplicate deny checks after exact envelope and mutation verification; all distinct profile postures and retained guard assertions remain covered.
 
 - Shared repair/publication run setup and retired four duplicate phase/schema checks, removing 32 test lines while preserving producer, cancellation, authority and race coverage.
