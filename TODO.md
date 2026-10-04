@@ -13,7 +13,7 @@ These three findings were not fixed by the CI/preflight fixture repair or manage
 ## Evidence-led follow-up
 
 - [ ] Publish sanitized independent-installation CLI/TUI completion, resume/recovery, cancellation, consumed steering and notification evidence. Use existing opt-in harnesses and operator approval, never frozen-authority bypass. Fixture/native import checks do not establish real provider or platform delivery.
-- [ ] Make changed-code quality tooling reproducible for contributors/CI. The policy/schema and local measurement recipe exist; they do not constitute a portable automated quality job. Preserve immutable baseline, approved expiring exception and behavior gates.
+- [ ] Make changed-code quality tooling reproducible for contributors/CI. The policy/schema and local measurement recipe exist; they do not constitute a portable automated quality job. Repair the collector’s 100%-only rename mapping so necessary relocation path edits do not falsely become new files. Preserve immutable baseline, approved expiring exception and behavior gates.
 - [ ] Propose focused TUI lifecycle simplification only after correctness work; preserve state ownership and safety cases. Historical numerical line/case targets are not test-deletion authority.
 
 ## Intentionally deferred design/operations

@@ -55,5 +55,28 @@ This task does not claim a quality pass or repair the external collector. Parent
 must resolve/review the measurement gap before publication acceptance; do not
 change the baseline, thresholds or scenarios to make it green. The reviewed local
 housekeeping commit is preserved for inspection, not a release certification.
-Parent owns exact-candidate CI, push and final announcement; historical audit
+Parent owns exact-candidate CI readback and final announcement; historical audit
 findings remain unresolved product work.
+
+## Controller relocation adjudication
+
+Inspected the collector source: `collect_changes` requests Git
+`--find-renames=100%`. Consequently the necessary path substitutions (94–99%
+Git similarity) become delete/add pairs in its report. This is a measurement
+limitation, not newly introduced test complexity.
+
+Controller inspection of `git diff --name-status -M e46c849 HEAD` maps 31
+relocations. Matching report metrics by those Git-detected paths and exact
+symbol/metric identity leaves two apparent newly strong modules: relocated
+`test_tui_rpc.py` remains 1080 logical lines; relocated `test_profile_delegate.py`
+is 1965 versus baseline 1960, the already-approved managed-scope regression
+covered by the unchanged existing exception. No housekeeping-created or worsened
+strong metric remains. All changed test text is necessary root-path substitution
+or a usage docstring; runtime/support Python is byte-identical to `9089f86`.
+
+Scoped housekeeping publication is accepted from this source-backed relocation
+review plus preserved collection/behavior checks. The raw reporter remains
+QUALITY_FAIL; no collector repair, policy waiver, threshold reduction, baseline
+change or claim of automated PASS is made. Reporter rename support is deferred
+with the contributor-tooling work. Controller additionally reran Ruff, release
+registration/handler validation and secret scan successfully.

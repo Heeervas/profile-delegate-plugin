@@ -17,10 +17,13 @@ Canonical commands: [.agents/validation.md](.agents/validation.md). Housekeeping
 Housekeeping validation retains all **716** ordered collected cases; portable
 **234** and native **482** partitions pass, serial full **716** passes after one
 retained existing cancel timing failure. Independent scoped review found no
-behavior blocker. Deterministic quality remains **QUALITY_FAIL**: the external
-collector maps edited relocations as additions in all/index/committed scopes;
-no policy/baseline waiver or publication acceptance is claimed. Parent owns this
-measurement gate and exact-candidate CI before pushing.
+behavior blocker. The unmodified collector reports **QUALITY_FAIL** because its
+100%-similarity rename requirement classifies path-adjusted tests as additions.
+Controller adjudication using Git-detected renames and baseline/current metrics
+confirms no housekeeping-introduced strong finding: the only metric increase is
+the already-approved managed-scope regression (1960 → 1965 logical lines).
+Thresholds, immutable baseline and existing exception remain unchanged. This is
+scoped housekeeping acceptance, not a claim that the raw collector passed.
 
 ## Remaining work
 
