@@ -2,6 +2,19 @@
 
 ## Scoped CI repair at e46c849
 
+Follow-up to GitHub run `37203577578`: a real production managed-scope guard
+checked the scrubbed child environment, which drops HERMES_MANAGED_DIR. Local
+/etc/hermes existence masked this defect, not a demonstrated native capability
+difference. Guard now checks parent administrator scope before overlay creation.
+Regression explicitly covers absent/present canonical scope, preserving no-run,
+exact error and unchanged-status assertions. Red absent case reproduced locally;
+green focused 10 passed; full installed suite **716 passed / 143.06s**.
+Reviewer `pd_20261004_130056_th1z6j` approves production fix and narrow expiring
+test-module-size exception (1965 maximum, expires 2026-11-03); evidence in
+`docs/reviews/2026-10-04-managed-scope.md`. Earlier unchanged-production/no-exception
+statements below describe the first repair only. GitHub CLI lacks auth here;
+parent owns exact-head pinned-runtime CI readback. No Hermes provisioning performed.
+
 Authorized local repair only: stale CI compile target removed; native guard
 probes receive disposable homes; preflight/selector/provider-error fixtures
 isolate admission prerequisites; managed-scope refusal seeds valid status identity.

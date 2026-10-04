@@ -1752,7 +1752,14 @@ def test_discover_managed_scope_treats_existing_default_file_as_conflict(tmp_pat
     assert core.discover_managed_scope({}) == default_scope
 
 
-def test_reasoning_override_rejects_existing_scope_before_run_mutation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("canonical_scope_exists", [False, True])
+def test_reasoning_override_rejects_existing_scope_before_run_mutation(tmp_path, monkeypatch, canonical_scope_exists):
+    # The inherited administrator scope must be checked even on hosts without
+    # /etc/hermes; otherwise that host default can mask environment scrubbing.
+    canonical_scope = tmp_path / "canonical-managed"
+    if canonical_scope_exists:
+        canonical_scope.mkdir()
+    monkeypatch.setattr(core, "DEFAULT_MANAGED_SCOPE", canonical_scope)
     root = tmp_path / "root"
     profile_home = root / "profiles" / "reviewer"
     profile_home.mkdir(parents=True)

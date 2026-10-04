@@ -2086,7 +2086,9 @@ def prepare_child_environment(request: Dict[str, Any], run_dir: Path, *, tui: bo
             env["HERMES_TUI_MAX_TURNS"] = env["HERMES_MAX_ITERATIONS"] = str(execution["max_turns"])
     effort = execution.get("reasoning_effort")
     if effort:
-        existing = discover_managed_scope(env)
+        # Check administrator authority before the child whitelist scrubs caller
+        # overlays; /etc/hermes must not mask an inherited managed-scope conflict.
+        existing = discover_managed_scope(os.environ.copy())
         if existing is not None:
             raise ProfileDelegateError(f"reasoning_effort cannot replace existing Hermes managed scope: {existing}",
                                        "reasoning_managed_scope_conflict")

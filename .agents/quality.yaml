@@ -23,5 +23,13 @@ policy:
   standard_new_strong: exception_or_fail
   top_new_strong: exception_or_fail
   required_adapter_failure: incomplete
-exceptions: []
+exceptions:
+  - id: managed-scope-regression-file-size
+    selector: {path: test_profile_delegate.py, language: python, symbol: "<module>", kind: file}
+    metric: python_ast_v1.file_logical_lines
+    allowance: {maximum: 1965}
+    rationale: Necessary host-independent security regression adds five logical lines to existing module debt; restructuring would expand this repair.
+    approval: {authority: "independent reviewer pd_20261004_130056_th1z6j", reference: docs/reviews/2026-10-04-managed-scope.md}
+    created_at: "2026-10-04"
+    expires_at: "2026-11-03"
 extensions: {}

@@ -7,6 +7,7 @@ All notable changes to Profile Delegate are documented here.
 ### Changed
 
 - CI compilation drops deleted event_schema.py; native regression fixtures isolate disposable homes, admission prerequisites and valid run identity, retaining all assertions and cases.
+- Reasoning overrides refuse inherited administrator-managed scopes before child environment scrubbing, including hosts without a canonical /etc/hermes scope.
 
 - Policy loading shares one field registry for defaults and YAML/environment resolution, preserving supported overrides, source precedence and validation errors.
 

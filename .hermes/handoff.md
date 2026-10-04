@@ -1,5 +1,10 @@
 # Profile Delegate handoff
 
+Managed-scope follow-up fixes the real parent-authority lookup bug; local absent/
+present canonical regression and full 716-case gate pass. Focal safety review and
+bounded quality exception recorded in docs/reviews/2026-10-04-managed-scope.md.
+Parent must publish and verify exact-head GitHub jobs; no local Hermes provisioning.
+
 Publication CI repair is locally tested and focal-reviewed; see STATE.md and
 .agents/validation.md. Parent must run clean native integration against the
 workflow-pinned Hermes revision through normal approval, then publish if green.
