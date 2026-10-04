@@ -17,6 +17,10 @@ D. Make detached worker the only durable completion producer; parent watcher onl
 E. Remove proven redundant test families; measure net product and support reduction. Add only native GoalManager waiting for exact active caller/verified worker where supported; do not broaden architecture for silent/multiple/compression/new limitations.
 F. Full canonical validation, independent final code/coverage review, then operator-controlled restart and affected real Discord/provider acceptance.
 
+## Native reasoning limits
+
+The installed CLI exposes an explicit reasoning option, but restoring a saved model/provider can subsequently replace that selection. A session-scoped TUI setter avoids YAML writes yet can run before the agent exists; deferred construction with a routable saved provider does not consume the pending reasoning override. Native eager resume builds before the setter, but can fail on an invalid saved route before an explicit replacement model/provider is applied. The attempted substitutions were rejected and existing reasoning preparation retained. Do not remove it based on parser/setter tests alone, introduce a core patch, or treat conditional adapters as the accepted simplification. Prove effective selection and route recovery together through supported native interfaces.
+
 ## Module ownership
 
 core: stable APIs, preflight and authorization. execution: supervision and launch. contracts: result/artifact/event definitions. native: Hermes session and delivery seams. CLI/TUI adapters retain their native transport differences. Merge child_launch, native_resolution and event_schema into their owners only when dependency/test evidence supports the slice; movement does not count as reduction. Keep imports acyclic and compatibility entrypoints where actual consumers need them.
