@@ -1,9 +1,11 @@
 """Hermes native delivery seam; keep internal persistence dependencies here."""
 from __future__ import annotations
 
+import hashlib
 import importlib
 import inspect
 import sqlite3
+import time
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Dict
@@ -100,3 +102,74 @@ def offer_completion(event: Dict[str, Any], result: Dict[str, Any]) -> bool:
     from tools.process_registry import process_registry
     process_registry.completion_queue.put(event)
     return True
+
+
+# Match the installed native resume default; overflow only disables receipt proof.
+STEER_SNAPSHOT_MAX_ROWS = 20_000
+
+
+def steer_snapshot(
+    home: Path, session_id: str, *, deadline: float, include_inactive: bool = False,
+) -> dict[str, str | None] | None:
+    """Read raw native occurrences without replay dedupe, mutation or future tips."""
+    path = home / "state.db"
+    if not path.is_file() or path.is_symlink() or time.monotonic() >= deadline:
+        return None
+    try:
+        from hermes_state import SessionDB
+        from agent.message_metadata import message_uid_or_none
+        snapshot, total = {}, 0
+        with closing(SessionDB(path, read_only=True)) as db:
+            lineage = db.get_compression_lineage(session_id)
+            if session_id not in lineage:
+                return None
+            for segment in lineage[:lineage.index(session_id) + 1]:
+                offset = 0
+                while True:
+                    if time.monotonic() >= deadline:
+                        return None
+                    # Native raw per-segment reads keep inactive occurrences and
+                    # clone UIDs; projected history can hide a stale occurrence.
+                    rows = db.get_messages(segment, include_inactive=include_inactive,
+                                           offset=offset, limit=min(128, STEER_SNAPSHOT_MAX_ROWS - total + 1))
+                    total += len(rows)
+                    if total > STEER_SNAPSHOT_MAX_ROWS:
+                        return None
+                    for message in rows:
+                        uid = message_uid_or_none(message)
+                        if uid is None:
+                            return None
+                        digest = None
+                        if message.get("role") == "user" and message.get("display_kind") == "steer":
+                            content = message.get("content")
+                            if not isinstance(content, str):
+                                return None
+                            digest = hashlib.sha256(content.encode()).hexdigest()
+                        if uid in snapshot and snapshot[uid] != digest:
+                            return None
+                        snapshot[uid] = digest
+                    if not rows:
+                        break
+                    offset += len(rows)
+        return snapshot if time.monotonic() < deadline else None
+    except Exception:
+        return None
+
+
+def steers_consumed(
+    before: dict[str, str | None] | None, after: dict[str, str | None] | None, texts: list[str],
+) -> bool:
+    """Match fresh native occurrences, including concatenated pending corrections."""
+    if before is None or after is None or not texts:
+        return False
+    from agent.prompt_builder import format_steer_marker
+    pending = list(texts)
+    for uid, content in after.items():
+        if uid in before or content is None:
+            continue
+        for count in range(1, len(pending) + 1):
+            expected = format_steer_marker("\n".join(pending[:count])).lstrip()
+            if content == hashlib.sha256(expected.encode()).hexdigest():
+                del pending[:count]
+                break
+    return not pending

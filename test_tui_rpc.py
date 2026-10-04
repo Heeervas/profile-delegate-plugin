@@ -927,6 +927,112 @@ def test_runner_queued_steer_never_turns_quiet_into_success(tmp_path, monkeypatc
     assert state["steer_delivery_state"] == "unknown"
 
 
+@pytest.mark.parametrize("delivery", ["fresh", "merged", "replayed", "inactive_twin"])
+def test_runner_native_steer_occurrences_survive_compression(tmp_path, monkeypatch, delivery):
+    from contextlib import closing
+    from hermes_state import SessionDB
+    from agent.prompt_builder import steer_user_row
+
+    with closing(SessionDB(tmp_path / "state.db")) as db:
+        db.create_session("child-1", source="cli", profile_name="reviewer")
+        db.append_message("child-1", **steer_user_row("redirect"))
+        original = db.get_messages_as_conversation("child-1", include_row_ids=True)[0]
+        if delivery == "inactive_twin":
+            db.rewind_to_message("child-1", original["_row_id"])
+            db.append_message("child-1", **steer_user_row("redirect"))
+            original = db.get_messages_as_conversation("child-1", include_row_ids=True)[0]
+        db.append_message("child-1", role="assistant", content="previous completion")
+        db.append_message("child-1", role="user", content="prompt")
+        calls = []
+
+        def native_steer(*args, **kwargs):
+            calls.append(args[2])
+            if delivery == "fresh" or (delivery == "merged" and len(calls) == 2):
+                db.append_message("child-1", **steer_user_row("\n".join(calls)))
+            if delivery != "merged" or len(calls) == 2:
+                db.publish_compression_child(
+                    parent_session_id="child-1", child_session_id="child-2", source="cli",
+                    profile_name="reviewer", require_compression_lease=False,
+                    messages=db.get_messages_as_conversation("child-1", include_row_ids=True),
+                )
+            return {"status": "queued"}
+
+        class SettledClient(CompleteClient):
+            def read_event(self, _timeout):
+                complete, self.complete = self.complete, None
+                return complete or {"method": "event", "params": {
+                    "type": "session.info", "session_id": "ui-1", "payload": {
+                        "stored_session_id": "child-2", "profile_name": "reviewer",
+                    },
+                }}
+
+        result, ack, trace = _execute_with_control(
+            tmp_path, monkeypatch, "steer",
+            lambda: monkeypatch.setattr(tui_runner.tui_rpc, "steer", native_steer),
+            client_factory=SettledClient, return_trace=True,
+            extra_command_type="steer" if delivery == "merged" else None,
+        )
+        cloned = db.get_messages_as_conversation("child-2", include_row_ids=True)[0]
+        assert cloned["message_uid"] == original["message_uid"]
+        assert cloned["_row_id"] != original["_row_id"]
+        expected = delivery in {"fresh", "merged"}
+        assert ack["state"] == "accepted"
+        assert result["success"] is expected
+        assert result["status"] == ("completed" if expected else "failed")
+        assert result["error_code"] == (None if expected else "steer_outcome_uncertain")
+        state = core.read_json_file(tmp_path / "pd_control_steer" / "status.json")
+        assert state["followup_observed"] is False
+        assert state["steer_delivery_state"] == ("delivered" if expected else "unknown")
+        assert trace["client"].calls == []
+        if delivery == "merged":
+            assert core.read_json_file(trace["acks"] / trace["extra_path"].name)["state"] == "accepted"
+        db.append_message("child-2", **steer_user_row("future turn"))
+        future_uid = db.get_messages("child-2")[-1]["message_uid"]
+        snapshot = core.native.steer_snapshot(tmp_path, "child-1", deadline=time.monotonic() + 10)
+        assert snapshot is not None and future_uid not in snapshot
+        monkeypatch.setattr(core.native, "STEER_SNAPSHOT_MAX_ROWS", 1)
+        assert core.native.steer_snapshot(tmp_path, "child-1", deadline=time.monotonic() + 10) is None
+
+
+@pytest.mark.parametrize("stage", ["baseline", "receipt"])
+def test_runner_steer_snapshot_expiry_cannot_dispatch_or_complete(tmp_path, monkeypatch, stage):
+    import hashlib
+    from agent.prompt_builder import format_steer_marker
+
+    monotonic, controls = time.monotonic, []
+
+    def snapshot(*args, **kwargs):
+        baseline = kwargs.get("include_inactive", False)
+        if baseline == (stage == "baseline"):
+            monkeypatch.setattr(time, "monotonic", lambda: monotonic() + 2)
+        return {} if baseline else {
+            "fresh": hashlib.sha256(format_steer_marker("redirect").lstrip().encode()).hexdigest(),
+        }
+
+    def arrange():
+        monkeypatch.setattr(tui_runner.core.native, "steer_snapshot", snapshot)
+        monkeypatch.setattr(tui_runner.tui_rpc, "steer",
+                            lambda *args, **kwargs: controls.append(args[2]) or {"status": "queued"})
+
+    class SettledClient(CompleteClient):
+        def read_event(self, _timeout):
+            complete, self.complete = self.complete, None
+            return complete or {"method": "event", "params": {
+                "type": "session.info", "session_id": "ui-1", "payload": {},
+            }}
+
+    result, ack = _execute_with_control(
+        tmp_path, monkeypatch, "steer", arrange, client_factory=SettledClient, timeout_seconds=1,
+    )
+    assert controls == ([] if stage == "baseline" else ["redirect"])
+    assert ack["state"] == ("rejected" if stage == "baseline" else "accepted")
+    assert result["status"] == "timed_out"
+    assert result["error_code"] == "timeout"
+    assert result["success"] is False
+    assert result["result"]["execution_status"] == "timed_out"
+    assert core.read_json_file(tmp_path / "pd_control_steer" / "status.json").get("steer_delivery_state") != "delivered"
+
+
 def test_runner_very_late_followup_is_unknown_not_missed(tmp_path, monkeypatch):
     def arrange():
         monkeypatch.setattr(tui_runner.tui_rpc, "steer", lambda *args, **kwargs: {"status": "queued"})

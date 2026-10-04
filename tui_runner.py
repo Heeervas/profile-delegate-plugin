@@ -81,6 +81,10 @@ def execute(run_dir: Path) -> Dict[str, Any]:
     followup_completed = False
     accepted_steer = False
     steer_response_uncertain = False
+    steer_baseline = None
+    steer_texts: list[str] = []
+    checked_steers = 0
+    steer_delivery_proven = False
     cancelled = False
     cancel_deadline: Optional[float] = None
     cancel_transport_diagnostic = ""
@@ -173,7 +177,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
 
     def process_controls() -> None:
         nonlocal cancelled, cancel_deadline, cancel_transport_diagnostic, accepted_steer, cancel_interrupt_accepted
-        nonlocal steer_response_uncertain
+        nonlocal steer_response_uncertain, steer_baseline, steer_delivery_proven, timed_out
         if client is None or not ui_session_id or cancelled:
             return
         for command_path, command in core._pending_control_commands(run_dir):
@@ -191,10 +195,19 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                     if terminal_event and turn_settled:
                         core._ack_control(run_dir, command_path, command, "rejected", "turn already settled")
                         continue
+                    text = core.ensure_text((command.get("payload") or {}).get("text")).strip()
+                    if not steer_texts:
+                        steer_baseline = core.native.steer_snapshot(
+                            Path(request["profile_home"]), child_session_id,
+                            deadline=deadline, include_inactive=True,
+                        )
+                    if time.monotonic() >= deadline:
+                        timed_out = True
+                        core._ack_control(run_dir, command_path, command, "rejected", "task deadline exhausted")
+                        return
                     try:
                         response = tui_rpc.steer(
-                            client, ui_session_id,
-                            core.ensure_text((command.get("payload") or {}).get("text")),
+                            client, ui_session_id, text,
                             on_event=persist_event,
                         )
                     except tui_rpc.TuiRemoteError as exc:
@@ -210,6 +223,8 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                         # A local RPC timeout does not prove the native steer
                         # was rejected; it may have queued a later follow-up.
                         accepted_steer = True
+                        steer_texts.append(text)
+                        steer_delivery_proven = False
                         steer_response_uncertain = True
                         core._ack_control(
                             run_dir, command_path, command, "delivery_unknown", str(exc)
@@ -217,6 +232,9 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                     else:
                         state = "accepted" if response.get("status") == "queued" else "rejected"
                         accepted_steer = accepted_steer or state == "accepted"
+                        if state == "accepted":
+                            steer_texts.append(text)
+                            steer_delivery_proven = False
                         core._ack_control(run_dir, command_path, command, state)
                 elif command_type == "cancel":
                     # Local cancellation is terminal authority. Establish its
@@ -420,7 +438,20 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                 )
                 while accepted_steer and not cancelled and not (followup_completed and turn_settled):
                     process_controls()
-                    if cancelled or (followup_completed and turn_settled):
+                    if cancelled:
+                        break
+                    if steer_baseline is not None and terminal_event and turn_settled and checked_steers < len(steer_texts):
+                        checked_steers = len(steer_texts)
+                        steer_delivery_proven = core.native.steers_consumed(
+                            steer_baseline,
+                            core.native.steer_snapshot(Path(request["profile_home"]), child_session_id, deadline=deadline),
+                            steer_texts,
+                        )
+                        if time.monotonic() >= deadline:
+                            timed_out = True
+                            steer_delivery_proven = False
+                            break
+                    if cancelled or steer_delivery_proven or (followup_completed and turn_settled):
                         break
                     observation_deadline = deadline if followup_started else pending_deadline
                     remaining = observation_deadline - time.monotonic()
@@ -429,7 +460,7 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                     frame = _poll_event(client, min(0.15, remaining), journal)
                     if frame is not None:
                         persist_event(frame)
-                if accepted_steer and not cancelled and not (followup_completed and turn_settled):
+                if accepted_steer and not cancelled and not steer_delivery_proven and not (followup_completed and turn_settled):
                     if followup_started and time.monotonic() >= deadline:
                         timed_out = True
                     else:
@@ -437,8 +468,8 @@ def execute(run_dir: Path) -> Dict[str, Any]:
                         # the steer later. Fail closed without consuming the task
                         # deadline solely to resolve delivery uncertainty.
                         error_code, final_status = "steer_outcome_uncertain", "failed"
-                # A settled completed turn is an execution receipt, not a
-                # correlated steer-delivery receipt; retain delivery unknown.
+                # Only fresh typed native occurrences prove same-turn steering;
+                # a settled follow-up alone leaves delivery unknown.
             if ui_session_id and not cancelled and not accepted_steer:
                 try:
                     client.call(
@@ -520,7 +551,8 @@ def execute(run_dir: Path) -> Dict[str, Any]:
     core.text_safe_write(run_dir / "stdout.txt", final_text)
     if accepted_steer:
         core.merge_run_status(run_dir, {
-            "steer_delivery_state": "unknown", "followup_observed": followup_started,
+            "steer_delivery_state": "delivered" if steer_delivery_proven else "unknown",
+            "followup_observed": followup_started,
             "followup_settled": followup_completed,
             "steer_response_uncertain": steer_response_uncertain,
         })
