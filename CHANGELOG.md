@@ -67,6 +67,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Verification
 
+- TUI follow-up fixtures share client preparation and journal counters while preserving scenarios and checking that late steering uncertainty issues no extra session RPC.
+
 - Shared fresh TUI completion frames and native-ledger compatibility API setup, removing eight net test lines with identical assertions, parametrizations and incomplete-API refusal coverage.
 
 - Shared CLI output artifact/report fixtures and existing lifecycle admission setup, removing 30 net test lines while preserving all scenarios, metadata overrides and assertions.

@@ -82,6 +82,14 @@ def runner_complete(text='{"status":"ok","summary":"done"}'):
     }
 
 
+class RecordingJournal:
+    def __init__(self):
+        self.flushes = 0
+
+    def flush(self):
+        self.flushes += 1
+
+
 class CompleteClient:
     """Existing complete-event fixture, shared without adding gateway behavior."""
     stderr_tail = ""
@@ -559,13 +567,6 @@ def test_runner_poll_flushes_pending_journal_text_after_active_and_idle_reads(ti
                 raise tui_rpc.TuiTransportError("TUI RPC response timed out")
             return frame
 
-    class RecordingJournal:
-        def __init__(self):
-            self.flushes = 0
-
-        def flush(self):
-            self.flushes += 1
-
     journal = RecordingJournal()
     assert tui_runner._poll_event(Client(), 0.15, journal) == (None if timeout else frame)
     assert journal.flushes == 1
@@ -575,13 +576,6 @@ def test_runner_poll_flushes_before_propagating_transport_error():
     class Client:
         def read_event(self, _timeout):
             raise tui_rpc.TuiTransportError("TUI RPC EOF")
-
-    class RecordingJournal:
-        def __init__(self):
-            self.flushes = 0
-
-        def flush(self):
-            self.flushes += 1
 
     journal = RecordingJournal()
     with pytest.raises(tui_rpc.TuiTransportError, match="EOF"):
@@ -837,17 +831,11 @@ def test_runner_queued_steer_never_turns_quiet_into_success(tmp_path, monkeypatc
     def arrange():
         monkeypatch.setattr(tui_runner.tui_rpc, "steer", lambda *args, **kwargs: {"status": "queued"})
 
-    class DelayedClient:
-        stderr_tail = ""
-
+    class DelayedClient(CompleteClient):
         def __init__(self, complete):
-            self.process = type("Process", (), {"pid": os.getpid(), "poll": lambda self: 0})()
-            self.complete = complete
+            super().__init__(complete)
             self.events = 0
             self.calls = []
-
-        def wait_ready(self, **kwargs):
-            pass
 
         def read_event(self, _timeout):
             self.events += 1
@@ -870,9 +858,6 @@ def test_runner_queued_steer_never_turns_quiet_into_success(tmp_path, monkeypatc
         def call(self, *args, **kwargs):
             self.calls.append(args[0])
             return {}
-
-        def close(self, **kwargs):
-            pass
 
     published_at = []
     real_publish = core.publish_terminal_run
@@ -1031,19 +1016,13 @@ def test_runner_very_late_followup_is_unknown_not_missed(tmp_path, monkeypatch):
     def arrange():
         monkeypatch.setattr(tui_runner.tui_rpc, "steer", lambda *args, **kwargs: {"status": "queued"})
 
-    class LateClient:
-        stderr_tail = ""
-
+    class LateClient(CompleteClient):
         def __init__(self, complete):
-            self.process = type("Process", (), {"pid": os.getpid(), "poll": lambda self: 0})()
-            self.complete = complete
+            super().__init__(complete)
             self.reads = 0
             self.observed_wait = 0.0
             self.late_followup_at = 1.5
             self.followup_emitted = False
-
-        def wait_ready(self, **kwargs):
-            pass
 
         def read_event(self, timeout):
             self.reads += 1
@@ -1057,9 +1036,6 @@ def test_runner_very_late_followup_is_unknown_not_missed(tmp_path, monkeypatch):
                 }}
             time.sleep(timeout)
             return None
-
-        def close(self, **kwargs):
-            pass
 
     published_at = []
     real_publish = core.publish_terminal_run
@@ -1081,6 +1057,7 @@ def test_runner_very_late_followup_is_unknown_not_missed(tmp_path, monkeypatch):
     assert trace["client"].reads > 2
     assert trace["client"].observed_wait < trace["client"].late_followup_at
     assert trace["client"].followup_emitted is False
+    assert trace["client"].calls == []
     assert ack["state"] == "accepted"
     assert result["status"] == "failed"
     assert result["error_code"] == "steer_outcome_uncertain"
