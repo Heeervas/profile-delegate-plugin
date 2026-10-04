@@ -363,6 +363,7 @@ COMMON_KEYS = {
 _OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)")
 _CSI_RE = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]")
 _ESC_RE = re.compile(r"\x1b(?:[@-_]|.)")
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def sanitize_text(value: Any, limit: int) -> str:
@@ -371,10 +372,7 @@ def sanitize_text(value: Any, limit: int) -> str:
     text = _OSC_RE.sub("", text)
     text = _CSI_RE.sub("", text)
     text = _ESC_RE.sub("", text)
-    text = "".join(
-        char for char in text
-        if char in "\n\t" or (ord(char) >= 0x20 and not 0x7F <= ord(char) <= 0x9F)
-    )
+    text = _CONTROL_RE.sub("", text)
     return text[:limit]
 
 LIFECYCLE_STATUSES = TERMINAL_RUN_STATUSES | {"running", "cancelling"}
