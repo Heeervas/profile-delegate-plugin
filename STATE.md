@@ -2,10 +2,10 @@
 
 ## Checkpoint and authority
 
-- Version remains **1.10.0**; no new tag or activation is implied.
+- Version **1.10.1**: authorized metadata/documentation release, annotated tag after exact-commit CI. No runtime activation is included.
 - Public source baseline: `9089f86d24346791aba01bdfe0f28779212dac45`.
 - Baseline CI: [run 37204513835](https://github.com/Heeervas/profile-delegate-plugin/actions/runs/37204513835), portable Python 3.11/3.12/3.13 and installed integration on pinned Hermes/Python 3.14 passed (controller-provided exact-SHA evidence).
-- Current authority: **complete-target housekeeping only** — test/document relocation, governance reconciliation, validation and reviewed local commit. Product logic, Hermes/core/profile configuration, activation, tags and publication are excluded. Parent owns subsequent push and exact-candidate CI readback.
+- Current authority: **1.10.1 release packaging** — README, version metadata, changelog and project-state reconciliation; push and annotated tag explicitly requested. Product logic, Hermes/core/profile configuration and activation remain excluded.
 - Separate unpublished implementation work must be coordinated with the maintainer; it is not part of this checkout or evidence of shipped behavior.
 
 ## Layout and validation
@@ -41,4 +41,4 @@ Profiles are context boundaries, not OS sandboxes. Execution/task/contract/notif
 
 Historical state and contradictory intermediate acceptance/permission claims are preserved in [state archive](docs/archive/state-through-9089f86.md) and [handoff archive](docs/archive/hermes-handoff-through-9089f86.md), not current instructions. Plan status/navigation lives in [docs/README.md](docs/README.md); durable architectural decisions remain in `decisions/`. `.hermes/` is a thin navigation adapter.
 
-Next: parent verifies the reviewed housekeeping commit, pushes if satisfied and reads back CI on that exact SHA. No restart is needed for documentation/test organization; this session does not alter the loaded runtime.
+Housekeeping was published at `10d131a604e068bf75b9e72873d1faed52fdc3b8`; exact-SHA CI [37208686318](https://github.com/Heeervas/profile-delegate-plugin/actions/runs/37208686318) passed all four jobs. Next: validate and push 1.10.1 packaging, verify exact-commit CI, then publish the annotated tag. No restart or loaded-runtime change is included.

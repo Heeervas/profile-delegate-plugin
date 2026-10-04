@@ -4,9 +4,13 @@ All notable changes to Profile Delegate are documented here.
 
 ## [Unreleased]
 
+## [1.10.1] — 2026-10-04
+
+Tagged packaging of the published changes below. No additional product-logic changes in the release commit; known reliability follow-ups remain in TODO.md.
+
 ### Changed
 
-- Repository housekeeping moves tests/pytest fixtures into tests/, consolidates plan locations, archives historical state/handoff, and reconciles contributor/governance navigation without product logic or version changes.
+- Repository housekeeping moves tests/pytest fixtures into tests/, consolidates plan locations, archives historical state/handoff, and reconciles contributor/governance navigation without product logic changes.
 
 - CI compilation drops deleted event_schema.py; native regression fixtures isolate disposable homes, admission prerequisites and valid run identity, retaining all assertions and cases.
 - Reasoning overrides refuse inherited administrator-managed scopes before child environment scrubbing, including hosts without a canonical /etc/hermes scope.

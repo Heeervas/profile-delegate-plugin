@@ -1,6 +1,6 @@
 # Profile Delegate backlog
 
-This is unresolved public-checkout work, not an issue tracker or implementation authorization. Version remains 1.10.0. Coordinate with the maintainer before overlapping unpublished work. [Contribution entry points](docs/contribution-opportunities.md) give reproductions and acceptance criteria.
+This is unresolved public-checkout work, not an issue tracker or implementation authorization. Current version: 1.10.1. Coordinate with the maintainer before overlapping unpublished work. [Contribution entry points](docs/contribution-opportunities.md) give reproductions and acceptance criteria.
 
 ## Correctness first — reproduce against current main
 

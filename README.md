@@ -1,6 +1,24 @@
 # Profile Delegate 🤝
 
-Version: `1.10.0`
+Version: `1.10.1`
+
+Delegate to specialist Hermes profiles from one conversation. Keep each specialist's context separate, follow live runs, and reuse nested results such as a Builder's Reviewer report.
+
+## What's new in v1.10.1
+
+This tagged release packages the published reliability work and contributor-ready repository:
+
+- Connected nested results, same-session recovery, and clearer live-control evidence.
+- Native background completion tracking with separate notification outcomes.
+- Hardened approval, origin and managed-scope admission checks.
+- Tests under `tests/`, plans and reviews under `docs/`, and reconciled project contracts.
+- 716 retained test cases; portable CI on Python 3.11–3.13 and installed integration on Python 3.14.
+
+See [CHANGELOG.md](CHANGELOG.md) for details and [contribution opportunities](docs/contribution-opportunities.md) for concrete open work. Profiles are context boundaries, not security sandboxes; notifications remain best effort.
+
+### Release policy
+
+Every release must align `plugin.yaml`, `pyproject.toml`, this README and the changelog, pass CI on its exact commit, and have an annotated `vX.Y.Z` tag. Historical untagged checkpoints are not retroactively certified releases.
 
 > Stable local-power-user Hermes Agent plugin. It is **not a sandbox** and should be configured deliberately before broad use.
 

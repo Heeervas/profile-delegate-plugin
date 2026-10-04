@@ -38,7 +38,7 @@ Canonical commands live in `.agents/validation.md`. Before claiming completion, 
 
 - Commit only reviewed intentional files; never commit `.venv`, caches, run artifacts, or secrets.
 - Use conventional commit messages.
-- Keep `plugin.yaml`, README version, and `CHANGELOG.md` aligned for releases.
+- Every release must align `plugin.yaml`, `pyproject.toml`, README version and `CHANGELOG.md`, pass CI on the exact release commit, and receive an annotated `vX.Y.Z` tag.
 - A gateway or fresh-session restart is required before loaded plugin code/schema changes are considered live.
 - Do not tag, publish, or change repository visibility unless explicitly requested.
 
