@@ -44,14 +44,16 @@ def _top_level_json_candidates(
     decoded: List[Tuple[Dict[str, Any], int, int, str]] = []
     depth = 0
     in_string = False
-    escaped = False
+    escaped_at = -1
     candidate_starts: List[int] = []
-    for idx, char in enumerate(text):
+    for match in re.finditer(r'["{}\\]', text):
+        idx, char = match.start(), match[0]
         if in_string:
-            if escaped:
-                escaped = False
+            # Escapes apply only to the next source position.
+            if escaped_at == idx:
+                escaped_at = -1
             elif char == "\\":
-                escaped = True
+                escaped_at = idx + 1
             elif char == '"':
                 in_string = False
             continue

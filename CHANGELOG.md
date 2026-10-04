@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- Embedded JSON discovery scans structural characters with positional escaping, reducing parser overhead while preserving nesting, source spans and malformed-output handling.
+
 - TUI teardown shares an explicit TERM/KILL escalation sequence, preserving cancellation deadlines, process fallbacks and descriptor cleanup.
 
 - Plugin entrypoint and approval selection reuse existing module imports, preserving qualified module identity, validation order and frozen authority.
