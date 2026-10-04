@@ -771,13 +771,12 @@ def _config_int(value: Any, name: str, minimum: int, maximum: int, *, allow_zero
 def _config_list(value: Any, name: str) -> List[str]:
     if not isinstance(value, list):
         raise ProfileDelegateError(f"{name} must be an array of strings", "configuration_error")
-    result: List[str] = []
+    result: Dict[str, None] = {}
     for item in value:
         if not isinstance(item, str) or not item.strip() or "," in item:
             raise ProfileDelegateError(f"{name} entries must be non-empty strings without commas", "configuration_error")
-        if item.strip() not in result:
-            result.append(item.strip())
-    return result
+        result.setdefault(item.strip(), None)
+    return list(result)
 
 
 def _policy_value(key: str, kind: str, raw: Any, source: str) -> Any:
@@ -909,14 +908,13 @@ def _execution_list(name: str, value: Any) -> List[str]:
         raise ProfileDelegateError(f"{name} must be an array of strings", "validation_error")
     if len(value) > MAX_EXECUTION_LIST_ITEMS:
         raise ProfileDelegateError(f"{name} has too many items", "validation_error")
-    normalized: List[str] = []
+    normalized: Dict[str, None] = {}
     for item in value:
         text = _optional_execution_string(name, item)
         if not text or "," in text:
             raise ProfileDelegateError(f"{name} entries must be non-empty strings without commas", "validation_error")
-        if text not in normalized:
-            normalized.append(text)
-    return normalized
+        normalized.setdefault(text, None)
+    return list(normalized)
 
 
 def normalize_requested_execution(
