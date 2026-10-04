@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import core
-from test_run_reconciliation import run_fixture
+from test_run_reconciliation import replace_run_on_lock, run_fixture
 
 
 def success():
@@ -68,19 +68,7 @@ def test_invalid_result_never_overwritten(tmp_path):
 @pytest.mark.parametrize("replace", ["lock", "run"])
 def test_waiting_publication_rejects_replaced_lock_or_run(tmp_path, monkeypatch, replace):
     run = run_fixture(tmp_path, worker_pid=-1)
-    original = core.fcntl.flock
-    switched = False
-    def flock(fd, operation):
-        nonlocal switched
-        if operation == core.fcntl.LOCK_EX and not switched:
-            switched = True
-            if replace == "lock":
-                (run / "status.lock").unlink()
-                (run / "status.lock").touch()
-            else:
-                run.rename(tmp_path / "retired")
-        return original(fd, operation)
-    monkeypatch.setattr(core.fcntl, "flock", flock)
+    replace_run_on_lock(tmp_path, monkeypatch, run, replace)
     with pytest.raises(core.ProfileDelegateError):
         publish(run)
     assert not (run / "result.json").exists()

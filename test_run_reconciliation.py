@@ -21,6 +21,25 @@ def run_fixture(tmp_path: Path, *, status: str = "running", result: dict | None 
     return run
 
 
+def replace_run_on_lock(tmp_path, monkeypatch, run, replace):
+    """Replace the lock inode or run directory on the first exclusive lock."""
+    original = core.fcntl.flock
+    switched = False
+
+    def flock(fd, operation):
+        nonlocal switched
+        if operation == core.fcntl.LOCK_EX and not switched:
+            switched = True
+            if replace == "lock":
+                (run / "status.lock").unlink()
+                (run / "status.lock").touch()
+            else:
+                run.rename(tmp_path / "retired")
+        return original(fd, operation)
+
+    monkeypatch.setattr(core.fcntl, "flock", flock)
+
+
 @pytest.mark.parametrize("alive,reason", [(True, "worker_alive"), (None, "liveness_unverifiable")])
 def test_unverified_worker_never_publishes(tmp_path, monkeypatch, alive, reason):
     run = run_fixture(tmp_path)

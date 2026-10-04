@@ -6,6 +6,8 @@ All notable changes to Profile Delegate are documented here.
 
 ### Changed
 
+- Repair and terminal-publication regressions share identical lock-replacement setup while retaining separate scenarios and fail-closed assertions.
+
 - Journal and spectator consume shared event schema constants directly, preserving bounds, constructor defaults, validation and supported imports.
 
 - Embedded JSON discovery scans structural characters with positional escaping, reducing parser overhead while preserving nesting, source spans and malformed-output handling.

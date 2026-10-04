@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import core
-from test_run_reconciliation import run_fixture
+from test_run_reconciliation import replace_run_on_lock, run_fixture
 
 
 def worker(run):
@@ -77,21 +77,7 @@ def test_repair_refuses_lock_identity_change_while_waiting(tmp_path, monkeypatch
     run = run_fixture(tmp_path)
     monkeypatch.setattr(core, "resolve_run_dir", lambda _: run)
     monkeypatch.setattr(core, "probe_worker_alive", lambda _: False)
-    original = core.fcntl.flock
-    switched = False
-
-    def flock(fd, operation):
-        nonlocal switched
-        if operation == core.fcntl.LOCK_EX and not switched:
-            switched = True
-            if replace == "lock":
-                (run / "status.lock").unlink()
-                (run / "status.lock").touch()
-            else:
-                run.rename(tmp_path / "retired")
-        return original(fd, operation)
-
-    monkeypatch.setattr(core.fcntl, "flock", flock)
+    replace_run_on_lock(tmp_path, monkeypatch, run, replace)
     with pytest.raises(core.ProfileDelegateError):
         core._operator_reconcile(run.name)
     assert not (run / "result.json").exists()
