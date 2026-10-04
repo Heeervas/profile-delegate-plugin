@@ -65,11 +65,11 @@ def _top_level_json_candidates(
             depth -= 1
     for idx in candidate_starts:
         try:
-            obj, length = decoder.raw_decode(text[idx:])
+            obj, end = decoder.raw_decode(text, idx)
         except Exception:
             continue
         if isinstance(obj, dict):
-            decoded.append((obj, idx, idx + length, "embedded_json"))
+            decoded.append((obj, idx, end, "embedded_json"))
     # Starts are collected only at depth zero: successfully decoded spans
     # cannot contain or overlap another candidate. Avoid a quadratic rescan.
     return decoded, len(candidate_starts) - len(decoded)
