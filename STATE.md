@@ -4,7 +4,7 @@
 
 Authorized: additive `profile_multidelegate`, bounded prompt/recovery improvements, normal push to main and new annotated v1.11.0 tag after exact-commit CI. No force push, tag movement, GitHub Release, gateway restart or runtime activation.
 
-Publication baseline: `0315b839217861124e591d728f279e6545e6a2a1` (public v1.10.1). Candidate is isolated from the original dirty checkout. Publication is **blocked by GitHub authentication**: `git push --dry-run origin HEAD:refs/heads/main` returns `fatal: could not read Username for 'https://github.com': No such device or address`; `gh auth status` reports no login. Fetch/read-only remote lookup works. No credential changes attempted. No new remote commit/tag/CI exists yet.
+Publication baseline: `0315b839217861124e591d728f279e6545e6a2a1` (public v1.10.1). Candidate is isolated from the original dirty checkout. The initial push failed because Git had no credential helper in this session. Existing authentication was subsequently verified using `XDG_CONFIG_HOME=/opt/data/.config`: account `eve-ai-dev` has push permission on the exact repository. Publication uses the existing gh credential helper per command only; no credentials or persistent configuration changed. Exact-head CI and remote tag readback are required before reporting publication.
 
 ## Implementation and review
 
