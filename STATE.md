@@ -29,6 +29,6 @@ Native runtime equality with CI pin is not established locally; exact-head GitHu
 
 ## Remaining work and limits
 
-Restore authorized GitHub authentication outside source, push reviewed local commit normally to main, read back exact remote SHA, check its CI, then create/push/read back annotated v1.11.0 if still unused. Do not mark published before these checks.
+Normal main push succeeded using the existing authorized per-command helper. Release completion requires exact-head CI and remote annotated-tag verification; the final operator receipt supplies those immutable URLs/SHAs. Do not infer activation from publication.
 
 Profiles are context boundaries, not security sandboxes. Native notifications are best effort, not exactly-once or restart durable. Multi-dispatch is not a scheduler, transaction, DAG executor or worktree manager. Existing backlog remains: contradictory JSON statuses with unequal candidate scores; RPC write/flush deadline accounting; per-chunk UTF-8 decoding. See [TODO](TODO.md).
