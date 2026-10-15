@@ -4,6 +4,24 @@ All notable changes to Profile Delegate are documented here.
 
 ## [Unreleased]
 
+## [1.11.0]
+
+### Added
+
+- `profile_multidelegate`: one tool invocation dispatches independent new background sessions to different profiles or the same profile, with per-item overrides, workdir, native notifications and existing individual controls.
+- Full-array dry-run validation, strict model input types and ordered dispatch receipts (`accepted`, `partial`, `rejected`, `validated`), preserving created-run handles even when initialization or terminal publication fails.
+
+### Changed
+
+- Delegation prompts keep summaries concise without truncating deliverables, distinguish verified results and require one verdict. Same-session recovery checks observable state before repeating uncertain side effects.
+- Review preset effectively excludes the new delegating tool.
+
+### Limits
+
+- Dispatch acceptance is not execution success or reserved capacity. New sessions only; resume remains on the singular tool. No scheduler, durable batch ledger, aggregate notification or exactly-once guarantee. Orchestrators own worktrees and shared-service isolation.
+
+
+
 ## [1.10.1] — 2026-10-04
 
 Tagged packaging of the published changes below. No additional product-logic changes in the release commit; known reliability follow-ups remain in TODO.md.

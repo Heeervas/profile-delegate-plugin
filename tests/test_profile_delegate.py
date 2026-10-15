@@ -1554,9 +1554,9 @@ def test_transient_failure_resumes_same_session(tmp_path, monkeypatch, output_mo
             stdout, code = "API call failed after 3 retries: Connection error.\nsession_id: stable_sid", 1
         else:
             prompt = Path(cmd[cmd.index("--query-file") + 1]).read_text()
-            assert f"requested {output_mode} output format" in prompt
+            assert f"resolved {output_mode} output format" in prompt
             if output_mode != "json":
-                assert "PROFILE_DELEGATE_RESULT: ok|blocked|failed" in prompt
+                assert "PROFILE_DELEGATE_RESULT: followed by one value, ok, blocked, or failed" in prompt
                 assert "JSON" not in prompt
             stdout, code = ('{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}' if output_mode == "json" else 'Done\nPROFILE_DELEGATE_RESULT: ok') + '\nsession_id: stable_sid', 0
         return _capped_output(kwargs, stdout, exit_code=code, stdout_diagnostic_tail=stdout, stderr_diagnostic_tail='')

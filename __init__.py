@@ -115,6 +115,29 @@ def _schema() -> Dict[str, Any]:
         }, ['profile', 'task', 'session_title'])
 
 
+def _multischema() -> Dict[str, Any]:
+    properties = _schema()["parameters"]["properties"]
+    excluded = {"background", "notify_on_complete", "transport_mode", "preflight", "session_mode", "session_id"}
+    item = {"type": "object", "properties": {k: v for k, v in properties.items() if k not in excluded},
+            "required": ["profile", "task", "session_title"], "additionalProperties": False}
+    return _tool_schema("profile_multidelegate", "Dispatch independent new background sessions in one invocation. accepted means dispatched, not completed. Individual notifications and controls; no capacity reservation or batch idempotency. Orchestrator owns worktrees and shared-service isolation.",
+                        {"tasks": {"type": "array", "items": item, "minItems": 1},
+                         "preflight": {"type": "boolean", "default": False}}, ["tasks"])
+
+
+def _multihandler(args=None, **kwargs) -> str:
+    try:
+        if __package__ and __package__ in sys.modules:
+            from .batch import multidelegate
+        else:
+            from batch import multidelegate
+        result = multidelegate(args, _multischema()["parameters"]["properties"]["tasks"]["items"], _current_origin())
+    except Exception as exc:
+        result = {"status": "rejected", "items": [], "run_created": False,
+                  "error_code": getattr(exc, "code", "internal_error"), "error": str(exc)}
+    return json.dumps(result, ensure_ascii=False)
+
+
 def _status_schema() -> Dict[str, Any]:
     return _tool_schema(
         'profile_delegate_status', 'Read a Profile Delegate run by task_id. Returns status, result, log tails, and artifact paths.', {
@@ -358,6 +381,7 @@ def register(ctx: Any) -> None:
     )
     for name, schema, handler, desc in [
         ("profile_delegate", _schema(), _handler, "Profile Delegate 🤝: bounded task delegation to another Hermes profile."),
+        ("profile_multidelegate", _multischema(), _multihandler, "Dispatch independent profile tasks."),
         ("profile_delegate_status", _status_schema(), _status_handler, "Inspect a Profile Delegate run by task_id."),
         ("profile_delegate_steer", _steer_schema(), _steer_handler, "Steer an active Profile Delegate run."),
         ("profile_delegate_cancel", _cancel_schema(), _cancel_handler, "Cancel an active Profile Delegate run."),

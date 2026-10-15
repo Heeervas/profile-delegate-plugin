@@ -1,18 +1,18 @@
 # Profile Delegate 🤝
 
-Version: `1.10.1`
+Version: `1.11.0`
 
 Delegate to specialist Hermes profiles from one conversation. Keep each specialist's context separate, follow live runs, and reuse nested results such as a Builder's Reviewer report.
 
-## What's new in v1.10.1
+## What's new in v1.11.0
 
-This tagged release packages the published reliability work and contributor-ready repository:
+This release candidate adds multi-dispatch while retaining singular controls:
 
-- Connected nested results, same-session recovery, and clearer live-control evidence.
-- Native background completion tracking with separate notification outcomes.
-- Hardened approval, origin and managed-scope admission checks.
-- Tests under `tests/`, plans and reviews under `docs/`, and reconciled project contracts.
-- 716 retained test cases; portable CI on Python 3.11–3.13 and installed integration on Python 3.14.
+- `profile_multidelegate` dispatches independent new background sessions in one invocation, including several tasks for the same profile.
+- Ordered per-item receipts preserve dispatch errors and inspection handles without claiming execution success.
+- Full-array preflight reuses existing policy, approval and origin checks; no new scheduler or batch ledger.
+- Prompt and recovery guidance distinguishes verified completion and checks uncertain side effects before retries.
+- Local validation: 743 installed tests; publication and exact-commit CI remain pending. See [STATE.md](STATE.md).
 
 See [CHANGELOG.md](CHANGELOG.md) for details and [contribution opportunities](docs/contribution-opportunities.md) for concrete open work. Profiles are context boundaries, not security sandboxes; notifications remain best effort.
 
@@ -32,6 +32,16 @@ Example uses:
 - Ask a `builder` profile to inspect implementation risk.
 - Ask a `research` profile to check public sources.
 - Ask a domain profile to produce a second opinion without mixing its memory into the caller.
+
+## Multi-dispatch
+
+`profile_multidelegate(tasks: [...], preflight: false)` dispatches independent new sessions, including multiple tasks to the same profile. Each item requires `profile`, `task`, `session_title` and accepts singular overrides except session/resume and execution-mode fields. The facade forces new interactive background runs with native notifications. Root/items reject unknown fields and invalid types; full validation precedes run creation. A trusted routable origin is required. Maximum items is min(max_concurrent,max_async), not a slot reservation or RAM guarantee.
+
+`validated` is preflight-only with zero runs. `accepted` means every index was started/reused, not execution or task success. `partial` preserves successful dispatches plus failed/not_started indices; `rejected` means none accepted or global validation failed, and may still identify a failed created run. An observed dispatch failure stops later entries without cancelling siblings; a later worker capacity failure remains individual. Use each task_id with existing status/steer/cancel tools.
+
+Dedupe can map identical indices to one active run within its existing window, without extra notification per index. `duplicate_policy=new` intentionally creates independent runs but bypasses no policy or limit. Retrying a whole batch is not idempotent: finished runs/window expiry can repeat work. After lost replies inspect list/status before retrying side effects. Parent interruption may lose index correlation while children remain live. Notifications are per unique run, native and best effort, not one aggregate return.
+
+The orchestrator prepares worktrees and owns write isolation/integration. Builders may edit the same relative names in distinct worktrees with per-item workdir. Different dirs do not isolate services, ports or DBs. The facade does not manage Git, dependencies, scheduling or a durable batch ledger. Resume remains singular-only. See `docs/multidelegate.md` for the contract and evidence boundaries.
 
 ## Features
 

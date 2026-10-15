@@ -1,44 +1,34 @@
-# Profile Delegate — current public state
+# Profile Delegate — v1.11.0 candidate
 
-## Checkpoint and authority
+## Authority and publication
 
-- Version **1.10.1**: authorized metadata/documentation release, annotated tag after exact-commit CI. No runtime activation is included.
-- Public source baseline: `9089f86d24346791aba01bdfe0f28779212dac45`.
-- Baseline CI: [run 37204513835](https://github.com/Heeervas/profile-delegate-plugin/actions/runs/37204513835), portable Python 3.11/3.12/3.13 and installed integration on pinned Hermes/Python 3.14 passed (controller-provided exact-SHA evidence).
-- Current authority: **1.10.1 release packaging** — README, version metadata, changelog and project-state reconciliation; push and annotated tag explicitly requested. Product logic, Hermes/core/profile configuration and activation remain excluded.
-- Separate unpublished implementation work must be coordinated with the maintainer; it is not part of this checkout or evidence of shipped behavior.
+Authorized: additive `profile_multidelegate`, bounded prompt/recovery improvements, normal push to main and new annotated v1.11.0 tag after exact-commit CI. No force push, tag movement, GitHub Release, gateway restart or runtime activation.
 
-## Layout and validation
+Publication baseline: `0315b839217861124e591d728f279e6545e6a2a1` (public v1.10.1). Candidate is isolated from the original dirty checkout. Publication is **blocked by GitHub authentication**: `git push --dry-run origin HEAD:refs/heads/main` returns `fatal: could not read Username for 'https://github.com': No such device or address`; `gh auth status` reports no login. Fetch/read-only remote lookup works. No credential changes attempted. No new remote commit/tag/CI exists yet.
 
-Runtime Python stays at the plugin root for discovery. All test modules and pytest fixtures live in `tests/`; historical sanitized outputs remain in `tests/fixtures/profile_delegate/`. Shared test helpers remain in their existing test modules to preserve import and scenario boundaries.
+## Implementation and review
 
-Canonical commands: [.agents/validation.md](.agents/validation.md). Housekeeping scope, path map and gate receipt: [review evidence](docs/reviews/2026-10-04-housekeeping.md).
+The new facade validates the entire array before dispatch and preserves ordered per-index receipts. Individual execution, task, contract, transport and notification outcomes remain independent. Existing singular admission, dedupe and controls are reused. See [contract](docs/multidelegate.md).
 
-Housekeeping validation retains all **716** ordered collected cases; portable
-**234** and native **482** partitions pass, serial full **716** passes after one
-retained existing cancel timing failure. Independent scoped review found no
-behavior blocker. The unmodified collector reports **QUALITY_FAIL** because its
-100%-similarity rename requirement classifies path-adjusted tests as additions.
-Controller adjudication using Git-detected renames and baseline/current metrics
-confirms no housekeeping-introduced strong finding: the only metric increase is
-the already-approved managed-scope regression (1960 → 1965 logical lines).
-Thresholds, immutable baseline and existing exception remain unchanged. This is
-scoped housekeeping acceptance, not a claim that the raw collector passed.
+Independent focal review `pd_20261015_135628_r5owb6`: PASS_WITH_NOTES for code; F1/F2 CLOSED_STATIC, no new code blocker. F3 requested state/handoff/link reconciliation, now supplied. Reviewer did not execute tests or certify live-provider behavior. No code changed after this review.
 
-## Remaining work
+Port identity: owned deltas from the captured incoming snapshot reverse-apply cleanly for entrypoint/core/test/fixtures; new batch and regression modules are byte-identical to the implementation checkout. Private receipt `.artifacts/port-identity.json` includes hashes. Published baseline provides the tests/ layout. No bulk transfer of reasoning, UTF-8, TUI fixes or private quality tooling.
 
-The public repairs isolated preflight/native fixtures (`6cd0434`) and fixed inherited managed-scope admission (`9089f86`). They did **not** resolve:
+## Validation
 
-1. Contradictory recognized JSON task statuses with unequal candidate scores.
-2. Blocking RPC write/flush before response deadline accounting.
-3. Independent per-chunk UTF-8 decoding in CLI capture/diagnostic tails.
+Canonical commands: [.agents/validation.md](.agents/validation.md).
 
-See [TODO.md](TODO.md) and [contribution opportunities](docs/contribution-opportunities.md) for evidence boundaries and coordination. These are opportunities, not tickets or authority to implement them in this task. Green CI is not universal runtime reliability or provider/platform acceptance.
+- Full installed suite: **743 passed**, warnings-as-errors, 126.77 s.
+- Portable suite: **234 passed, 509 deselected**, 7.61 s.
+- Fresh candidate batch + detached fixture probe: **31 passed**, 11.36 s; includes actual native subprocess fixture execution, not a real-provider multi-child claim.
+- Global Ruff, compilation, frozen lock/sync, secret scan (zero hits), diff checks pass.
+- Fresh-process registration/handler smoke: version 1.11.0, seven tools, success.
+- Immutable-baseline quality at STANDARD and diagnostic TOP still reports QUALITY_FAIL from prior test relocation classified as additions. No thresholds, exceptions or immutable baseline changed. Supplement against exact publication base 0315b83 reports **QUALITY_PASS_WITH_EXCEPTION**, no new/worsened strong finding. This isolates this release's delta, not a claim that the raw immutable-baseline report passes. Existing housekeeping disposition remains in [receipt](docs/reviews/2026-10-04-housekeeping.md).
 
-## Boundaries and continuity
+Native runtime equality with CI pin is not established locally; exact-head GitHub CI remains mandatory before tag creation. Controller-observed two real overlapping child completions/notifications occurred on the dirty runtime, not this clean candidate. Gateway activation, real-provider worktree isolation and individual live control uptake are not claimed.
 
-Profiles are context boundaries, not OS sandboxes. Execution/task/contract/notification/transport remain independent; native notification is best effort, not exactly-once or guaranteed after restart. Real-provider, gateway-loaded, Discord delivery and operator acceptance remain separate from fixture/native dependency tests.
+## Remaining work and limits
 
-Historical state and contradictory intermediate acceptance/permission claims are preserved in [state archive](docs/archive/state-through-9089f86.md) and [handoff archive](docs/archive/hermes-handoff-through-9089f86.md), not current instructions. Plan status/navigation lives in [docs/README.md](docs/README.md); durable architectural decisions remain in `decisions/`. `.hermes/` is a thin navigation adapter.
+Restore authorized GitHub authentication outside source, push reviewed local commit normally to main, read back exact remote SHA, check its CI, then create/push/read back annotated v1.11.0 if still unused. Do not mark published before these checks.
 
-Housekeeping was published at `10d131a604e068bf75b9e72873d1faed52fdc3b8`; exact-SHA CI [37208686318](https://github.com/Heeervas/profile-delegate-plugin/actions/runs/37208686318) passed all four jobs. Next: validate and push 1.10.1 packaging, verify exact-commit CI, then publish the annotated tag. No restart or loaded-runtime change is included.
+Profiles are context boundaries, not security sandboxes. Native notifications are best effort, not exactly-once or restart durable. Multi-dispatch is not a scheduler, transaction, DAG executor or worktree manager. Existing backlog remains: contradictory JSON statuses with unequal candidate scores; RPC write/flush deadline accounting; per-chunk UTF-8 decoding. See [TODO](TODO.md).
