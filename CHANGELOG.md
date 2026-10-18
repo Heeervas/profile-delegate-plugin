@@ -4,6 +4,12 @@ All notable changes to Profile Delegate are documented here.
 
 ## [Unreleased]
 
+### Local readiness closure
+
+- The independently reviewed local candidate includes profile_multidelegate for one-call new-session dispatch with per-run controls and notifications, plus opt-in worktrees. Real batch overlap, isolated steering/cancellation, both native deliveries, and worktree CLI/TUI new/resume and integration are accepted; gateway activation is not performed.
+- Complete local gates pass: 818 tests, mandatory native and portable partitions, global lint and quality with only the existing exact temporary signature exception. Independent quality and final focal reviews pass with notes; trusted local adoption passes without changing baseline, thresholds or coverage. Remote adoption and publication remain separately gated.
+- Record the pre-existing nonblocking import-order fixture defect in TODO.md. Only closure documentation is committed here; inherited runtime/test/governance work remains preserved in the dirty working tree.
+
 ### Changed
 
 - Policy loading shares one field registry for defaults and YAML/environment resolution, preserving supported overrides, source precedence and validation errors.

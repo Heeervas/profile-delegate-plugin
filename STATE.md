@@ -1,5 +1,28 @@
 # Profile Delegate project state
 
+## Local readiness complete — activation remains Alberto-only (2026-10-18)
+
+Authority: complete-target LOCAL remediation and acceptance under `plans/quality-readiness.md`, with the previously authorized multi-dispatch and optional-worktree scopes preserved. Current published version remains 1.10.0; these changes are an unreleased, locally verified candidate, not a remote release or a running-gateway claim. Adán owns the handoff; Builder and both independent reviews have finished. No gateway restart, Hermes-core/profile/global-configuration edit, push, publication or remote-protection change occurred.
+
+### Verified outcome
+
+- Q2/Q3 repaired the seven blocking quality findings, ten vendor E702 errors and portable Python/lock/CI contract. No TOP floor, baseline, adapter, coverage or exception policy was relaxed. Canonical and derived-vendor quality: **QUALITY_PASS_WITH_EXCEPTION**, no evidence gaps; the sole exception remains `worktree-public-signature-20261018`, core.py/delegate_profile/parameter_count, maximum 29, expires 2026-11-17. Historical stable/improved debt is not a claim of zero repository debt.
+- Required full suite **818 passed**, native **581 passed / 237 deselected**, portable **237 passed / 581 deselected**, warnings-as-errors. Lock/sync, policy, global Ruff, registration/handler, compile, fresh discovery, secret scan and diff checks passed. Independent Q4 `pd_20261018_202904_txg78g` returned **PASS_WITH_NOTES** and reproduced the required gates. Original incompatible upstream-corpus import and intermediate timing/probe failures remain recorded, never counted as passes.
+- Q5 is **LOCAL_INDEPENDENT_ADOPTION_PASS**, exit 0: separately reviewed trusted tooling measured the actual candidate, retained baseline `e46c84910ea00e0f4b8795cd2bfcc35378ce1cee`, and returned QUALITY_PASS_WITH_EXCEPTION / gaps []. This is not remote CI adoption or approval to publish. Primary receipts: `.artifacts/quality-readiness/{adoption.json,adoption-gate.json}`.
+- Multi-dispatch real acceptance: one fresh registered `profile_multidelegate` invocation created two distinct empty-profile sessions with observed overlapping native terminal work. Alpha `pd_20261018_210033_iutt2z` applied steering marker `BATCH_ALPHA_STEER_ACCEPTED`, read its real fixture and completed ok/valid. Beta `pd_20261018_210034_r60ld9` accepted an isolated native interrupt and became cancelled; Alpha was unaffected. Both exact native completion rows are delivered with one attempt, read-only verified. Queue ACK alone is not formal steer delivery; observed result uptake proves this case. No exactly-once, sandbox or post-restart guarantee is added.
+- Final focal Reviewer `pd_20261018_210428_n5vcvj`: **PASS_WITH_NOTES**, old F1 MAJOR and F2 closed, B1–B6 verified, Q5 and real acceptance independently confirmed. Its 27 batch regressions and 16 fault/prompt/recovery checks passed without repeating providers or global suites. Existing optional-worktree CLI/TUI new/resume and same-SHA isolated changes plus single-writer integration remain accepted under the earlier F7 review.
+
+### Candidate identity and remaining limits
+
+Q4/Q5, real acceptance and final review bind the same 152-file pre-closure candidate SHA256 `ca810db943f13b9e5d04fe7227c7a724b37a266a9aa92aa8a658b43b202552c2`; source HEAD/baseline was `e46c84910ea00e0f4b8795cd2bfcc35378ce1cee`. Original identities and evidence are immutable under `.artifacts/quality-readiness/`. Subsequent closure edits only reconcile docs/backlog and add test_multidelegate.py to compile lists; they are not falsely assigned the earlier aggregate hash. No runtime, policy, vendor, exception or test bytes changed during closure. Final delta/evidence are retained separately.
+
+The sole nonblocking Q4 N1 is a pre-existing synthetic-package fixture/import-order defect, reproduced on intake and candidate; recorded in TODO.md, not suppressed or silently fixed. Closure F3 documentation/compile-list omissions are corrected. Remote protected-branch adoption and Python CI matrix execution remain unclaimed. Existing earlier unrelated simplification goals below are historical, not reopened by this task.
+
+**Next action / authority gate:** local functional and quality criteria are complete. After the focused closure checks, Alberto may restart the gateway to load the candidate; only a fresh loaded-tool check after his restart can establish activation. No autonomous restart. Preserve the broadly dirty worktree and private evidence; do not sweep inherited feature/repair hunks into the quality commit. Only the separable closure documentation is committed locally; runtime, test and governance changes remain in the preserved dirty worktree because their Git hunks overlap inherited work. No clean-clone/release-complete commit is claimed. Publication remains separately gated.
+
+### Historical snapshot from HEAD — superseded above
+
+
 ## Native simplification — current execution
 
 Implementation authority: complete-target local plugin implementation and verified commit batches. Hermes core, real profile/global configuration, push/publication and gateway restart remain outside this work's write scope. Functional release remains v1.10.0; current work is an unactivated review candidate.

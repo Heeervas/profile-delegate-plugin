@@ -4,6 +4,10 @@ Canonical design: [`docs/plans/2026-07-22-plugin-only-reliability-reset-p0-p4.md
 
 Current review: [`docs/audits/2026-09-27-multi-pov-reliability-review.md`](docs/audits/2026-09-27-multi-pov-reliability-review.md)
 
+## Nonblocking local quality follow-up (2026-10-18)
+
+- [ ] N1: make the synthetic package fixture in test_preflight_contract.py register its package in sys.modules with scoped cleanup. Current test_child_reasoning.py followed by test_task_approval_selection.py::test_public_selector_description_exempts_deny reproduces the same import-order failure on both intake and candidate (35 passed / 1 failed). Full mandatory suites and real discovery pass. Do not suppress the test or change the real loader as a workaround. Repro and minimal repair scope: `.artifacts/quality-readiness/review/review.md`, N1. This is pre-existing and nonblocking for the accepted local quality/batch/worktree candidate.
+
 ## 2026-09-27 local F/G acceptance follow-up
 
 - [x] Add request-admission tests for top-level self-target, nested cross-home, nested same-home refusal, configured shared lock capacity and depth.
