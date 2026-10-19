@@ -4,6 +4,26 @@ All notable changes to Profile Delegate are documented here.
 
 ## [Unreleased]
 
+## [1.12.0] — source release candidate
+
+### Principal feature: optional Git worktrees
+
+- Isolate new delegation edits in an optional assigned Git checkout, with explicit
+  `base_ref` and new `branch` options. Verified CLI/TUI new/resume retain the assigned
+  checkout; batch composition reuses the same singular mechanism.
+- Worktrees are not a security sandbox. Source uncommitted and ignored files are
+  not copied. There is no automatic merge, cleanup, fetch, stash or source commit.
+
+### Release maintenance
+
+- Support Python >=3.11,<3.15 with portable CI 3.11–3.14; pinned installed Hermes
+  integration uses 3.14 only as its test scope.
+- Opt-in native GitHub release preparation with explicit semver input, synchronized
+  manifest/pyproject/README/CHANGELOG/uv.lock, fail-closed consistency and same-input
+  retry safety, reusable full test and trusted quality gates. No automatic bump on tests.
+
+
+
 ## [1.11.0]
 
 ### Added

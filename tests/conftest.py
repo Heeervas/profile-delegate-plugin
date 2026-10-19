@@ -16,7 +16,7 @@ RUNTIME_MODULES = {
     "test_native_resume_admission", "test_native_selection", "test_package_loading",
     "test_preflight_contract", "test_profile_delegate", "test_recursion_integration",
     "test_reliability_20260927", "test_runtime_fixture_commands", "test_sync_lifecycle",
-    "test_task_approval_selection", "test_tui_rpc", "test_multidelegate",
+    "test_task_approval_selection", "test_tui_rpc", "test_tui_runner", "test_multidelegate",
 }
 
 

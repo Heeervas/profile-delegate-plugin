@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 if __package__:
-    from . import contracts, native, native_approval
+    from . import admission, execution, child_reasoning, contracts, native, native_approval, worktrees
 else:
+    import admission
+    import execution
+    import child_reasoning
     import contracts
     import native
     import native_approval
+    import worktrees
 
 ensure_text = contracts.ensure_text
 ProfileDelegateError = contracts.ProfileDelegateError
@@ -26,6 +30,7 @@ output_result = contracts.output_result
 
 import hashlib
 import json
+import codecs
 import os
 import random
 import re
@@ -595,7 +600,7 @@ def publish_terminal_run(
     Two atomic renames are not crash-atomic. A crash after the result rename leaves
     that result authoritative for a later dead-worker reconciliation.
     """
-    proposed = _prepare_result_artifact(run_dir, result)
+    proposed = _prepare_result_artifact(run_dir, {**result, **worktrees.projection(updates)})
     lifecycle = ensure_text(updates.get("status")).lower()
     if lifecycle not in TERMINAL_RUN_STATUSES or lifecycle != proposed["execution_status"]:
         raise ProfileDelegateError("terminal status/result disagree", "invalid_terminal_status")
@@ -852,7 +857,7 @@ def load_effective_policy() -> EffectivePolicy:
 
 def profile_delegate_policy(policy: Optional[EffectivePolicy] = None) -> Dict[str, Any]:
     policy = policy or load_effective_policy()
-    managed = discover_managed_scope(os.environ.copy())
+    blockers = reasoning_blockers(policy)
     values = policy.values
     return {
         "success": True, "policy_schema_version": POLICY_SCHEMA_VERSION,
@@ -864,7 +869,8 @@ def profile_delegate_policy(policy: Optional[EffectivePolicy] = None) -> Dict[st
             "allowed_toolsets": values["allowed_toolsets"], "allowed_skills": values["allowed_skills"],
             "child_approval": values["allow_child_approval_override"],
         },
-        "reasoning_state": "inherit_only" if managed is not None else "override_available",
+        "reasoning_state": "inherit_only" if blockers else "override_available",
+        "reasoning_blockers": blockers,
         "approval_mode": values["child_approval_mode"],
         "limits": {key: values[key] for key in ("max_depth", "max_concurrent", "max_async", "default_timeout_seconds", "max_timeout_seconds", "max_transient_resumes")},
         "duplicate_guard": {"enabled": values["duplicate_guard_enabled"], "active_window_seconds": values["duplicate_active_window_seconds"], "active_action": "reuse"},
@@ -954,6 +960,15 @@ def _execution_policy_conflicts(requested: Dict[str, Any], policy: EffectivePoli
     return unsupported, retry_patch, allowed_values
 
 
+def reasoning_blockers(policy: EffectivePolicy, target_profile: str = "") -> List[str]:
+    if not policy.values["allow_reasoning_override"]:
+        return ["caller policy disables reasoning overrides"]
+    if target_profile == "default":
+        return ["reasoning overrides for the default profile remain unsupported"]
+    blocker = child_reasoning.managed_blocker(discover_managed_scope(os.environ.copy())) or child_reasoning.compatibility_blocker()
+    return [blocker] if blocker else []
+
+
 def validate_preflight(
     requested: Dict[str, Any], policy: EffectivePolicy, *, reasoning_mode: str,
     capability_preset: Any, target_profile: str, child_approval_explicit: bool,
@@ -971,11 +986,8 @@ def validate_preflight(
     fields, patch, allowed_values = _execution_policy_conflicts(requested, policy)
     unsupported.extend(fields)
     retry_patch.update(patch)
-    if reasoning_mode == "override" and (
-        not values["allow_reasoning_override"]
-        or target_profile == "default"
-        or discover_managed_scope(os.environ.copy()) is not None
-    ):
+    blockers = reasoning_blockers(policy, target_profile) if reasoning_mode == "override" else []
+    if blockers:
         unsupported.extend(name for name in ("reasoning_mode", "reasoning_effort") if name not in unsupported)
         retry_patch.update({"reasoning_mode": "inherit", "reasoning_effort": None})
     if ensure_text(capability_preset).strip().lower() == "review" and requested["toolsets"]:
@@ -987,7 +999,7 @@ def validate_preflight(
         retry_patch["child_approval_mode"] = None
     if unsupported:
         raise PreflightError(
-            "requested overrides conflict with effective policy; task approval selection requires caller-side allow_child_approval_override=true (frozen ancestry still applies)",
+            "; ".join(blockers) if blockers else "requested overrides conflict with effective policy; task approval selection requires caller-side allow_child_approval_override=true (frozen ancestry still applies)",
             unsupported, retry_patch, allowed_values=allowed_values,
         )
 
@@ -1279,28 +1291,41 @@ def _resume_record_matches(request, status, target, session_id):
                for sid in recorded_ids)
 
 
-def resume_native_approval(policy: EffectivePolicy, target: ValidatedProfile, session_id: str) -> Dict[str, Any]:
+def matching_resume_records(target, session_id):
+    """One bounded no-follow scan shared by approval and workspace admission."""
+    matches = []
+    for directory in get_runs_root().glob("pd_*"):
+        if directory.is_symlink() or not directory.is_dir():
+            continue
+        request, status = {}, {}
+        failures = []
+        for name, record in (("request", request), ("status", status)):
+            try:
+                record.update(operator_read_json(directory / f"{name}.json"))
+            except ProfileDelegateError:
+                failures.append(name)
+        if failures:
+            # Unreadable foreign artifacts are irrelevant, but an observed link
+            # to this session must not disappear into a generic resume fallback.
+            ids = (request.get("requested_session_id"), status.get("child_session_id"), status.get("session_id"))
+            if session_id in ids:
+                raise ProfileDelegateError("Relevant resume evidence is unreadable; recover preserved artifacts manually", "resume_evidence_error")
+            continue
+        if _resume_record_matches(request, status, target, session_id):
+            matches.append((request, status))
+    return matches
+
+
+def resume_native_approval(policy: EffectivePolicy, target: ValidatedProfile, session_id: str, records=None) -> Dict[str, Any]:
     """Read-only resume lookup: reuse one unambiguous frozen source snapshot."""
     matches = []
-    root = get_runs_root()
-    if root.is_dir():
-        for directory in root.iterdir():
-            if not directory.is_dir() or directory.is_symlink():
-                continue
-            try:
-                request = read_json_file(directory / "request.json")
-                status = read_json_file(directory / "status.json")
-                if _resume_record_matches(request, status, target, session_id):
-                    if "native_approval" in request:
-                        matches.append(native_approval.validate(request["native_approval"]))
-                    else:
-                        raise ValueError("resume has no trustworthy frozen approval envelope; create a new session")
-            except ProfileDelegateError:
-                continue
-            except ValueError as exc:
-                # A matching frozen envelope must fail closed, never disappear
-                # into the unknown-session fallback or get recomputed.
-                raise ProfileDelegateError(str(exc), "approval_policy_error") from exc
+    for request, status in matching_resume_records(target, session_id) if records is None else records:
+        try:
+            if "native_approval" not in request:
+                raise ValueError("resume has no trustworthy frozen approval envelope; create a new session")
+            matches.append(native_approval.validate(request["native_approval"]))
+        except ValueError as exc:
+            raise ProfileDelegateError(str(exc), "approval_policy_error") from exc
     if matches:
         if any(value != matches[0] for value in matches):
             raise ProfileDelegateError("resume approval snapshots conflict; create a new session", "approval_policy_error")
@@ -1343,9 +1368,9 @@ def resolve_native_approval(policy: EffectivePolicy, target: ValidatedProfile) -
         raise ProfileDelegateError(f"native approval snapshot refused: {exc}", "approval_policy_error") from exc
 
 
-def resolve_request_approval(policy, target, mode, resume_id, requested=None):
+def resolve_request_approval(policy, target, mode, resume_id, requested=None, records=None):
     if mode == "resume":
-        frozen = resume_native_approval(policy, target, resume_id)
+        frozen = resume_native_approval(policy, target, resume_id, records)
         if requested is not None and requested != frozen["effective"]:
             raise ProfileDelegateError("resume cannot change frozen child_approval_mode; create a new session", "approval_policy_error")
         return frozen
@@ -1465,24 +1490,6 @@ class FingerprintLock:
         self.handle.close()
 
 
-def prepare_reasoning_config(run_dir: Path, reasoning_effort: str) -> Path:
-    """Create config-only managed input when no administrator scope exists."""
-    managed_dir = run_dir / "reasoning_config"
-    if managed_dir.is_symlink():
-        raise ProfileDelegateError("reasoning overlay path must not be a symlink", "reasoning_overlay_error")
-    try:
-        managed_dir.mkdir(mode=0o700)
-        chmod_best_effort(managed_dir, 0o700)
-        config_path = managed_dir / "config.yaml"
-        import yaml
-
-        config_path.write_text(yaml.safe_dump({"agent": {"reasoning_effort": reasoning_effort}}, sort_keys=False), encoding="utf-8")
-        chmod_best_effort(config_path, 0o600)
-    except ProfileDelegateError:
-        raise
-    except Exception as exc:
-        raise ProfileDelegateError(f"failed to write reasoning overlay: {exc}", "reasoning_overlay_error") from exc
-    return managed_dir
 
 
 if __package__:
@@ -1543,6 +1550,34 @@ def _foreground_cancel_command(run_dir: Optional[Path]) -> Optional[Tuple[Path, 
     return None
 
 
+class _PipeCapture:
+    """Own per-stream decoding, bounded files/counters and diagnostic tails."""
+
+    def __init__(self, stdout_path, stderr_path, stdout_limit, stderr_limit):
+        self.paths = {"stdout": stdout_path, "stderr": stderr_path}
+        self.limits = {"stdout": stdout_limit, "stderr": stderr_limit}
+        self.written = dict.fromkeys(self.paths, 0)
+        self.truncated = dict.fromkeys(self.paths, False)
+        self.tails = dict.fromkeys(self.paths, "")
+        self.decoders = {name: codecs.getincrementaldecoder("utf-8")("replace") for name in self.paths}
+        self.finished = set()
+
+    def feed(self, name, data, *, final=False):
+        if name in self.finished:
+            return
+        text = self.decoders[name].decode(data, final=final)
+        self.tails[name] = (self.tails[name] + text)[-DIAGNOSTIC_TAIL_CHARS:]
+        count, truncated = append_capped(self.paths[name], text, self.written[name], self.limits[name])
+        self.written[name] = count
+        self.truncated[name] = self.truncated[name] or truncated
+        if final:
+            self.finished.add(name)
+
+    def finish(self):
+        for name in self.paths:
+            self.feed(name, b"", final=True)
+
+
 def run_capped_subprocess(
     cmd: List[str], cwd: Path, env: Dict[str, str], timeout: int,
     stdout_path: Path, stderr_path: Path, *, run_dir: Optional[Path] = None,
@@ -1557,12 +1592,10 @@ def run_capped_subprocess(
     stdout_limit, stderr_limit = output_limits()
     text_safe_write(stdout_path, "")
     text_safe_write(stderr_path, "")
-    stdout_written = stderr_written = 0
-    stdout_truncated = stderr_truncated = False
+    capture = _PipeCapture(stdout_path, stderr_path, stdout_limit, stderr_limit)
     timed_out = cancelled = interrupted = False
     stop_reason = "exited"
     exit_code: Optional[int] = None
-    diagnostic_tails = {"stdout": "", "stderr": ""}
     touch = activity_touch if activity_touch is not None else _runtime_activity_touch()
     interrupted_now = interrupt_check if interrupt_check is not None else _runtime_interrupt_check()
     started = time.monotonic()
@@ -1632,24 +1665,17 @@ def run_capped_subprocess(
                 for key, _mask in events:
                     stream = key.fileobj
                     chunk_bytes = os.read(stream.fileno(), 8192)
+                    capture.feed(key.data, chunk_bytes, final=not chunk_bytes)
                     if not chunk_bytes:
                         try:
                             sel.unregister(stream)
                         except Exception:
                             pass
-                        continue
-                    chunk = chunk_bytes.decode("utf-8", "replace")
-                    diagnostic_tails[key.data] = (diagnostic_tails[key.data] + chunk)[-DIAGNOSTIC_TAIL_CHARS:]
-                    if key.data == "stdout":
-                        stdout_written, truncated = append_capped(stdout_path, chunk, stdout_written, stdout_limit)
-                        stdout_truncated = stdout_truncated or truncated
-                    else:
-                        stderr_written, truncated = append_capped(stderr_path, chunk, stderr_written, stderr_limit)
-                        stderr_truncated = stderr_truncated or truncated
         except BaseException:
             _terminate_owned_process_group(proc, termination_grace)
             raise
         finally:
+            capture.finish()
             sel.close()
 
         if stop_reason != "exited":
@@ -1676,11 +1702,11 @@ def run_capped_subprocess(
         "interrupted": interrupted, "stop_reason": stop_reason,
         "worker_pid": proc.pid, "process_identity": identity,
         "termination_escalated": termination_escalated,
-        "stdout_truncated": stdout_truncated, "stderr_truncated": stderr_truncated,
-        "stdout_chars": stdout_written, "stderr_chars": stderr_written,
+        "stdout_truncated": capture.truncated["stdout"], "stderr_truncated": capture.truncated["stderr"],
+        "stdout_chars": capture.written["stdout"], "stderr_chars": capture.written["stderr"],
         "stdout_limit": stdout_limit, "stderr_limit": stderr_limit,
-        "stdout_diagnostic_tail": diagnostic_tails["stdout"],
-        "stderr_diagnostic_tail": diagnostic_tails["stderr"],
+        "stdout_diagnostic_tail": capture.tails["stdout"],
+        "stderr_diagnostic_tail": capture.tails["stderr"],
     }
 
 def resolve_output_mode(output_mode: Any = "auto", output_contract: str = "") -> Tuple[str, str]:
@@ -1992,6 +2018,8 @@ def child_environment(
     passthrough = {
         "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE",
         "TERM", "TMPDIR", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR",
+        # Preserve the operator's administrator/browser scope, never replace it for reasoning.
+        "HERMES_MANAGED_DIR", "SPARTAN_BROWSER_POLICY_ENABLED", "SPARTAN_HERMES_RUN_GID",
         "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PYTHONPATH", "VIRTUAL_ENV",
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
         "http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -2046,13 +2074,7 @@ def prepare_child_environment(request: Dict[str, Any], run_dir: Path, *, tui: bo
             env["HERMES_TUI_MAX_TURNS"] = env["HERMES_MAX_ITERATIONS"] = str(execution["max_turns"])
     effort = execution.get("reasoning_effort")
     if effort:
-        # Check administrator authority before the child whitelist scrubs caller
-        # overlays; /etc/hermes must not mask an inherited managed-scope conflict.
-        existing = discover_managed_scope(os.environ.copy())
-        if existing is not None:
-            raise ProfileDelegateError(f"reasoning_effort cannot replace existing Hermes managed scope: {existing}",
-                                       "reasoning_managed_scope_conflict")
-        env["HERMES_MANAGED_DIR"] = str(prepare_reasoning_config(run_dir, ensure_text(effort)))
+        child_reasoning.require_available(discover_managed_scope(os.environ.copy()))
     return env
 
 
@@ -2311,11 +2333,12 @@ def finish_run(run_dir: Path, request: Dict[str, Any], result: Dict[str, Any],
     selection = {key: request.get(key) or {} for key in
                  ("requested_execution", "effective_execution", "effective_capabilities", "approval_policy")}
     history = recovery_history or []
-    result.update(**selection, recovery_history=history)
+    result.update(**selection, recovery_history=history, **worktrees.projection(request))
     result, published = publish_terminal_run(run_dir, result, updates)
     lifecycle = published["status"]
     return {
         "success": wrapper_success(lifecycle, result), "mode": mode,
+        **worktrees.projection(request),
         "task_id": request.get("task_id", run_dir.name), "profile": request.get("profile"),
         "status": lifecycle, "error_code": published.get("error_code"),
         "session_title": request.get("session_title") or "", "session_mode": request.get("session_mode") or "new",
@@ -2370,6 +2393,11 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
                 ))
             stdout_path = run_dir / ("stdout.txt" if attempt == 1 else f"attempt_{attempt}_stdout.txt")
             stderr_path = run_dir / ("stderr.txt" if attempt == 1 else f"attempt_{attempt}_stderr.txt")
+            try:
+                worktrees.before_continue(request, stable_session_id)
+            except ProfileDelegateError as exc:
+                integrity_error = exc.code
+                break
             cmd = build_child_command(request, run_dir, prompt_path=prompt_path, resume_session_id=stable_session_id if attempt > 1 else None)
             started = time.monotonic()
             run_meta = run_capped_subprocess(
@@ -2384,32 +2412,9 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
             # every retained prefix; artifact truncation still disables it.
             stdout_attempt = tail_text(stdout_path, 0)
             stderr_attempt = tail_text(stderr_path, 0)
-            stdout_footer = extract_session_id_footer(stdout_attempt)
-            stderr_footer = extract_session_id_footer(stderr_attempt)
-            footer_id = stdout_footer or stderr_footer
-            if stdout_footer is None or stderr_footer is None:
-                integrity_error = "resume_session_mismatch"
-            elif footer_id:
-                if (not valid_session_identity(footer_id)
-                        or (stdout_footer and stderr_footer and stdout_footer != stderr_footer)
-                        or (stable_session_id and footer_id != stable_session_id
-                            and not compression_continuation(Path(request["profile_home"]),
-                                                            stable_session_id, footer_id,
-                                                            profile=profile, cli_footer=True))):
-                    integrity_error = "resume_session_mismatch"
-                else:
-                    stable_session_id = observed_session_id = footer_id
-            parsed_attempt = extract_json_object(strip_session_id_footer(stdout_attempt))
-            transient = None if integrity_error else classify_transient_failure(
-                exit_code=exit_code, timed_out=timed_out,
-                stdout=run_meta.get("stdout_diagnostic_tail", stdout_attempt),
-                stderr=run_meta.get("stderr_diagnostic_tail", stderr_attempt),
-                parsed_result=parsed_attempt,
-                stdout_truncated=bool(run_meta.get("stdout_truncated")),
-                stderr_truncated=bool(run_meta.get("stderr_truncated")),
-                interrupted=stop_reason in {"cancelled", "interrupted"},
-                native_stdout=stdout_attempt, native_stderr=stderr_attempt,
-            )
+            stable_session_id, observed, integrity_error, transient = execution.observe_attempt(
+                request, stable_session_id, stdout_attempt, stderr_attempt, run_meta, integrity_error)
+            observed_session_id = observed or observed_session_id
             history.append({"attempt": attempt, "exit_code": exit_code, "timed_out": timed_out, "transient_reason": transient, "session_id": stable_session_id, "duration_seconds": round(time.monotonic() - started, 3), "stdout": str(stdout_path), "stderr": str(stderr_path)})
             if stop_reason in {"cancelled", "interrupted", "timed_out"} or integrity_error or not transient or attempt_index >= max_resumes:
                 break
@@ -2448,7 +2453,7 @@ def _execute_delegate_run(run_dir: Path) -> Dict[str, Any]:
         result = failure_result(f'Delegated profile timed out after {timeout} seconds.', error_code, execution_status=final_status, errors=['timeout'])
     elif integrity_error:
         error_code, final_status = integrity_error, "failed"
-        result = failure_result(f'Automatic recovery stopped safely: {integrity_error}.', error_code, execution_status=final_status, errors=[integrity_error])
+        result = failure_result(f'Automatic recovery stopped safely: {integrity_error}.', error_code, execution_status=final_status, errors=[integrity_error], next_steps=worktrees.failure_next_steps(error_code))
     elif approval_timeout_marker:
         error_code, final_status = "approval_timeout", "failed"
         result = failure_result('Delegated child reached an approval timeout.', error_code, execution_status=final_status, errors=['approval_timeout_marker'], artifacts=[str(run_dir / 'approval_events.jsonl')])
@@ -2491,8 +2496,8 @@ _async_running = 0
 def _mark_background_worker_failure(run_dir: Path, exc: Exception) -> Dict[str, Any]:
     code = getattr(exc, "code", "background_worker_error")
     result = failure_result(f'Profile Delegate background worker failed: {type(exc).__name__}: {exc}', code, execution_status='failed', errors=[f'{type(exc).__name__}: {exc}'])
-    result, published = publish_terminal_run(run_dir, result, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": code})
-    return {"success": wrapper_success(published["status"], result), "mode": "async", "task_id": run_dir.name, "status": published["status"], "error_code": published.get("error_code"), "result": result, "paths": base_paths(run_dir)}
+    request = operator_read_json(run_dir / "status.json")
+    return finish_run(run_dir, request, result, {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": code}, mode="async")
 
 
 def _background_mode() -> str:
@@ -2672,17 +2677,23 @@ def _raise_background_launch_failure(run_dir, task_id, origin, exc):
     known = isinstance(exc, ProfileDelegateError)
     code = exc.code if known else "background_start_failed"
     summary = str(exc) if known else f"Failed to start background profile_delegate run: {type(exc).__name__}: {exc}"
-    next_steps = ["Wait for another background profile_delegate run to finish or raise max_async."] if known else []
+    next_steps = worktrees.failure_next_steps(code)
     details = {**getattr(exc, "details", {}), "task_id": task_id,
                "paths": base_paths(run_dir), "run_created": True,
                "watch_command": spectator_watch_command(task_id, origin)}
     try:
+        saved = read_json_file(run_dir / "request.json")
+        if saved.get("workspace"):
+            details.setdefault("workspace", saved["workspace"])
+    except ProfileDelegateError:
+        pass
+    try:
         result, published = publish_terminal_run(
             run_dir, failure_result(summary, code, next_steps=next_steps),
-            {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": code})
-        _persist_profile_delegate_completion(run_dir, {"status": published["status"], "result": result, "error_code": published.get("error_code")})
+            {"status": "failed", "phase": "failed", "ended_at": now_iso(), "error_code": code, **worktrees.projection(details)})
+        _persist_profile_delegate_completion(run_dir, {"status": published["status"], "result": result, "error_code": published.get("error_code"), **worktrees.projection(details)})
     except Exception as publication_error:
-        details["publication_error"] = str(publication_error)
+        details.setdefault("publication_error", str(publication_error))
     raise ProfileDelegateError(summary, code, **details) from exc
 
 
@@ -2713,105 +2724,21 @@ def delegate_profile(
     duplicate_policy: Any = "reuse",
     transport_mode: Any = "auto",
     preflight: bool = False,
+    worktree: bool = False,
+    base_ref: Any = None,
+    branch: Any = None,
 ) -> Dict[str, Any]:
-    requested_transport = ensure_text(transport_mode or "auto").strip().lower()
-    if not isinstance(preflight, bool):
-        raise ProfileDelegateError("preflight must be a boolean", "validation_error")
-    if requested_transport not in {"auto", "interactive", "simple"}:
-        raise ProfileDelegateError("transport_mode must be auto, interactive, or simple", "validation_error")
-    if requested_transport == "interactive" and (not background or _background_mode() != "detached"):
-        raise ProfileDelegateError("interactive transport requires detached background=true", "validation_error")
-    if requested_transport == "auto" and background and _background_mode() != "detached":
-        raise ProfileDelegateError("auto background requires detached interactive worker; choose simple explicitly", "transport_unavailable")
-    # Basic malformed inputs fail without loading Hermes config or plugin state.
-    task_text = bounded_text("task", task, MAX_TASK_CHARS).strip()
-    if not task_text:
-        raise ProfileDelegateError("task must be non-empty", "validation_error")
-    title_text = normalize_session_title(session_title)
-    mode = coerce_session_mode(session_mode)
-    resume_id = validate_session_id(session_id, required=(mode == "resume"))
-    if mode == "new" and resume_id:
-        raise ProfileDelegateError("session_mode=new forbids session_id; use resume or omit session_id", "validation_error")
-    policy = load_effective_policy()
-    depth, max_depth = enforce_depth_policy(policy)
-    validated = validate_profile(profile, policy)
-    parent_task_id = ensure_text(os.getenv("PROFILE_DELEGATE_PARENT_TASK_ID", ""))[:MAX_SESSION_ID_CHARS]
-    if parent_task_id and Path(validated.home).resolve() == get_hermes_home_path().resolve():
-        raise ProfileDelegateError("recursive same-home delegation would contend with its ancestor", "same_profile_delegation_not_supported")
-    context_text = bounded_text("context", context, MAX_CONTEXT_CHARS)
-    contract_text = bounded_text("output_contract", output_contract, MAX_OUTPUT_CONTRACT_CHARS)
-    requested_output_mode, resolved_output_mode = resolve_output_mode(output_mode, contract_text)
-    child_approval_explicit = child_approval_mode is not None
-    if child_approval_explicit:
-        try:
-            child_approval_mode = native_approval.selector(child_approval_mode)
-        except ValueError as exc:
-            raise ProfileDelegateError(str(exc), "validation_error") from exc
-    reasoning_mode_value, normalized_reasoning = normalize_reasoning_request(reasoning_mode, reasoning_effort)
-    timeout = coerce_timeout(timeout_seconds, policy)
-    requested_execution = normalize_requested_execution(
-        model=model, provider=provider, reasoning_effort=normalized_reasoning,
-        max_turns=max_turns, toolsets=toolsets, skills=skills,
-        policy=policy, validate_policy=False,
-    )
-    validate_preflight(
-        requested_execution, policy, reasoning_mode=reasoning_mode_value,
-        capability_preset=capability_preset, target_profile=validated.canonical,
-        child_approval_explicit=child_approval_explicit and child_approval_mode != "deny",
-    )
-    native_envelope = resolve_request_approval(policy, validated, mode, resume_id, child_approval_mode)
-    resolved_child_approval_mode = native_envelope["effective"]
-    effective_execution, effective_capabilities = resolve_capability_preset(
-        capability_preset, requested_execution
-    )
-    cwd = resolve_workdir(workdir, policy)
-    hermes_bin = resolve_hermes_bin()
-    normalized_origin = normalize_origin(origin, origin_session_key)
-    normalized_origin_session_key = normalized_origin["session_key"]
-    if bool(background) and bool(notify_on_complete) and not preflight:
-        require_native_async_ledger_compatibility()
-    duplicate_mode = ensure_text(duplicate_policy or "reuse").strip().lower()
-    if duplicate_mode not in {"reuse", "new"}:
-        raise ProfileDelegateError("duplicate_policy must be reuse or new", "validation_error")
-    if preflight:
-        selected = "interactive" if background and requested_transport != "simple" else "simple"
-        return {
-            "success": True, "preflight": True, "run_created": False,
-            "normalized_request": {
-                "profile": validated.canonical, "session_title": title_text,
-                "session_mode": mode, "session_id": resume_id,
-                "timeout_seconds": timeout, "workdir": str(cwd),
-                "background": bool(background), "notify_on_complete": bool(notify_on_complete),
-                "output_mode": resolved_output_mode, "duplicate_policy": duplicate_mode,
-                "transport_mode": requested_transport, "selected_transport": selected,
-                "capability_preset": effective_capabilities["preset"],
-            },
-            "requested_execution": requested_execution,
-            "preflight_execution": effective_execution,
-            "runtime_observed_execution": "unknown",
-            "preflight_capabilities": effective_capabilities,
-            "runtime_observed_capabilities": "unknown",
-            "approval_policy": native_envelope,
-            "retry_shape": None,
-        }
-    fingerprint_payload = {
-        "origin": next((normalized_origin[key] for key in ("ui_session_id", "session_id", "session_key") if normalized_origin[key]), ""),
-        "profile": validated.canonical, "session_mode": mode, "session_id": resume_id,
-        "session_title": title_text, "task_sha256": hashlib.sha256(task_text.encode()).hexdigest(),
-        "context_sha256": hashlib.sha256(context_text.encode()).hexdigest(),
-        "contract_sha256": hashlib.sha256(contract_text.encode()).hexdigest(),
-        "requested_output_mode": requested_output_mode,
-        "resolved_output_mode": resolved_output_mode,
-        "workdir": str(cwd), "timeout_seconds": timeout, "background": bool(background),
-        "notify_on_complete": bool(notify_on_complete), "requested_execution": requested_execution,
-        "capability_preset": effective_capabilities["preset"],
-        "transport_mode": requested_transport,
-        "child_approval_mode": resolved_child_approval_mode,
-        "native_approval": native_envelope,
-    }
+    return _dispatch_admitted(locals())
+
+
+def _dispatch_admitted(raw):
+    request, policy, text, workspace_options, duplicate_mode = admission.admit(raw)
+    normalized_origin = request["origin"]
+    if raw["preflight"]:
+        return admission.preflight_result(request, duplicate_mode)
+    fingerprint_payload = admission.fingerprint_payload(request, text, workspace_options)
     fingerprint = request_fingerprint(fingerprint_payload)
     guard_enabled = bool(policy.values["duplicate_guard_enabled"] and fingerprint_payload["origin"] and duplicate_mode == "reuse")
-
     admission_identity = normalized_origin["ui_session_id"] or normalized_origin["session_key"] or fingerprint_payload["origin"]
     admission_key = request_fingerprint({"caller_home": str(get_hermes_home_path()),
                                          "conversation": admission_identity})
@@ -2826,92 +2753,85 @@ def delegate_profile(
                 existing_id = ensure_text(existing.get("task_id"))
                 return {
                     "success": True, "status": "running", "mode": "async" if existing.get("background") else "sync",
-                    "task_id": existing_id, "profile": validated.canonical, "deduplicated": True,
+                    "task_id": existing_id, "profile": request["profile"], "deduplicated": True,
                     "watch_command": spectator_watch_command(existing_id, normalize_persisted_origin(existing)),
                     "run_created": False, "paths": base_paths(get_runs_root() / existing_id),
+                    **worktrees.projection(existing),
                 }
         task_id = make_task_id()
         run_dir = get_runs_root() / task_id
         run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
-        try:
-            chmod_best_effort(run_dir, 0o700)
-            prompt = build_prompt(task_text, context_text, contract_text, requested_output_mode)
-            request = {
-                "artifact_schema_version": ARTIFACT_SCHEMA_VERSION, "policy_schema_version": POLICY_SCHEMA_VERSION,
-                "task_id": task_id, "profile": validated.canonical, "requested_profile": validated.requested,
-                "profile_home": validated.home, "created_at": now_iso(), "dispatched_at_epoch": time.time(),
-                "timeout_seconds": timeout, "workdir": str(cwd), "task_chars": len(task_text),
-                "context_chars": len(context_text), "output_contract_chars": len(contract_text),
-                "requested_output_mode": requested_output_mode, "resolved_output_mode": resolved_output_mode,
-                "require_terminal_verdict": resolved_output_mode in {"markdown", "text"},
-                "session_title": title_text, "session_mode": mode, "requested_session_id": resume_id,
-                "runs_root": str(get_runs_root()), "hermes_bin": hermes_bin, "delegate_depth": depth,
-                "parent_task_id": parent_task_id,
-                "root_task_id": ensure_text(os.getenv("PROFILE_DELEGATE_ROOT_TASK_ID", ""))[:MAX_SESSION_ID_CHARS] or parent_task_id or task_id,
-                "caller_home": str(get_hermes_home_path().resolve()),
-                "target_home": str(Path(validated.home).resolve()),
-                "delegate_max_depth": max_depth, "child_approval_mode": resolved_child_approval_mode,
-                "native_approval": native_envelope,
-                "approval_policy": native_envelope,
-                "capability_preset": effective_capabilities["preset"], "effective_capabilities": effective_capabilities,
-                "requested_execution": requested_execution, "effective_execution": effective_execution,
-                "reasoning_mode": reasoning_mode_value, "background": bool(background),
-                "persist_message_text": ensure_text(os.getenv("PROFILE_DELEGATE_PERSIST_MESSAGE_TEXT", "")).strip().lower() in TRUTHY,
-                "notify_on_complete": bool(notify_on_complete), "origin": normalized_origin,
-                "origin_session_key": normalized_origin_session_key, "request_fingerprint": fingerprint,
-                "owner_pid": os.getpid(), "effective_policy": profile_delegate_policy(policy),
-                "requested_transport": requested_transport,
-                "selected_transport": None if background and _background_mode() == "detached" else "simple",
-                "transport_selection_state": "selection_pending" if background and _background_mode() == "detached" else "selected",
-                "transport": (
-                    "tui_stdio" if background and requested_transport != "simple"
-                    and _background_mode() == "detached" else "cli"
-                ),
-            }
-            status = {**request, "status": "running", "started_at": now_iso(), "ended_at": None,
-                      "phase": "starting", "exit_code": None, "error_code": None, "concurrency_slot": None,
-                      "actual_transport": None,
-                      "worker_pid": None, "worker_alive": None, "process_identity": None,
-                      "latest_activity": None, "terminal_reason": None,
-                      "cancellation_requested": False, "interrupted": False,
-                      "notified_at": None, "notification_status": None}
-            json_safe_write(run_dir / "request.json", {**request, "task": task_text, "context": context_text, "output_contract": contract_text})
-            text_safe_write(run_dir / "prompt.txt", prompt)
-            json_safe_write(run_dir / "status.json", status)
-            text_safe_write(run_dir / "stdout.txt", "")
-            text_safe_write(run_dir / "stderr.txt", "")
-
-            if background:
-                try:
-                    _start_background_run(run_dir)
-                except Exception as exc:
-                    _raise_background_launch_failure(run_dir, task_id, normalized_origin, exc)
-                return {
-                    "success": True, "mode": "async", "task_id": task_id, "profile": validated.canonical,
-                    "watch_command": spectator_watch_command(task_id, normalized_origin),
-                    "status": "running", "error_code": None, "session_title": title_text,
-                    "session_mode": mode, "requested_session_id": resume_id,
-                    "child_approval_mode": resolved_child_approval_mode, "requested_execution": requested_execution,
-                    "effective_execution": effective_execution, "effective_capabilities": effective_capabilities,
-                    "approval_policy": request["approval_policy"], "notify_on_complete": bool(notify_on_complete),
-                    "origin_session_key_present": bool(normalized_origin_session_key), "run_created": True,
-                    "deduplicated": False, "paths": base_paths(run_dir),
-                    "requested_transport": requested_transport,
-                    "selected_transport": None if request["transport_selection_state"] == "selection_pending" else request["selected_transport"],
-                    "actual_transport": None,
-                    "transport_selection_state": request["transport_selection_state"],
-                    "steerability": "selection_pending" if request["transport_selection_state"] == "selection_pending" else (
-                        "unavailable" if request["transport"] == "cli" else "available"
-                    ),
-                }
-        except Exception as exc:
-            if getattr(exc, "details", {}).get("run_created"):
-                raise
-            _raise_background_launch_failure(run_dir, task_id, normalized_origin, exc)
-
-    final = _execute_delegate_run(run_dir)
+        launched = _launch_admitted(run_dir, request, policy, text, workspace_options, fingerprint)
+    if launched is not None:
+        return launched
+    try:
+        final = _execute_delegate_run(run_dir)
+    except Exception as exc:
+        _raise_background_launch_failure(run_dir, task_id, normalized_origin, exc)
     final["notify_on_complete"] = False
     return final
+
+
+def _launch_admitted(run_dir, request, policy, text, workspace_options, fingerprint):
+    task_id = run_dir.name
+    task_text, context_text, contract_text = text
+    background, notify_on_complete = request["background"], request["notify_on_complete"]
+    normalized_origin = request["origin"]
+    try:
+        chmod_best_effort(run_dir, 0o700)
+        prompt = build_prompt(task_text, context_text, contract_text, request["requested_output_mode"])
+        request.update(artifact_schema_version=ARTIFACT_SCHEMA_VERSION, policy_schema_version=POLICY_SCHEMA_VERSION,
+                       task_id=task_id, created_at=now_iso(), dispatched_at_epoch=time.time(),
+                       task_chars=len(task_text), context_chars=len(context_text), output_contract_chars=len(contract_text),
+                       require_terminal_verdict=request["resolved_output_mode"] in {"markdown", "text"},
+                       runs_root=str(get_runs_root()), root_task_id=ensure_text(os.getenv("PROFILE_DELEGATE_ROOT_TASK_ID", ""))[:MAX_SESSION_ID_CHARS] or request["parent_task_id"] or task_id,
+                       persist_message_text=ensure_text(os.getenv("PROFILE_DELEGATE_PERSIST_MESSAGE_TEXT", "")).strip().lower() in TRUTHY,
+                       request_fingerprint=fingerprint, owner_pid=os.getpid(), effective_policy=profile_delegate_policy(policy))
+        execution.select_transport(request, _background_mode() == "detached")
+        if workspace_options:
+            worktrees.prepare(request, run_dir, policy)
+        status = {**request, "status": "running", "started_at": now_iso(), "ended_at": None,
+                  "phase": "starting", "exit_code": None, "error_code": None, "concurrency_slot": None,
+                  "actual_transport": None,
+                  "worker_pid": None, "worker_alive": None, "process_identity": None,
+                  "latest_activity": None, "terminal_reason": None,
+                  "cancellation_requested": False, "interrupted": False,
+                  "notified_at": None, "notification_status": None}
+        json_safe_write(run_dir / "request.json", {**request, "task": task_text, "context": context_text, "output_contract": contract_text})
+        text_safe_write(run_dir / "prompt.txt", prompt)
+        json_safe_write(run_dir / "status.json", status)
+        text_safe_write(run_dir / "stdout.txt", "")
+        text_safe_write(run_dir / "stderr.txt", "")
+
+        if background:
+            try:
+                _start_background_run(run_dir)
+            except Exception as exc:
+                _raise_background_launch_failure(run_dir, task_id, normalized_origin, exc)
+            return {
+                "success": True, "mode": "async", "task_id": task_id, "profile": request["profile"],
+                "watch_command": spectator_watch_command(task_id, normalized_origin),
+                "status": "running", "error_code": None, "session_title": request["session_title"],
+                "session_mode": request["session_mode"], "requested_session_id": request["requested_session_id"],
+                "child_approval_mode": request["child_approval_mode"], "requested_execution": request["requested_execution"],
+                "effective_execution": request["effective_execution"], "effective_capabilities": request["effective_capabilities"],
+                "approval_policy": request["approval_policy"], "notify_on_complete": bool(notify_on_complete),
+                "origin_session_key_present": bool(request["origin_session_key"]), "run_created": True,
+                "deduplicated": False, "paths": base_paths(run_dir),
+                **worktrees.projection(request),
+                "requested_transport": request["requested_transport"],
+                "selected_transport": None if request["transport_selection_state"] == "selection_pending" else request["selected_transport"],
+                "actual_transport": None,
+                "transport_selection_state": request["transport_selection_state"],
+                "steerability": "selection_pending" if request["transport_selection_state"] == "selection_pending" else (
+                    "unavailable" if request["transport"] == "cli" else "available"
+                ),
+            }
+    except Exception as exc:
+        if getattr(exc, "details", {}).get("run_created"):
+            raise
+        _raise_background_launch_failure(run_dir, task_id, normalized_origin, exc)
+    return None
 
 def resolve_run_dir(task_id: str) -> Path:
     if not isinstance(task_id, str) or not task_id.strip():
@@ -3150,15 +3070,16 @@ def _operator_reconcile(task_id: str) -> Dict[str, Any]:
     return response
 
 
-def _safe_event_metadata(status: Dict[str, Any]) -> Dict[str, Any]:
-    """Project only bounded spectator counters/health from a status snapshot."""
+def _status_metadata(status: Dict[str, Any]) -> Dict[str, Any]:
+    """Project optional workspace facts and bounded spectator counters together."""
     mapping = {
         "event_schema_version": "schema_version", "event_seq": "seq",
         "event_stream_truncated": "truncated", "observability_degraded": "degraded",
         "observability_error": "degradation_reason", "turn_count": "turn_count",
         "api_calls": "api_calls", "tool_calls": "tool_calls", "usage": "usage",
     }
-    return {public: status[source] for source, public in mapping.items() if source in status}
+    return {**worktrees.projection(status), "event_metadata": {
+        public: status[source] for source, public in mapping.items() if source in status}}
 
 
 def _read_run_status(
@@ -3232,7 +3153,7 @@ def _read_run_status(
         "steerability": status.get("steerability", "unknown"),
         "cancellation_requested": bool(status.get("cancellation_requested", False)),
         "interrupted": bool(status.get("interrupted", False)),
-        "event_metadata": _safe_event_metadata(status),
+        **_status_metadata(status),
         "notification_status": notification_status,
         "notification_delivery_attempts": (
             durable_notification.get("delivery_attempts") if durable_notification else None

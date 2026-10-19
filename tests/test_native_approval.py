@@ -79,7 +79,7 @@ def test_normalized_deny_resume_keeps_fingerprint(tmp_path, monkeypatch):
 
     target = core.ValidatedProfile("worker", "worker", "target")
     frozen = policy.snapshot("deny", "task", "caller", target.home, {}, {"command_allowlist": ["rm -rf*"]})
-    run = tmp_path / "runs" / "new-run"
+    run = tmp_path / "runs" / "pd_new-run"
     run.mkdir(parents=True)
     (run / "request.json").write_text(json.dumps({"profile_home": target.home, "native_approval": frozen}))
     (run / "status.json").write_text(json.dumps({"child_session_id": "stored-session"}))

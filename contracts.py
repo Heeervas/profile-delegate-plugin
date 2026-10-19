@@ -130,6 +130,13 @@ def parse_json_result(text: str) -> Tuple[Optional[Any], Dict[str, Any]]:
         if len(candidates) > 1:
             return None, _parse_metadata('ambiguous', len(candidates), error='ambiguous_json_candidates')
         return None, {**empty, "candidate_count": len(candidates)}
+    return _select_recognized_candidate(scored)
+
+def _select_recognized_candidate(scored):
+    verdicts = {ensure_text(candidate[0].get("status")).strip().lower()
+                for candidate, _score in scored}
+    if len(verdicts) > 1:
+        return None, _parse_metadata('ambiguous', len(scored), error='ambiguous_json_candidates')
     best_score = max(score for _candidate, score in scored)
     best = [candidate for candidate, score in scored if score == best_score]
     if len(best) != 1:

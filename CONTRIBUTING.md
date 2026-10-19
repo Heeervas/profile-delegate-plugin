@@ -8,7 +8,7 @@ Runtime modules intentionally stay at root for Hermes plugin discovery. Tests an
 
 ## Validate a focused change
 
-Use the exact commands in [.agents/validation.md](.agents/validation.md). Portable tests use the frozen plugin lock on Python 3.11–3.13. Native tests require the selected Hermes runtime's own Python 3.14 interpreter and real dependency closure; missing prerequisites fail rather than skip. Both partitions are required before merge. Do not install the plugin environment into the native runtime or mix another ABI's site-packages.
+Use the exact commands in [.agents/validation.md](.agents/validation.md). Portable tests use the frozen plugin lock on Python 3.11–3.14. Native tests require the selected Hermes runtime's own Python 3.14 interpreter and real dependency closure; missing prerequisites fail rather than skip. Both partitions are required before merge. Do not install the plugin environment into the native runtime or mix another ABI's site-packages.
 
 For a bug, supply a sanitized minimal reproduction and regression that fails before the fix. Preserve distinct safety/lifecycle scenarios; no case-count or line-count quota. Keep changes plugin-only and avoid unrelated refactors. Changes to plugin schemas/wrappers additionally require fresh installed discovery, not merely the FakeContext registration smoke.
 

@@ -13,3 +13,6 @@ __pycache__/
 .artifacts/
 
 # Project operating contracts under `.agents/` and `.hermes/` are tracked.
+
+# Local private handoffs and temporary notes.
+.trash/

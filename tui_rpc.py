@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import codecs
 import json
 import re
 import os
@@ -48,6 +49,7 @@ class TuiRpcClient:
         self._stderr_tail = ""
         self._stdout_buffer = bytearray()
         self._stderr_eof = False
+        self._stderr_decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.last_event_type = "none"
         self._frame_context = "idle"
         # Single-owner client: a locally timed-out RPC may still answer later.
@@ -59,6 +61,12 @@ class TuiRpcClient:
     def stderr_tail(self) -> str:
         self._drain_stderr()
         return self._stderr_tail
+
+    def _finish_stderr(self) -> None:
+        if not self._stderr_eof:
+            text = self._stderr_decoder.decode(b"", final=True)
+            self._stderr_tail = (self._stderr_tail + text)[-self.max_diagnostic_chars:] if self.max_diagnostic_chars else ""
+            self._stderr_eof = True
 
     def _drain_stderr(self) -> None:
         """Bound each poll so a continuous diagnostic producer cannot starve RPC."""
@@ -74,13 +82,14 @@ class TuiRpcClient:
                     if not select.select([fd], [], [], 0)[0]:
                         break
                     chunk = os.read(fd, 8192)
+                text = self._stderr_decoder.decode(chunk, final=not chunk)
                 if not chunk:
                     self._stderr_eof = True
+                    self._stderr_tail = (self._stderr_tail + text)[-self.max_diagnostic_chars:] if self.max_diagnostic_chars else ""
                     break
-                text = chunk.decode("utf-8", "replace")
                 self._stderr_tail = (self._stderr_tail + text)[-self.max_diagnostic_chars:] if self.max_diagnostic_chars > 0 else ""
         except (OSError, ValueError):
-            self._stderr_eof = True
+            self._finish_stderr()
 
     def _readline(self, timeout: float) -> bytes:
         stream = self.process.stdout
@@ -132,14 +141,38 @@ class TuiRpcClient:
         )
 
     def _write(self, frame: dict[str, Any]) -> None:
-        if self._closed or self.process.stdin is None:
+        """Dispatch within call's absolute deadline; partial frames poison stdin."""
+        if self._closed or self.process.stdin is None or self.process.stdin.closed:
             raise TuiTransportError("TUI RPC client is closed")
         encoded = (json.dumps(frame, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+        stream = self.process.stdin
         with self._writer_lock:
+            if isinstance(stream, io.BytesIO):
+                stream.write(encoded)
+                return
+            fd = stream.fileno()
+            os.set_blocking(fd, False)
+            written = 0
             try:
-                self.process.stdin.write(encoded)
-                self.process.stdin.flush()
+                while written < len(encoded):
+                    remaining = self._dispatch_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TuiTransportError(
+                            f"TUI RPC dispatch timed out; {self._frame_context}; "
+                            f"budget={self._dispatch_timeout}s; written={written}/{len(encoded)} bytes. "
+                            "Recovery: close this transport and start a new gateway."
+                        )
+                    if not select.select([], [fd], [], remaining)[1]:
+                        continue
+                    try:
+                        written += os.write(fd, memoryview(encoded)[written:])
+                    except BlockingIOError:
+                        continue
             except Exception as exc:
+                # Never append another JSON frame to an incomplete dispatch.
+                stream.close()
+                if isinstance(exc, TuiTransportError):
+                    raise
                 raise TuiTransportError(f"TUI stdin write failed: {exc}") from exc
 
     def _read_raw_frame(self, timeout: float) -> dict[str, Any]:
@@ -241,8 +274,9 @@ class TuiRpcClient:
         request_id = self._next_id
         self._next_id += 1
         self._frame_context = f"stage={stage}, request_id={request_id}, method={method}"
-        self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
         deadline = time.monotonic() + timeout
+        self._dispatch_deadline, self._dispatch_timeout = deadline, timeout
+        self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
         while True:
             try:
                 frame = self.read_frame(deadline - time.monotonic())
@@ -319,6 +353,8 @@ class TuiRpcClient:
                 if wait_bounded(fraction=fraction):
                     return
         finally:
+            self._drain_stderr()
+            self._finish_stderr()
             # Popen.wait() reaps the process but deliberately leaves the three
             # pipe objects open. Detached workers are short-lived, yet callers
             # and tests may create several transports in one process; close all

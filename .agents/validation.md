@@ -9,7 +9,7 @@ uv lock --check
 uv sync --frozen
 ```
 
-`pyproject.toml` and `uv.lock` retain the plugin Python 3.11–3.13 support window.
+`pyproject.toml` and `uv.lock` retain the plugin Python 3.11–3.14 support window.
 Portable tests use `-m 'not integration'`; native-coupled mixed modules are marked
 integration conservatively in `tests/conftest.py`. Both partitions are mandatory; no
 missing-runtime skip is permitted. Installed CI provisions immutable Hermes
@@ -22,8 +22,7 @@ CI additionally installs the hash-pinned PyYAML helper from
 `scripts/native-test-tooling.txt` under that same interpreter (Ubuntu x86_64 cp314
 wheel, `--only-binary :all:`, hash from pinned Hermes lock). No
 unlocked tooling resolver or plugin package install on 3.14 is used.
-Never add another Python version's site-packages to PYTHONPATH. This does not
-broaden the plugin interpreter contract. Exact-baseline GitHub CI passed both
+Never add another Python version's site-packages to PYTHONPATH. Python 3.14 is part of the plugin support contract. Exact-baseline GitHub CI passed both
 partitions; local runtime equality with the CI pin is not established. Historical
 provisioning blockers in the audit are not current CI status.
 
@@ -110,3 +109,33 @@ must survive. Stage intentional relocations before rename-aware quality reportin
 Housekeeping receipt records the command/tool paths actually used. No browser,
 frontend build or provider smoke is applicable to documentation/test relocation;
 operator runtime harnesses remain separately authorized, never approval bypasses.
+
+## Trusted quality enforcement and release automation
+
+Effective quality floor: TOP. Policy and immutable baseline remain canonical;
+repository-vendored analyzer is derived from builder-assurance with documented
+provenance. Preserve both independently approved expiring exceptions. Governance
+adoption requires separate independent review; candidate changes cannot approve
+themselves. See `.agents/quality-tooling/README.md` and the review receipt.
+
+```bash
+uv venv .artifacts/quality-env --python 3.13
+uv pip install --python .artifacts/quality-env/bin/python --require-hashes --only-binary :all: -r .agents/quality-tooling/requirements.txt
+.artifacts/quality-env/bin/python .agents/quality-tooling/vendor/scripts/validate_quality_policy.py .agents/quality.yaml
+.artifacts/quality-env/bin/python .agents/quality-tooling/vendor/scripts/quality_report.py --repo . --base e46c84910ea00e0f4b8795cd2bfcc35378ce1cee --scope all --level top --config .agents/quality.yaml --format json --output .artifacts/quality-final.json
+QUALITY_GATE_PYTHON="$PWD/.artifacts/quality-env/bin/python" .artifacts/quality-env/bin/python -I -B -m unittest discover -s .agents/quality-tooling/tests -v
+uv run --frozen python -m pytest tests/test_release_version.py tests/test_release_workflow.py -q -o 'addopts=' -W error
+```
+
+Release fixtures prove existing1.11.0 -> minor1.12.0, patch/major, same-input
+byte-identical retry, malformed/stale/mixed/partial metadata and missing notes.
+Workflow shell executes against disposable Git remotes; gh/uv alone are mocked
+there. Real dependency, registration, full suites and quality remain mandatory.
+`Prepare release` calls reusable CI/quality for exact SHA because bot-created PR
+events need not trigger Actions. No automatic version increment during test runs,
+force push, tag or publication. Remote Actions PR permissions are prerequisites.
+
+Use an external disposable `--basetemp` for local pytest; all scenarios and native
+prerequisites remain mandatory. Secret-scan staged intended source, not private
+artifacts. A release tag still requires explicit operator authorization after
+exact-head CI, per AGENTS.md; pushing a candidate alone does not create a release.

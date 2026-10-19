@@ -1,18 +1,24 @@
 # Profile Delegate 🤝
 
-Version: `1.11.0`
+Version: `1.12.0`
 
 Delegate to specialist Hermes profiles from one conversation. Keep each specialist's context separate, follow live runs, and reuse nested results such as a Builder's Reviewer report.
 
-## What's new in v1.11.0
+## What's new in v1.12.0
 
-This release candidate adds multi-dispatch while retaining singular controls:
+Optional Git worktrees isolate each delegated checkout, with explicit base/branch
+selection and CLI/TUI continuation in the assigned directory. Worktrees do not
+copy dirty or ignored files, merge changes, clean themselves up or provide a sandbox.
+Python 3.11–3.14 is supported. Opt-in release preparation synchronizes version
+metadata and runs the full CI and trusted quality gates.
+
+Multi-dispatch, introduced in v1.11.0, remains available:
 
 - `profile_multidelegate` dispatches independent new background sessions in one invocation, including several tasks for the same profile.
 - Ordered per-item receipts preserve dispatch errors and inspection handles without claiming execution success.
 - Full-array preflight reuses existing policy, approval and origin checks; no new scheduler or batch ledger.
 - Prompt and recovery guidance distinguishes verified completion and checks uncertain side effects before retries.
-- Local validation: 743 installed tests; publication and exact-commit CI remain pending. See [STATE.md](STATE.md).
+- Local integrated validation: 835 installed tests and 253 portable tests pass. Exact-head remote checks and source delivery are recorded in [STATE.md](STATE.md) and the operator receipt.
 
 See [CHANGELOG.md](CHANGELOG.md) for details and [contribution opportunities](docs/contribution-opportunities.md) for concrete open work. Profiles are context boundaries, not security sandboxes; notifications remain best effort.
 
@@ -42,6 +48,39 @@ Example uses:
 Dedupe can map identical indices to one active run within its existing window, without extra notification per index. `duplicate_policy=new` intentionally creates independent runs but bypasses no policy or limit. Retrying a whole batch is not idempotent: finished runs/window expiry can repeat work. After lost replies inspect list/status before retrying side effects. Parent interruption may lose index correlation while children remain live. Notifications are per unique run, native and best effort, not one aggregate return.
 
 The orchestrator prepares worktrees and owns write isolation/integration. Builders may edit the same relative names in distinct worktrees with per-item workdir. Different dirs do not isolate services, ports or DBs. The facade does not manage Git, dependencies, scheduling or a durable batch ledger. Resume remains singular-only. See `docs/multidelegate.md` for the contract and evidence boundaries.
+
+## Optional Git worktrees — principal feature of 1.12.0
+
+Set `worktree: true` on a **new** `profile_delegate` request with an explicit non-bare checkout root and `capability_preset: "build"`. Optional `base_ref` defaults to local `HEAD`; optional `branch` must be new and defaults to `pd/<task_id>`. No fetch, force, stash, source commit, hooks, setup, merge or cleanup is performed. Repositories with configured external `filter.*.smudge` or `filter.*.process` drivers are refused before allocation and checked again before creation; authorize and prepare those checkouts manually, then pass `workdir` without `worktree:true`. Persistent Git config is not changed. Source dirty files are excluded and remain untouched. Parent command approval and existing workdir policy apply to both source and destination; child approval is not parent authorization. `review` cannot create worktrees.
+
+```json
+{"profile":"builder","task":"Implement the bounded change","session_title":"isolated change","workdir":"/allowed/project","worktree":true,"base_ref":"LOCAL_COMMIT_SHA","background":true}
+```
+
+Destinations are `<repo-parent>/.profile-delegate-worktrees/<repo-name>/<task_id>`. `preflight: true` only inspects and reports a destination pattern; it reserves nothing. An optional `workspace` block reports source, requested ref, initial SHA/branch, destination and preparation state (`planned`, `created`, `unknown`) through preflight, dispatch/reuse, status/final and created-run errors. `request.workdir` is the verified effective checkout. Unknown preparation or failed dispatch never means safe to delete resources. Worktrees and branches remain after every outcome and artifact retention does not delete them.
+
+For batch, resolve one local commit SHA first and send that same `base_ref` in every worktree item. Defaults resolved independently do not promise a common base. Batch uses the singular engine and retains partial handles; inspect status/list before repeating a lost request.
+
+Continue using **singular** `session_mode: "resume"`, `session_id`, with creation options omitted. Omitted `workdir` reuses the retained checkout; an explicit one must match. The plugin checks origin authorization, repository association and native effective-session cwd before continuation/retry. Legitimate new commits, renamed branches or detached HEAD are permitted. Missing/mismatched native cwd blocks with manual recovery, never allocates a replacement checkout. Historical generic delegation does not acquire a Git requirement.
+
+Artifact pruning leaves worktrees and branches intact, but automatic resume association and frozen approval lookup depend on retained run artifacts. Retain those artifacts while continuity is needed. After they expire, recover the existing checkout manually; the plugin does not promise indefinite automatic association or allocate a replacement.
+
+Managed CLI checkouts use native `--in`, source `cli` (so Hermes persists native cwd), and a child-only native terminal scope preserving profile settings except local cwd. Non-local terminal backends are refused rather than silently changed. These managed sessions therefore also appear in native CLI history and most-recent-session selection; integrations filtering by source should account for this. Generic launches retain source `profile-delegate`; TUI is unchanged.
+
+Without `worktree`, new generic delegation never consults Git. Passing a manually prepared checkout/copy as `workdir` remains the fallback, including non-Git projects. Real provider CLI/TUI new/resume and a same-base isolated-change integration have passed local independent review. The separate real batch acceptance also passed; publication does not establish gateway activation. Current evidence and activation boundary live in `STATE.md`.
+
+## Python and release preparation
+
+Python support is **>=3.11,<3.15**. Portable CI covers 3.11–3.14;
+the pinned installed Hermes job uses 3.14 as its test environment only.
+
+`Prepare release` is opt-in on the default branch with an explicit existing
+`base_version` and semver `bump` (patch/minor/major). It synchronizes manifest,
+pyproject, README, changelog and lock metadata, creates/reuses a draft PR and runs
+full CI plus trusted quality on the exact candidate. Ordinary tests never bump
+versions. Retry the same base/bump/source SHA. Partial or stale metadata refuses;
+no force push, tag rewrite, automatic tag or publication. Repository Actions must
+allow PR creation. Canonical commands: [.agents/validation.md](.agents/validation.md).
 
 ## Features
 

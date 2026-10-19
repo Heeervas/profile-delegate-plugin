@@ -11,6 +11,11 @@ import tomllib
 
 import yaml
 
+if __package__:
+    from .release_version import metadata_version
+else:
+    from release_version import metadata_version
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -45,9 +50,10 @@ def main() -> int:
     if not match:
         raise AssertionError("README version marker missing")
     version = str(manifest["version"])
+    assert metadata_version(ROOT) == version
     assert match.group(1) == version, "README/manifest version mismatch"
     assert str(pyproject["project"]["version"]) == version, "pyproject/manifest version mismatch"
-    assert pyproject["project"]["requires-python"] == ">=3.11,<3.14", "pyproject Python support mismatch"
+    assert pyproject["project"]["requires-python"] == ">=3.11,<3.15", "pyproject Python support mismatch"
     assert f"## [{version}]" in changelog, "CHANGELOG release entry missing"
 
     plugin = load_plugin()

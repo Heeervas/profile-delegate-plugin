@@ -9,9 +9,23 @@ import os
 import subprocess
 import sys
 import time
+import types
 from datetime import datetime, timezone
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable
+
+# Script entrypoints have no package. Bind sibling imports to this directory
+# without executing the plugin entrypoint or claiming generic sys.modules names.
+# Hermes discovery can load another plugin's `core` and prepend its sys.path.
+_PLUGIN_PACKAGE = __package__ or "_profile_delegate_child"
+if not __package__:
+    package = types.ModuleType(_PLUGIN_PACKAGE)
+    package.__package__ = _PLUGIN_PACKAGE
+    package.__path__ = [str(Path(__file__).resolve().parent)]
+    sys.modules[_PLUGIN_PACKAGE] = package
+
+native_approval = import_module(".native_approval", _PLUGIN_PACKAGE)
 
 
 def _event_writer(path: Path, policy: str) -> Callable[..., None]:
@@ -85,7 +99,6 @@ def install_policy(mode: str, events_path: Path, blocked_tools: list[str], envel
     if mode not in {"deny", "approve_yolo", "yolo", "profile", "inherit"}:
         raise ValueError(f"unsupported child approval mode: {mode}")
     if envelope is not None:
-        import native_approval
         native_approval.bind(envelope)
     elif mode in {"profile", "inherit", "yolo"}:
         raise ValueError("native approval mode requires frozen envelope")
@@ -221,14 +234,21 @@ def main(argv: list[str] | None = None) -> int:
             args.approval_mode,
             Path(args.events_path).expanduser().resolve(),
             [item for item in args.blocked_tools.split(",") if item],
-            __import__("native_approval").read_request(Path(args.request_path)) if args.request_path else None,
+            native_approval.read_request(Path(args.request_path)) if args.request_path else None,
         )
     except ModuleNotFoundError as exc:
         raise RuntimeError("native approval installation failed; delegated launch refused") from exc
     finally:
         stage_event("bootstrap_policy_filter", "exit")
+    request = {}
+    if args.request_path:
+        request = import_module(".core", _PLUGIN_PACKAGE).operator_read_json(Path(args.request_path))
+    if request:
+        child_reasoning = import_module(".child_reasoning", _PLUGIN_PACKAGE)
     if args.tui_gateway:
         prepare_tui_runtime(stage_event)
+        if request:
+            child_reasoning.install(request, tui=True)
         stage_event("native_entry_import", "enter")
         try:
             from tui_gateway.entry import main as tui_main
@@ -237,9 +257,18 @@ def main(argv: list[str] | None = None) -> int:
 
         result = tui_main()
         return int(result) if isinstance(result, int) else 0
+    return run_cli(command, request)
+
+
+def run_cli(command, request):
+    """Enter native CLI after frozen policy installation; TUI never enters here."""
+    child_reasoning = import_module(".child_reasoning", _PLUGIN_PACKAGE)
     # Stay in-process so monkeypatches remain active. The executable path is
     # retained for auditability but hermes_cli.main is the installed entrypoint.
     sys.argv = [command[0], *command[1:]]
+    if request:
+        child_reasoning.install(request)
+        import_module(".execution", _PLUGIN_PACKAGE).bind_cli_workspace(request)
     from hermes_cli.main import main as hermes_main
 
     result = hermes_main()

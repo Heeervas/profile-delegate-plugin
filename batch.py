@@ -45,6 +45,8 @@ def _validate_tasks(tasks, item_schema, origin):
             validate_fields(task, item_schema)
             result = core.delegate_profile(**task, **FORCED, origin=origin, preflight=True)
             item.update(profile=result["normalized_request"]["profile"], validation_status="validated")
+            if "workspace" in result:
+                item["workspace"] = result["workspace"]
         except Exception as exc:
             item.update(error_item(exc))
         items.append(item)
@@ -60,7 +62,7 @@ def _dispatch(tasks, items, origin):
             continue
         try:
             result = core.delegate_profile(**task, **FORCED, origin=origin)
-            for key in ("task_id", "profile", "run_created", "deduplicated", "paths", "watch_command"):
+            for key in ("task_id", "profile", "run_created", "deduplicated", "paths", "watch_command", "workspace"):
                 if key in result:
                     item[key] = result[key]
             item["dispatch_status"] = "reused" if result.get("deduplicated") else "started"

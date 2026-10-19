@@ -49,6 +49,25 @@ def _status_fixture(run_dir: Path, *, origin: dict[str, str] | None = None) -> N
     })
 
 
+def test_cli_utf8_fragmentation_and_eof_preserve_capture_and_tails(tmp_path, monkeypatch):
+    original_read = core.os.read
+
+    def one_byte(fd, size):
+        return original_read(fd, 1)
+
+    monkeypatch.setattr(core.os, "read", one_byte)
+    stdout, stderr = tmp_path / "stdout", tmp_path / "stderr"
+    result = core.run_capped_subprocess(
+        [sys.executable, "-c", "import os; os.write(1,'é🙂'.encode()+bytes([195])); os.write(2,'ñ'.encode())"],
+        cwd=tmp_path, env=os.environ.copy(), timeout=5,
+        stdout_path=stdout, stderr_path=stderr,
+    )
+    assert result["exit_code"] == 0
+    assert stdout.read_text() == result["stdout_diagnostic_tail"] == "é🙂�"
+    assert stderr.read_text() == result["stderr_diagnostic_tail"] == "ñ"
+    assert result["stdout_chars"] == 3
+
+
 @pytest.mark.parametrize("exit_code", [0, 7])
 def test_sync_child_emits_content_free_heartbeats_and_stops(tmp_path, exit_code):
     labels: list[str] = []

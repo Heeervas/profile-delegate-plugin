@@ -13,7 +13,11 @@ from test_profile_delegate import mock_delegate_admission
 
 def _plugin():
     spec = importlib.util.spec_from_file_location("profile_delegate_preflight_plugin", Path(__file__).parents[1] / "__init__.py")
+    assert spec is not None and spec.loader is not None
     plugin = importlib.util.module_from_spec(spec)
+    # Bind the synthetic package's seams to the same modules patched by fixtures.
+    plugin.__package__ = ""
+    plugin.__spec__ = importlib.util.spec_from_loader(spec.name, spec.loader, is_package=False)
     spec.loader.exec_module(plugin)
     return plugin
 
@@ -24,7 +28,7 @@ def preflight_admission(tmp_path, tmp_path_factory, monkeypatch):
     home = tmp_path_factory.mktemp("preflight-caller")
     mock_delegate_admission(home, monkeypatch)
     monkeypatch.setenv("HERMES_HOME", str(home))
-    monkeypatch.setattr(core, "_plugin_entry", lambda: {"allowed_profiles": ["builder"]})
+    monkeypatch.setattr(core, "_plugin_entry", lambda: {"allowed_profiles": ["builder"], "allowed_capability_presets": ["review", "build"]})
 
 
 def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch, preflight_admission):
@@ -48,7 +52,7 @@ def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch, preflight
 def test_preflight_conflicts_return_actionable_patch_without_run(tmp_path, monkeypatch, preflight_admission):
     # This refusal contract must not inherit the invoking caller's live grant.
     monkeypatch.setattr(core, "_plugin_entry", lambda: {
-        "allowed_profiles": ["builder"],
+        "allowed_profiles": ["builder"], "allowed_capability_presets": ["review", "build"],
         "allow_child_approval_override": False,
         "allow_reasoning_override": False,
     })

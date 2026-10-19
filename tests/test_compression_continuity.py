@@ -183,7 +183,7 @@ def test_cli_resume_footer_requires_native_compression(tmp_path, monkeypatch, fo
     monkeypatch.setattr(core, 'resolve_workdir', lambda workdir='', policy=None: tmp_path)
     monkeypatch.setattr(core, 'resolve_hermes_bin', lambda: '/usr/bin/hermes')
     import native_approval
-    previous = tmp_path / 'runs' / 'frozen-seed'
+    previous = tmp_path / 'runs' / 'pd_frozen-seed'
     previous.mkdir(parents=True)
     core.text_safe_write(previous / 'request.json', json.dumps({'profile_home': str(target), 'native_approval':
                          native_approval.snapshot('deny', 'task', 'caller', str(target), {}, {})}))
@@ -272,7 +272,7 @@ def dispatch_fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(core, 'resolve_workdir', lambda workdir='', policy=None: tmp_path)
     monkeypatch.setattr(core, 'resolve_hermes_bin', lambda: '/usr/bin/hermes')
     import native_approval
-    previous = tmp_path / 'runs' / 'frozen-seed'
+    previous = tmp_path / 'runs' / 'pd_frozen-seed'
     previous.mkdir(parents=True)
     core.text_safe_write(previous / 'request.json', json.dumps({'profile_home': str(tmp_path / 'target'), 'native_approval':
                          native_approval.snapshot('deny', 'task', 'caller', str(tmp_path / 'target'), {}, {})}))
@@ -364,7 +364,7 @@ def test_concurrent_compressed_admission_preserves_legacy_fingerprint(tmp_path, 
     with ThreadPoolExecutor(max_workers=3) as pool:
         assert list(pool.map(call, origins)) == [first['task_id']] * 3
     assert core.read_json_file(core.resolve_run_dir(first['task_id']) / 'status.json')['request_fingerprint'] == before
-    assert len(list(core.iter_run_dirs())) == 1
+    assert len([p for p in core.iter_run_dirs() if p.name != 'pd_frozen-seed']) == 1
 
 
 @pytest.mark.parametrize('observed', [True, False])
@@ -429,7 +429,7 @@ def test_zero_run_concurrent_admission_both_creation_orders(tmp_path, monkeypatc
         a, b = first.result(), second.result()
     # Old-first reuses forward; new-first cannot grant backward authority.
     assert (a['task_id'] == b['task_id']) is (first_sid == 'p0')
-    assert len(list(core.iter_run_dirs())) == (1 if first_sid == 'p0' else 2)
+    assert len([p for p in core.iter_run_dirs() if p.name != 'pd_frozen-seed']) == (1 if first_sid == 'p0' else 2)
     if first_sid == 'p1':
         with pytest.raises(core.ProfileDelegateError):
             core.profile_delegate_status(a['task_id'], caller_origin={'session_id': 'p0', 'source': 'discord', 'session_key': 'lane'})

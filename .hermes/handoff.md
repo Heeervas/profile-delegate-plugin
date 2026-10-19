@@ -1,11 +1,14 @@
 # Hermes handoff
 
-Current candidate, review, gates, publication authority and blocker: [STATE.md](../STATE.md).
-Contract and limits: [multi-dispatch](../docs/multidelegate.md).
-Canonical checks: [.agents/validation.md](../.agents/validation.md).
+Current candidate/authority: [STATE.md](../STATE.md).
+Canonical gates: [.agents/validation.md](../.agents/validation.md).
+Worktree journey: [README](../README.md#optional-git-worktrees--principal-feature-of-1120).
 
-v1.11.0 additive implementation is isolated atop public v1.10.1. Focal independent code review closed F1/F2 without a new code blocker; documentary F3 is reconciled. Full candidate suite 743 passes, portable 234 passes; native detached/batch fresh-process probe 31 passes. No activation claim.
-
-Existing authorized gh authentication is available with `XDG_CONFIG_HOME=/opt/data/.config`; use its Git credential helper per command, without persistent config or credential changes. Normal main push succeeded. Verify exact-head CI before creating and reading back a new annotated v1.11.0 if unused. Never force push/move tags; no GitHub Release, gateway restart or external announcement is authorized.
-
-Immutable-baseline quality relocation limitation and exact-public-base supplemental pass are explicitly retained in STATE. Do not claim the raw immutable-baseline collector passed. Do not merge the original dirty checkout or attribute its live-provider smoke to this candidate. Historical handoffs remain provenance only.
+User authorized complete source integration and normal push for1.12.0. Base is
+published1.11.0, with remote relocated tests/docs/security fixes preserved. Worktrees
+lead1.12; batch is existing composition. No new tag/release, force push, runtime
+activation, core/profile/global mutation. Independent integration review passed
+with notes and exact governance adoption was pushed/read back separately. Final
+exact-head Actions results are provided by the operator receipt. Keep private
+snapshots/reports untracked; never substitute historical834-suite evidence for the
+integrated candidate's final result. Parent owns the English Discord announcement.

@@ -84,6 +84,9 @@ def _schema() -> Dict[str, Any]:
                 'string', 'Serialization mode. auto (default) preserves legacy format selection; explicit json/markdown/text wins and contradictory contracts fail before launch. JSON uses a separate object envelope; new prose requires a terminal verdict.', enum=['auto', 'json', 'markdown', 'text'], default='auto'),
             'workdir': _field(
                 'string', 'Optional working directory for the delegated Hermes subprocess. Defaults to the current process working directory.', default=''),
+            'worktree': _field('boolean', 'Opt-in new Git worktree from explicit checkout root; parent authorization and destination policy apply. Resume omits creation options.', default=False),
+            'base_ref': _field('string', 'Local commit reference for new worktree; default HEAD. Coordinator passes one resolved SHA to all batch items.'),
+            'branch': _field('string', 'New branch for worktree; default pd/<task_id>. Never force/reuse an existing branch.'),
             'background': _field(
                 'boolean', 'Run asynchronously, return a task_id immediately, and keep the originating conversation responsive. Prefer background for long, multi-stage, or independently monitorable work; short bounded specialist work may remain foreground. Advisory only: no automatic mode selection or rejection.', default=False),
             'notify_on_complete': _field(
@@ -258,6 +261,9 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
             duplicate_policy=payload.get("duplicate_policy", "reuse"),
             transport_mode=payload.get("transport_mode", "auto"),
             preflight=payload.get("preflight", False),
+            worktree=payload.get("worktree", False),
+            base_ref=payload.get("base_ref"),
+            branch=payload.get("branch"),
         )
     except ProfileDelegateError as exc:
         result = _error_result(exc)
