@@ -123,6 +123,19 @@ uv run --frozen python scripts/validate_release.py
 
 This calls `register(ctx)` through a fake plugin context, asserts every manifest tool is registered with OpenAI-format `parameters`, checks version alignment, and invokes a harmless validation-error handler path. For a live install, use a fresh Hermes process after code/schema changes and verify plugin discovery before claiming the gateway sees it.
 
+## Host-independent CI regression
+
+Run the native partition without installed user personas or a global Hermes CLI:
+
+```bash
+HERMES_HOME=/opt/data/profiles/builder/cache/scratch/ci-empty-home PATH=/usr/bin:/bin PROFILE_DELEGATE_TEST_RUNTIME=/opt/hermes PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python -B -m pytest -m integration -q -o addopts= -W error --basetemp=/opt/data/profiles/builder/cache/scratch/ci-repair-native
+```
+
+The first push creating a branch has an all-zero GitHub `before` and intentionally
+cannot supply a trusted predecessor. A subsequent push must retain unchanged
+reviewed governance from its real published predecessor; never substitute the
+candidate as its own trusted base or disable governance verification.
+
 ## Security/release checks
 
 - Secret-pattern scan across tracked and intended new files.

@@ -20,6 +20,7 @@ def admitted(tmp_path, monkeypatch):
     from hermes_cli import profiles
     monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "worker")
     monkeypatch.setattr(core, "validate_profile", lambda name, policy: core.ValidatedProfile(name, name, str(tmp_path / "worker")))
+    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/fixture/bin/hermes")
     return _plugin()
 
 

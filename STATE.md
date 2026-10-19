@@ -1,5 +1,22 @@
 # Profile Delegate project state
 
+## CI portability correction — 2026-10-19
+
+The first branch push failed quality before analysis because GitHub supplied an
+all-zero `before` SHA for branch creation. The existing fail-closed guard is
+preserved: the corrective push uses the published, independently reviewed
+`516904a411ed80752ba2267eb38f898848966ee9` as its real predecessor. No policy,
+exception, trusted tooling or workflow is changed to self-approve this repair.
+New-branch initial pushes still require an established trusted base.
+
+The installed CI also exposed nine fixture failures hidden by local installed
+personas and a globally available Hermes executable. Correct only fixture setup:
+preflight gets a disposable native profile home and explicit executable seam;
+selector tests declare their executable dependency; provider-mismatch uses the
+existing isolated admission helper. Assertions and production behavior unchanged.
+The native partition passes with an empty HERMES_HOME and PATH=/usr/bin:/bin:
+656 passed, 275 deselected. Remote exact-head checks must pass before closure.
+
 ## Packaging authority update — 2026-10-19
 
 Alberto explicitly requested committing and pushing the complete verified local

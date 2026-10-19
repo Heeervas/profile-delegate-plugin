@@ -453,6 +453,7 @@ def test_interrupt_during_transient_retry_delay_prevents_resume(tmp_path, monkey
 
 
 def test_provider_realm_mismatch_fails_without_session_retry(tmp_path, monkeypatch):
+    mock_sync_admission(tmp_path, monkeypatch)
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path / "runs"))
     monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", "true")

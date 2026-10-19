@@ -17,6 +17,19 @@ def _plugin():
     return plugin
 
 
+@pytest.fixture(autouse=True)
+def isolated_preflight_runtime(tmp_path, monkeypatch):
+    # Exercise real admission against native profile APIs without installed personas
+    # or a globally installed executable on the invoking machine.
+    from hermes_cli import profiles
+    home = tmp_path.parent / (tmp_path.name + "-home")
+    (home / "profiles" / "builder").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "builder")
+    monkeypatch.setattr(profiles, "get_profile_dir", lambda name: home / "profiles" / name)
+    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/fixture/bin/hermes")
+
+
 def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch):
     monkeypatch.setenv("PROFILE_DELEGATE_ALLOWED_PROFILES", "builder")
     monkeypatch.delenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", raising=False)
@@ -27,7 +40,7 @@ def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch):
     payload = {"profile": "builder", "task": "Return JSON", "session_title": "dry run",
                "background": True, "preflight": True}
     observed = json.loads(plugin._handler(payload))
-    assert observed["success"] is True
+    assert observed["success"] is True, observed
     assert observed["preflight"] is True
     assert observed["run_created"] is False
     assert observed["normalized_request"]["selected_transport"] == "interactive"
