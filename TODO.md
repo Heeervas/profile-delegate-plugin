@@ -1,5 +1,10 @@
 # Profile Delegate TODO
 
+## Senior corrections
+
+- [x] Final independent review: PASS_WITH_RESIDUAL_RISK; prior MAJOR reaping/false-success finding closed. Evidence: `.artifacts/test-deslop/final-review/review.md`. Actual-provider/gateway activation remain unclaimed and separately authorized.
+- [ ] LOW follow-up: diagnose/reconcile exceptional reaper `process.wait()` failures without releasing capacity until exit is confirmed. Current behavior fails closed but may strand live status and capacity; see final-review report lines 28–34.
+
 Canonical design: [`docs/plans/2026-07-22-plugin-only-reliability-reset-p0-p4.md`](docs/plans/2026-07-22-plugin-only-reliability-reset-p0-p4.md)
 
 Current review: [`docs/audits/2026-09-27-multi-pov-reliability-review.md`](docs/audits/2026-09-27-multi-pov-reliability-review.md)

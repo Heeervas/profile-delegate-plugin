@@ -1,5 +1,126 @@
 # Profile Delegate project state
 
+## Packaging authority update — 2026-10-19
+
+Alberto explicitly requested committing and pushing the complete verified local
+candidate, including inherited reviewed work, for external review. This supersedes
+the earlier no-commit/no-push constraint only; no activation, release tag, deployment
+or merge is authorized. Package on `review/senior-corrections-20261019` because
+local main and origin/main diverge. Preserve remote main without force push or
+rebase. The source/test bytes remain those reviewed in
+`.artifacts/test-deslop/candidate.json`; subsequent edits are documentation and
+ignore rules only. The generated quality report stays local and regenerable.
+See Git history for the exact packaged commit; earlier uncommitted/no-push status
+below describes the pre-packaging candidate, not current authorization.
+
+## Current — senior corrections and test audit complete locally (2026-10-19)
+
+Final independent review: **PASS_WITH_RESIDUAL_RISK**, no blocking findings; prior
+MAJOR false-success/reaping defect closed. Report: `.artifacts/test-deslop/final-review/review.md`.
+All 158 reviewed candidate hashes matched before this documentation-only closure.
+Reviewed source/test identity: `.artifacts/test-deslop/candidate.json`; inherited
+dirty state remains intact and uncommitted. This is not a clean-clone release.
+
+Evidence: full **931 passed**; final installed native **656 passed / 275 deselected**;
+portable **275 passed / 656 deselected**. Independent focused lifecycle recheck:
+**7 passed**. Logs and three Luna High empty-profile audit reports are under
+`.artifacts/test-deslop/`. First native timing failure remains recorded; the bound
+was not weakened and the rerun passed. Two redundant journal cases removed, one
+real-child reap regression added (net 932 -> 931); remaining audit coverage retained.
+Historical approval fixture is independent of current implementation; fresh native
+child uses isolated HERMES_HOME.
+
+TOP quality: **QUALITY_PASS_WITH_EXCEPTION**, existing max29 exception only;
+canonical report `.agents/quality-report.json`. Lock, Ruff, release/handler smoke,
+canonical compilation, secret scan and diff checks passed. Installed-runtime
+scripted-MODEL completion/cancel receipt: `.artifacts/audit-runtime-0zw9pb_r/receipt.json`,
+status ok. Not actual-provider or gateway activation evidence.
+
+Residual LOW: exceptional process.wait failure retains capacity safely but can
+strand the permit and live status; explicit recovery/diagnostic work is deferred
+in TODO.md. No false success or premature release is allowed. Local implementation
+and review are complete; acceptance is Alberto-owned. No commit, push, publication,
+configuration mutation or restart authorized/performed. Everything below is historical.
+
+## Senior corrections — checks complete, independent review pending (2026-10-19)
+
+Seven bounded fixes implemented under `plans/senior-review-corrections.md`.
+Verified integrated candidate: full **928 passed**; installed Python3.14 native
+**653 passed / 275 deselected**; portable **275 passed / 653 deselected**.
+No import preload or timeout override was required for these parent runs. Resume
+fixture repairs add matching real origins only; intake comparison retains every
+original continuity/footer assertion and negative case.
+
+TOP: QUALITY_PASS_WITH_EXCEPTION, evidence gaps []; existing max29 public-signature
+exception only, unchanged policy/baseline. Lock, Ruff, registration/handler smoke,
+compilation, secret scan and diff checks pass. Raw evidence: `.artifacts/senior-corrections/`.
+Native fresh-process TUI completion `pd_20261019_111839_wvpz4w` completed/ok;
+cancel `pd_20261019_111904_0lww95` cancelled. Both transport PIDs reaped, transport_alive
+false. Real installed handlers, session/control/transport; MODEL HTTP was a local
+scripted fixture, **not actual-provider acceptance**. Fixture server logged expected
+BrokenPipeError when cancelled client disconnected. Evidence:
+`.artifacts/audit-runtime-izlrk8sp/{receipt.json,calls/}`.
+
+Journal scaling applies to cooperative append-only writers under stable lock;
+arbitrary prefix rewrite plus growth can evade incremental detection until reopen.
+No tamper-proof claim. Independent final Reviewer is the remaining gate. No commits,
+installs, gateway reload, profile/global configuration edits, push or publication.
+Historical local-readiness statements below do not accept this new candidate.
+
+
+## Upcoming 1.12.0 — optional worktrees and release automation (local, 2026-10-19)
+
+Authority: bounded local corrections only; Adán/Alberto own acceptance and any
+remote action. **Existing published release is 1.11.0**, not the stale local
+1.10.0 recorded in historical entries below. Remote annotated tag object
+`39eb75a8e71f5c52b315f8b9c91b5cd8115e44b8` peels to
+`a5488e0d705ae5347858c2ae8b9079347bb0e0e6`; read-only verification preserved it.
+Local intake HEAD was `60f93e2` with broad inherited dirty code/tests/governance;
+it is a different candidate, never equated with that release.
+
+User explicitly set upcoming **1.12.0**, led by optional Git worktrees, explicit
+base/branch selection and accepted CLI/TUI continuation in the assigned checkout.
+Batch was introduced in 1.11.0 and is supporting composition here. No sandbox,
+copying uncommitted/ignored source files, auto-merge or cleanup claim is added.
+
+Implemented: portable/quality CI include 3.14, keeping >=3.11,<3.15. Pinned native
+Hermes integration remains on 3.14 as test scope only. Existing externally edited
+requires-python/lock/validator widening was preserved, not authored by this task.
+Native GitHub workflow_dispatch release preparation accepts explicit base+bump,
+synchronizes manifest/pyproject/README/changelog/lock, reuses same-source branches
+without force, and calls reusable full CI and trusted quality gates on exact SHA.
+No third-party release package was added. Ordinary test runs never bump versions.
+The local user-authorized 1.12.0 metadata reconciliation is explicit; automated
+fixtures prove minor **1.11.0 -> 1.12.0**, never stale 1.10.0 -> 1.11.0.
+
+Verified serially: final full installed Python3.14 suite **834 passed**; portable
+Python3.13 and isolated Python3.14 **253 passed / 581 deselected each**; focused
+version/workflow fixtures **16 passed each** on both available interpreters.
+Initial full run exposed a new script-vs-package import failure (833 passed/1
+failed); repaired both entry paths and reran full green. Frozen lock/sync, global
+Ruff, exact CI compilation, YAML parsing, seven-tool registration/handler smoke
+on 3.13 and 3.14 pass. TOP before/after: QUALITY_PASS_WITH_EXCEPTION, gaps[], same
+existing max29 public-signature exception; no policy/baseline/threshold changes.
+
+Evidence and exact before/after ownership: `.artifacts/release-automation/`.
+No push, tag, publication, remote dispatch, gateway restart, core/profile/global
+write or nested delegation occurred. Caller-reported post-restart batch smokes
+were not repeated. Local GitHub CLI has no login; read-only public HTTP and Git
+verified remote workflow inventory (only ci.yml, no existing release automation).
+Local tests use real disposable Git remotes with mocked gh/uv; actual uv/tests/
+registration/quality are separate real gates. No claim of remote CI, GitHub PR
+permissions, fresh pinned Hermes provisioning, or Python3.11/3.12 execution here.
+
+Next gate: parent independent review of owned release changes, reconcile/adopt
+the inherited dirty governance/runtime candidate, then separately authorize remote
+CI/release preparation. No coherent whole-candidate commit is claimed; untracked
+quality.yml/tooling already existed and are dependencies, not owned files to sweep.
+Historical release/activation claims below are superseded by this section.
+
+## Python 3.14 startup admission correction (2026-10-19)
+
+Operator-requested local fix: widened requires-python to >=3.11,<3.15, refreshed uv.lock without package-version upgrades, and aligned the release metadata assertion. Lock check, registration/handler smoke under Python 3.14.7 and git diff --check passed. The existing container restart loop then passed baked-image dependency admission; no manual restart or push was performed. Full release suite was not rerun because host disk space is critically low; gateway readiness and end-to-end operation remain unverified.
+
 ## Local readiness complete — activation remains Alberto-only (2026-10-18)
 
 Authority: complete-target LOCAL remediation and acceptance under `plans/quality-readiness.md`, with the previously authorized multi-dispatch and optional-worktree scopes preserved. Current published version remains 1.10.0; these changes are an unreleased, locally verified candidate, not a remote release or a running-gateway claim. Adán owns the handoff; Builder and both independent reviews have finished. No gateway restart, Hermes-core/profile/global-configuration edit, push, publication or remote-protection change occurred.
@@ -20,8 +141,64 @@ The sole nonblocking Q4 N1 is a pre-existing synthetic-package fixture/import-or
 
 **Next action / authority gate:** local functional and quality criteria are complete. After the focused closure checks, Alberto may restart the gateway to load the candidate; only a fresh loaded-tool check after his restart can establish activation. No autonomous restart. Preserve the broadly dirty worktree and private evidence; do not sweep inherited feature/repair hunks into the quality commit. Only the separable closure documentation is committed locally; runtime, test and governance changes remain in the preserved dirty worktree because their Git hunks overlap inherited work. No clean-clone/release-complete commit is claimed. Publication remains separately gated.
 
-### Historical snapshot from HEAD — superseded above
+### Historical records — superseded by the current snapshot above
 
+### Antecedente de intake y worktrees (histórico; gates actuales arriba)
+
+## Optional worktrees — authorized implementation (2026-10-18)
+
+### Worktrees: PASS_WITH_NOTES funcional y revisión final cerrada; release/activación bloqueados
+
+Estado efectivo actualizado (sustituye las cifras y pendientes históricos de los párrafos siguientes): F1–F5 cerrados en revisión focal `.artifacts/worktree-mvp/fix-review/review.md`; F6 responsabilidades aceptadas y excepción exacta decidida por Adán en `decisions/0002-worktree-public-signature-exception.md`, máximo29 hasta 2026-11-17, sin alterar policy. TUI real new/resume PASS según evidencia de Adán en real-acceptance. CLI real FAIL `pd_20261018_151254_a7za5e`: terminal en perfil, cwd nativo NULL, resume correctamente bloqueado; no se reescribe esa evidencia.
+
+F7: subprocess cwd no vencía terminal.cwd del perfil; source profile-delegate impedía persistencia nativa de cwd. Sólo managed workspace CLI usa --in y source cli. Bootstrap enlaza scope nativo terminal completo del perfil, cambia únicamente TERMINAL_CWD y rechaza backend no local; ningún monkeypatch, prompt-workdir, DB edit, perfil/core externo o modificación de aprobación. Genérico y TUI quedan sin este cambio. `--in` aislado fue refutado por focused2.log: el bridge del primer terminal recuperaba la carpeta del perfil. Scope nativo resuelve ese segundo fallo.
+
+Prueba sin inferencia: parser/--in reales, import config CLI, scope nativo, terminal real pwd+lectura, `_ensure_db_session` real crea row y resume nativo restaura cwd; asociación plugin pasa verificación read-only omitiendo workdir. AIAgent se instancia sin constructor/modelo y se inicializan sólo campos de persistencia: no es un journey CLI completo ni aceptación con proveedor. `.artifacts/worktree-mvp/f7/native-cwd.json` registra cwd/lecturas reales. Regresión rechaza SSH; genérico conserva source histórico y no --in. FIFO de fixture propio elimina su nodo en finalizer, basetemp externo; no se restaura FIFO retenido ni se toca review.
+
+Gates del candidato F7: portable 237 passed/581 deselected, native 581 passed/237 deselected, full -W error 818 passed; final focus 3 passed después de comentario noqa. Lock/sync/prerequisite, changed Ruff, compilación y diff-check PASS. TOP policy VALID; informe global f7/quality.json FAIL por incoming, con excepción exacta aplicada; f7/metrics.json incluye todos símbolos core/execution/child_bootstrap/admission/worktrees, f7/quality-delta.json distingue incoming. Ruff global conserva vendor E702; release mismatch Python heredado. Logs y fingerprint final en `.artifacts/worktree-mvp/f7/`; incoming/fixes/review previos inmutables.
+
+Aceptación posterior de Adán: CLI real new `pd_20261018_154717_z2gxef` y resume `pd_20261018_155233_l3ls0p` PASS con el mismo SID `20261018_154728_891f6e`; payload de resume sin workdir y terminal `pwd` sin workdir devolvió el checkout. SessionDB read-only registra cwd correcto y source cli. TUI real previo conserva new/resume PASS, SID `20261018_150248_6fe9fa`; F7 modifica sólo CLI, por lo que esa evidencia sigue aplicando. Ambos hijos empty parten de SHA `59d99a9ae5aacf2487b4dbf9c4b45b11ac3b514d`, en ramas/checkouts distintos: alpha10 y beta20. Adán, único integrador tras terminar los hijos, copió exactamente esos dos archivos a tercer worktree y ejecutó `verify_combined.py`: WORKTREE_INTEGRATION_OK alpha=10 beta=20 sum=30, exit0. Fuente limpia/intacta y hashes config caller/empty sin cambios. Son journeys seriales; no demuestran overlap/batch-notificación. Fallos previos conservados. Evidencia propia consolidada en `.artifacts/worktree-mvp/real-acceptance/acceptance-summary.json`; primer intento del fixture de integración falló porque write guards impidieron sobrescribir antes de lectura, después se leyó/copió y comprobó correctamente.
+
+Revisión final independiente terminada: `pd_20261018_155806_l3o5cl`, `.artifacts/worktree-mvp/f7-review/review.md`: worktree funcional PASS_WITH_NOTES, F7 cerrado, excepción exacta ADR0002 PASS local. Reviewer verificó identidad de código/tests/policy, requests/resultados, sesiones nativas read-only, scope CLI completo salvo cwd y ejecutó la integración combinada. Regresiones propias: 3 focales y 9 de seam/carga PASS; no nuevos hallazgos materiales F7. No confundir prueba nativa sin inferencia con proveedor ni journeys seriales con overlap/batch-notificaciones. La fuente cli afecta historial/MRU, efecto aceptado y documentado.
+
+Release/activación BLOCKED_NEEDS_FIXES: siete infracciones fuertes heredadas no exceptuadas frente baseline Git (vendor tooling, child_bootstrap.main y test_tui_rpc), diez E702 de vendor y discrepancia Python del validador (`>=3.11,<3.14`) frente pyproject (`>=3.11,<3.15`). Adopción de gobernanza/CI protegida y aceptación overlap/notificaciones multi-dispatch siguen separadas. No se reparan fuera de alcance ni se rebajan gates; siguiente trabajo requiere autoridad separada. No más proveedores/refactor cosmético para este MVP.
+
+Identidad reconciliada por Reviewer: `.artifacts/worktree-mvp/f7-review/snapshot.json`, agregado `47e223354003675e3a5324982d7580b642c1bfd35baea31265092597aa8e5cac`, sólo tres docs diferentes respecto al fingerprint F7 original; código/tests/policy/ADR idénticos. Tras cerrar review Adán actualiza únicamente estado/documentación (incluye reconciliar CHANGELOG/README); los artefactos revisados quedan inmutables y no se atribuye su hash al árbol documental posterior. Sin restart, staging, commit, push ni publicación; restart_readiness=false. Builder/Reviewer terminaron, Adán posee coordinación.
+
+#### Antecedente F1–F6 (histórico; estado/decisiones actuales arriba)
+
+Estado efectivo: implementación y correcciones locales presentes; revisión focal posterior y aceptación real pendientes. La revisión independiente `.artifacts/worktree-mvp/review/review.md` fue BLOCKED_NEEDS_FIXES (5 repros fallidos, 2 positivos); su evidencia permanece inmutable. Builder es único escritor autorizado para corregir F1–F6, bajo complete-target local. Adán posee la aceptación real; no se repite el intento nested rechazado ni se cambian aprobaciones/ancestros. Sin gateway restart, Hermes-core/perfiles/global-config, push, staging, reset, stash, prune ni commit.
+
+Correcciones: rechazo previo y revalidación de filtros externos smudge/process sin modificar config; hechos created observados prevalecen sobre planned persistido; retry denegado finaliza conservando child_session_id/history; final y completion del worker proyectan workspace. Approval/workspace comparten un único scan bounded no-follow de candidatos pd_, con fallos ajenos aislados y evidencia relevante dañada bloqueada. admission.py normaliza una vez y admite sin asignación; worktrees resuelve nuevo/retenido y posee preparación; execution observa intentos y selección de transporte; core conserva locks/admisión/publicación común. La ejecución sync sigue fuera del lock de admisión. Sólo dos archivos nuevos en esta corrección: admission.py y test_worktree_fixes.py. Fixtures de resume usan nombres pd_ y los conteos excluyen explícitamente su seed.
+
+Gates seriales: portátil **237 passed / 578 deselected / 7.48s**; nativo **578 passed / 237 deselected / 145.67s**; full warnings-as-errors **815 passed / 144.54s**. Tras cambios finales de mensaje de recuperación, lectura de IDs dañados y assertion de completion: regresiones focales **34 passed / 5.66s**. Lock/sync, native prerequisite, changed Ruff, compilación, diff check y fresh discovery pasan. No equivalen a proveedor real. Hubo runs intermedios fallidos durante corrección (scope/import y fixtures seed); se conservan logs, no se cuentan como aceptación. Evidencia final en `.artifacts/worktree-mvp/fixes/`.
+
+TOP sigue QUALITY_FAIL. Comparación con incoming exacto: único strong nuevo/empeorado en producción propia es firma pública delegate_profile **26→29 parámetros**, incompatible con TOP sin decisión del propietario; API preservada, sin kwargs, excepción ni umbral cambiado. Todos los símbolos desplazados están medidos en fixes/metrics.json y quality-delta.json. Total de líneas lógicas core+execution+admission+worktrees **3152 incoming →3367 revisado →3389 corregido**: no se vende extracción como reducción neta. Los demás fuertes incoming siguen separados. Ruff global conserva diez E702 vendor; release sigue pyproject <3.15 vs validator <3.14; no reparados fuera de scope.
+
+Procedencia: HEAD e46c84910ea00e0f4b8795cd2bfcc35378ce1cee; incoming/files.tar SHA256 1868392f61210f5616a8aab2aa7a806ccba8a790a11792b3395719ceb18e3955 intacto. own.diff y candidate-identity.json originales se conservan. Nuevos delta contra incoming, delta contra revisado y fingerprint: fixes/{own.diff,fixes.diff,candidate-identity.json}; fixes/reviewed-candidate.tar conserva bytes previos. README explica filtros, alternativa manual y asociación dependiente de retención de artefactos: worktrees sobreviven prune, pero no se promete resume indefinido.
+
+Siguiente dueño: Adán revisa correcciones/candidato quieto, resuelve conflicto firma/TOP y gates heredados con autoridad pertinente, y ejecuta CLI/TUI new/resume y dos hijos mismo perfil/SHA más integración single-writer. No aviso de restart-readiness hasta cumplir todo. Historial de otras tareas debajo no concede autoridad actual.
+
+## Multi-dispatch candidate — implementation/review in progress
+
+Owned changes add batch.py, new tool schema/handler/registration/manifest, effective review-preset exclusion, created-run launch-error handles, and the approved literal prompt/recovery templates. Seventeen batch regressions exercise real singular admission/artifact seams, actual capability-filter definitions, same-profile workdirs, dedupe, late failure and partial launch. Full installed suite: **777 passed / 141.89 s**, warnings-as-errors. Portable partition after correctly marking the native-coupled batch module: **237 passed / 540 deselected / 7.31 s**. Changed-file Ruff, compilation and diff checks pass. Initial recovery wording assertions were updated to the approved template without changing parser semantics.
+
+Independent candidate review is running as `pd_20261015_132755_1k73y2`; do not duplicate it. Design review `pd_20261015_120702_sgoyka` PASS remains distinct. Real two-child overlap/notification/control acceptance and fresh discovery remain pending. No gateway restart or activation. Existing release gate blockers remain: ten vendor Ruff E702 errors; validate_release expects <3.14 while incoming pyproject declares <3.15; whole-candidate quality FAIL includes incoming debt, with no new/worsened strong finding in batch.py/__init__.py/core.py after extracting bounded launch-failure publication. Report: `.artifacts/multidelegate-quality.json`. No thresholds or existing gates weakened. Incoming snapshot: `/opt/data/profiles/builder/workspace/multidelegate-incoming`. No commit yet; preserve unrelated dirty files.
+
+
+## Child bootstrap import collision repair (2026-10-08)
+
+The capability filter imports Hermes `model_tools`, whose discovery can load another plugin's flat `core` before the bootstrap reads the request. The confirmed interactive failure therefore resolved `operator_read_json` against that foreign module. Script startup now binds a private package to the plugin directory and resolves `core`, `native_approval`, and `child_reasoning` through it; their existing package-relative dependencies stay isolated. Generic foreign module entries are preserved and the plugin entrypoint is not executed to create this namespace. No Hermes-core, other-plugin, model, credential or global configuration changes were made.
+
+Four new fresh-process CLI/TUI regressions fail before the repair (including the exact foreign-core ImportError) and pass afterward, covering a preloaded foreign core and all sibling helper names. Native focused tests: 133 passed. Full installed suite with warnings as errors: 760 passed. Portable Python 3.13 partition: 237 passed, 523 deselected. Changed-file Ruff, compilation and diff checks pass; fresh registration/validation-handler smoke passes for six tools and one CLI command. The existing broad gate remains blocked by ten vendor Ruff errors and `validate_release.py` expecting `<3.14` while the pre-existing project declaration is `<3.15`; neither was changed for this repair.
+
+Real detached background interactive smoke `pd_20261008_163454_dby3gx` completed with readiness ready, actual transport `tui_stdio`, two API calls, one read-only profile-instruction tool call, and task `ok` / contract `valid` / summary `PROFILE_DELEGATE_IMPORT_SMOKE_OK`. Caller, reviewer and managed configuration/environment fingerprints remained unchanged. The first smoke `pd_20261008_163312_ilpgy2` also completed transport with two API calls but reported task blocked because its calculation/no-tools instruction conflicted with profile requirements; it is not counted as task-success acceptance. No transport fallback, plugin disabling, service restart or push was used. Existing gateway-loaded wrapper activation is not claimed; the repaired bootstrap is loaded by each fresh child.
+
+## Reasoning adapter — local candidate
+
+The operator-authorized reasoning repair replaces the config-only managed-folder substitution with task/profile-bound child adapters for CLI saved-route reasoning resolution and TUI final construction. Managed browser configuration/environment stays in place; administrator reasoning pins and malformed/unreadable policy refuse overrides. Public policy now reports the actual reasoning blockers. This supersedes the earlier direct-native-only reasoning proposal; it does not force eager resume or modify Hermes core. Gateway activation remains outside this work.
+
+Focused native regressions: 43 passed (171 deselected), including every accepted effort, explicit none, saved provider/model preservation, other-profile/source isolation, policy failures and inheritance. Final native suite: 756 passed; portable Python 3.13 suite: 237 passed, 519 deselected. Registration validation passes (six tools, one CLI command); changed-file lint, compilation and diff checks pass. Four real-provider child calls pass: CLI and TUI each start with high and resume the same session with low, with the requested effort observed at the provider boundary. Managed/profile configuration hashes remain unchanged; a separate child probe confirms managed browser enforcement remains enabled. Gateway activation remains pending. Repository-wide lint and strict quality remain blocked by existing unrelated vendor lint and legacy complexity findings; the new adapter and regression module have no strong quality findings. Sanitized evidence: `.artifacts/reasoning-adapter-acceptance.json`.
 
 ## Native simplification — current execution
 
@@ -31,7 +208,7 @@ TUI follow-up fixtures now reuse existing CompleteClient preparation; scenario-s
 
 Policy loading now declares each field once, sharing its type, default and supported environment suffix across YAML/environment resolution. This removes 16 physical / 17 substantive production lines; all test/support bytes and 715 cases are unchanged. Ordered values/sources, ignored environment keys, validation error precedence and fresh mutable defaults are preserved in 505 actual-source comparisons; independent native review passes. Focused baseline/candidate: 43 passed each. Native full: 715 passed / 109.55 s; portable: 234 passed / 481 deselected / 6.47 s. Private evidence: `.artifacts/refactor-20261003/policy-field-registry/`. No Hermes-core/profile/global YAML writes or activation; real runtime and full reduction acceptance remain pending.
 
-Latest reasoning simplification candidates were rejected and restored to committed runtime code. Native CLI session restoration can overwrite explicit reasoning; deferred TUI construction can ignore a session reasoning override when restoring a routable provider; unconditional eager resume can fail on the old route before an explicit replacement is applied. Do not count candidate gates or line counts as accepted progress. Retain current reasoning preparation until a supported native path preserves all selection and recovery contracts. Private evidence: `.artifacts/refactor-20261003/native-reasoning-selection/`.
+Earlier direct-native reasoning simplification candidates were rejected and restored to committed runtime code. Native CLI session restoration can overwrite explicit reasoning; deferred TUI construction can ignore a session reasoning override when restoring a routable provider; unconditional eager resume can fail on the old route before an explicit replacement is applied. Do not count candidate gates or line counts as accepted progress. Those failures explain why the former managed-folder preparation was retained; the child adapter above now addresses the restoration/construction boundaries. Private evidence: `.artifacts/refactor-20261003/native-reasoning-selection/`.
 
 Policy and execution string lists now deduplicate with insertion-ordered dictionaries, preserving first-occurrence order, list return types and all validation/error guards. Execution still refuses more than 100 input items before normalization. This removes two physical/substantive production lines; all test/support bytes and 715 cases remain unchanged. Native actual-source comparisons cover 12,378 outcomes/errors across 6,187 inputs; independent review reproduces 50 boundary outcomes and confirms the remainder of the module is unchanged. Seven alternating native pairs: eight configuration names 2.15 -> 1.77 microseconds, 100 execution names 182 -> 92 microseconds, 5,000 configuration names 209.90 -> 0.96 ms. Peak temporary Python allocations increase by 392 / 3,616 / 114,000 bytes respectively; this is the explicit hash-table tradeoff, not provider/workload/RSS acceptance. Focused baseline/candidate: four passed / 175 deselected each. Native full: 715 passed / 109.72 s; portable: 234 passed / 481 deselected / 6.55 s. Private evidence: `.artifacts/refactor-20261003/ordered-list-normalization/receipt.json`.
 

@@ -16,7 +16,7 @@ def test_resume_rejects_broad_frozen_policy_under_restricted_ancestor(tmp_path, 
     ancestor_path.write_text(json.dumps({"native_approval": ancestor}))
     monkeypatch.setenv("PROFILE_DELEGATE_APPROVAL_REQUEST", str(ancestor_path))
     root = tmp_path / "runs"
-    run = root / "previous"
+    run = root / "pd_previous"
     run.mkdir(parents=True)
     (run / "request.json").write_text(json.dumps({"profile_home": target.home, "native_approval": frozen}))
     (run / "status.json").write_text(json.dumps({"child_session_id": "frozen_session"}))
@@ -65,8 +65,8 @@ def test_cancelled_requested_resume_does_not_establish_authority(tmp_path, monke
     target = core.ValidatedProfile("worker", "worker", str(tmp_path / "worker"))
     frozen = native_approval.snapshot("yolo", "yaml", "caller", target.home, {}, {})
     root = tmp_path / "runs"
-    established = root / "established"
-    stale = root / "cancelled"
+    established = root / "pd_established"
+    stale = root / "pd_cancelled"
     established.mkdir(parents=True)
     stale.mkdir()
     (established / "request.json").write_text(json.dumps({"profile_home": target.home, "native_approval": frozen}))

@@ -84,6 +84,9 @@ def _schema() -> Dict[str, Any]:
                 'string', 'Serialization mode. auto (default) preserves legacy format selection; explicit json/markdown/text wins and contradictory contracts fail before launch. JSON uses a separate object envelope; new prose requires a terminal verdict.', enum=['auto', 'json', 'markdown', 'text'], default='auto'),
             'workdir': _field(
                 'string', 'Optional working directory for the delegated Hermes subprocess. Defaults to the current process working directory.', default=''),
+            'worktree': _field('boolean', 'Opt-in new Git worktree from explicit checkout root; parent authorization and destination policy apply. Resume omits creation options.', default=False),
+            'base_ref': _field('string', 'Local commit reference for new worktree; default HEAD. Coordinator passes one resolved SHA to all batch items.'),
+            'branch': _field('string', 'New branch for worktree; default pd/<task_id>. Never force/reuse an existing branch.'),
             'background': _field(
                 'boolean', 'Run asynchronously, return a task_id immediately, and keep the originating conversation responsive. Prefer background for long, multi-stage, or independently monitorable work; short bounded specialist work may remain foreground. Advisory only: no automatic mode selection or rejection.', default=False),
             'notify_on_complete': _field(
@@ -113,6 +116,29 @@ def _schema() -> Dict[str, Any]:
             'duplicate_policy': _field(
                 'string', 'reuse returns an identical active request from the same origin; new intentionally creates another run.', enum=['reuse', 'new'], default='reuse'),
         }, ['profile', 'task', 'session_title'])
+
+
+def _multischema() -> Dict[str, Any]:
+    properties = _schema()["parameters"]["properties"]
+    excluded = {"background", "notify_on_complete", "transport_mode", "preflight", "session_mode", "session_id"}
+    item = {"type": "object", "properties": {k: v for k, v in properties.items() if k not in excluded},
+            "required": ["profile", "task", "session_title"], "additionalProperties": False}
+    return _tool_schema("profile_multidelegate", "Dispatch independent new background sessions in one invocation. accepted means dispatched, not completed. Individual notifications and controls; no capacity reservation or batch idempotency. Orchestrator owns worktrees and shared-service isolation.",
+                        {"tasks": {"type": "array", "items": item, "minItems": 1},
+                         "preflight": {"type": "boolean", "default": False}}, ["tasks"])
+
+
+def _multihandler(args=None, **kwargs) -> str:
+    try:
+        if __package__ and __package__ in sys.modules:
+            from .batch import multidelegate
+        else:
+            from batch import multidelegate
+        result = multidelegate(args, _multischema()["parameters"]["properties"]["tasks"]["items"], _current_origin())
+    except Exception as exc:
+        result = {"status": "rejected", "items": [], "run_created": False,
+                  "error_code": getattr(exc, "code", "internal_error"), "error": str(exc)}
+    return json.dumps(result, ensure_ascii=False)
 
 
 def _status_schema() -> Dict[str, Any]:
@@ -219,8 +245,8 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
             session_title=payload.get("session_title", ""),
             session_mode=payload.get("session_mode", "new"),
             session_id=payload.get("session_id", ""),
-            background=bool(payload.get("background", False)),
-            notify_on_complete=bool(payload.get("notify_on_complete", True)),
+            background=payload.get("background", False),
+            notify_on_complete=payload.get("notify_on_complete", True),
             origin_session_key=origin["session_key"],
             origin=origin,
             child_approval_mode=payload.get("child_approval_mode", None),
@@ -235,6 +261,9 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
             duplicate_policy=payload.get("duplicate_policy", "reuse"),
             transport_mode=payload.get("transport_mode", "auto"),
             preflight=payload.get("preflight", False),
+            worktree=payload.get("worktree", False),
+            base_ref=payload.get("base_ref"),
+            branch=payload.get("branch"),
         )
     except ProfileDelegateError as exc:
         result = _error_result(exc)
@@ -358,6 +387,7 @@ def register(ctx: Any) -> None:
     )
     for name, schema, handler, desc in [
         ("profile_delegate", _schema(), _handler, "Profile Delegate 🤝: bounded task delegation to another Hermes profile."),
+        ("profile_multidelegate", _multischema(), _multihandler, "Dispatch independent profile tasks."),
         ("profile_delegate_status", _status_schema(), _status_handler, "Inspect a Profile Delegate run by task_id."),
         ("profile_delegate_steer", _steer_schema(), _steer_handler, "Steer an active Profile Delegate run."),
         ("profile_delegate_cancel", _cancel_schema(), _cancel_handler, "Cancel an active Profile Delegate run."),

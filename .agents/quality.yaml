@@ -1,0 +1,68 @@
+schema_version: '1.0'
+policy_id: repository-quality
+minimum_quality_expected: top
+change_scope:
+  default: all
+  include_untracked: true
+  detect_file_renames: true
+scope:
+  include: []
+  exclude: []
+  languages:
+  - python
+baseline:
+  strategy: merge_base
+  ref: e46c84910ea00e0f4b8795cd2bfcc35378ce1cee
+  unavailable: error
+adapters:
+- id: core-source
+  type: builtin
+  implementation: core_source_v1
+  languages: []
+  required_at: soft
+- id: python-ast
+  type: builtin
+  implementation: python_ast_v1
+  languages:
+  - python
+  required_at: standard
+thresholds:
+  python_ast_v1.function_logical_lines:
+    warning: 40
+    strong: 80
+  python_ast_v1.cyclomatic_v1:
+    warning: 10
+    strong: 15
+  python_ast_v1.max_nesting:
+    warning: 4
+    strong: 6
+  python_ast_v1.parameter_count:
+    warning: 5
+    strong: 8
+  python_ast_v1.file_logical_lines:
+    warning: 500
+    strong: 900
+policy:
+  changed_code_only: true
+  untouched_existing_debt: report
+  soft_new_strong: report
+  standard_new_strong: exception_or_fail
+  top_new_strong: exception_or_fail
+  required_adapter_failure: incomplete
+exceptions:
+- id: worktree-public-signature-20261018
+  selector:
+    path: core.py
+    language: python
+    symbol: delegate_profile
+    kind: function
+  metric: python_ast_v1.parameter_count
+  allowance:
+    maximum: 29
+  rationale: Preserve the 26-parameter positional-compatible public API while adding three approved explicit workspace options; this boundary is a one-call adapter, not a policy or state owner.
+  approval:
+    authority: Adán — local implementation controller; independently reviewed by Reviewer
+    reference: decisions/0002-worktree-public-signature-exception.md
+  created_at: '2026-10-18'
+  expires_at: '2026-11-17'
+extensions: {}

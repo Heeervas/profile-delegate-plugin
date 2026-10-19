@@ -1,0 +1,97 @@
+name: Prepare release
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_version:
+        description: 'Latest existing stable release, e.g. 1.11.0 (no v)'
+        required: true
+        type: string
+      bump:
+        description: Semver increment (upcoming worktree release uses minor)
+        required: true
+        type: choice
+        options: [patch, minor, major]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      candidate: ${{ steps.prepare.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.14'
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          version: '0.11.6'
+      - name: Synchronize metadata and open or reuse release PR
+        id: prepare
+        env:
+          BASE_VERSION: ${{ inputs.base_version }}
+          BUMP: ${{ inputs.bump }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest=$(git tag --list 'v*' --sort=-version:refname | python -c 'import re,sys; print(next((s.strip()[1:] for s in sys.stdin if re.fullmatch(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\n?",s)), ""))')
+          test "$latest" = "$BASE_VERSION"
+          target=$(python scripts/release_version.py --base-version "$BASE_VERSION" --bump "$BUMP")
+          uv lock --check
+          uv sync --frozen
+          uv run --frozen python scripts/validate_release.py
+          branch="release/${target}-${GITHUB_SHA}"
+          if git diff --quiet; then
+            echo "candidate=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add plugin.yaml pyproject.toml README.md CHANGELOG.md uv.lock
+          git commit -m "chore(release): prepare ${target}"
+          if git ls-remote --exit-code --heads origin "$branch"; then
+            git fetch origin "$branch"
+            test "$(git rev-parse FETCH_HEAD^)" = "$GITHUB_SHA"
+            git diff --exit-code HEAD FETCH_HEAD
+            candidate=$(git rev-parse FETCH_HEAD)
+          else
+            # Native gh credential helper, scoped to this ephemeral job; never force push.
+            gh auth setup-git
+            git push origin "HEAD:refs/heads/$branch"
+            candidate=$(git rev-parse HEAD)
+          fi
+          pr=$(gh pr list --head "$branch" --base "$GITHUB_REF_NAME" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$pr" ]; then
+            gh pr create --draft --head "$branch" --base "$GITHUB_REF_NAME" --title "Release ${target}" --body 'Automated semver synchronization. Required CI and trusted quality gates must pass; review and merge are operator-owned. No tag or publication is performed.'
+          fi
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+    with:
+      candidate: ${{ needs.prepare.outputs.candidate }}
+
+  quality:
+    needs: prepare
+    uses: ./.github/workflows/quality.yml
+    with:
+      candidate: ${{ needs.prepare.outputs.candidate }}
+      trusted_base: ${{ github.sha }}

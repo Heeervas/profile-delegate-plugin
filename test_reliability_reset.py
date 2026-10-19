@@ -147,12 +147,12 @@ def test_text_status_grammar_accepts_one_explicit_status(raw: str, expected: str
     assert result["status"] == expected
 
 
-def test_ambiguous_json_with_leading_ok_can_never_recover_success():
-    raw = (
-        "OK\n"
-        '{"status":"ok","summary":"one"}\n'
-        '{"status":"blocked","summary":"two"}'
-    )
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("extra", ["", ',"artifacts":[],"errors":[],"next_steps":[]'])
+def test_ambiguous_json_with_leading_ok_can_never_recover_success(reverse, extra):
+    envelopes = [f'{{"status":"ok","summary":"one"{extra}}}',
+                 '{"status":"blocked","summary":"two"}']
+    raw = "OK\n" + "\n".join(reversed(envelopes) if reverse else envelopes)
     parsed, meta = core.parse_json_result(raw)
     result = core.normalize_result(
         parsed, "/tmp/stdout.txt", raw_output=raw, parse_meta=meta,

@@ -1,6 +1,22 @@
 # Profile Delegate 🤝
 
-Version: `1.10.0`
+Version: `1.12.0`
+
+Upcoming local release: **optional Git worktrees**, with explicit base/branch selection
+and verified CLI/TUI resume in the assigned checkout. Multi-dispatch was released in
+1.11.0; it supports composition, not a new headline feature of 1.12.0.
+
+Python support: **>=3.11,<3.15**. Portable CI covers 3.11–3.14; the pinned Hermes
+integration job uses 3.14 as a test environment, not a narrower support promise.
+
+Release preparation is opt-in CI (`Prepare release`, base `1.11.0`, bump `minor`
+for this release). It synchronizes five metadata files, opens/reuses a draft PR,
+and calls the existing test and trusted quality gates on its exact candidate.
+Ordinary tests never bump versions. Retry the same base/bump and source SHA;
+partial metadata writes refuse safely. Branches are never force-pushed, tags are
+never rewritten, and this workflow does not tag or publish. Repository Actions
+must permit PR creation; trusted governance must already be adopted. See
+`.agents/validation.md` for the canonical verification commands.
 
 > Stable local-power-user Hermes Agent plugin. It is **not a sandbox** and should be configured deliberately before broad use.
 
@@ -14,6 +30,36 @@ Example uses:
 - Ask a `builder` profile to inspect implementation risk.
 - Ask a `research` profile to check public sources.
 - Ask a domain profile to produce a second opinion without mixing its memory into the caller.
+
+## Multi-dispatch (released in 1.11.0)
+
+`profile_multidelegate(tasks: [...], preflight: false)` dispatches independent new sessions, including multiple tasks to the same profile. Each item requires `profile`, `task`, `session_title` and accepts singular overrides except session/resume and execution-mode fields. The facade forces new interactive background runs with native notifications. Root/items reject unknown fields and invalid types; full validation precedes run creation. A trusted routable origin is required. Maximum items is min(max_concurrent,max_async), not a slot reservation or RAM guarantee.
+
+`validated` is preflight-only with zero runs. `accepted` means every index was started/reused, not execution or task success. `partial` preserves successful dispatches plus failed/not_started indices; `rejected` means none accepted or global validation failed, and may still identify a failed created run. An observed dispatch failure stops later entries without cancelling siblings; a later worker capacity failure remains individual. Use each task_id with existing status/steer/cancel tools.
+
+Dedupe can map identical indices to one active run within its existing window, without extra notification per index. `duplicate_policy=new` intentionally creates independent runs but bypasses no policy or limit. Retrying a whole batch is not idempotent: finished runs/window expiry can repeat work. After lost replies inspect list/status before retrying side effects. Parent interruption may lose index correlation while children remain live. Notifications are per unique run, native and best effort, not one aggregate return.
+
+The orchestrator owns write isolation/integration. Builders may edit the same relative names in distinct worktrees with per-item workdir. Different dirs do not isolate services, ports or DBs. The facade composes singular optional worktree preparation; it does not manage dependencies, scheduling or a durable batch ledger. Resume remains singular-only. See `plans/multidelegate-tool-proposal.md` for the reviewed contract; implementation acceptance and gateway activation are separate.
+
+## Optional Git worktrees — principal feature of 1.12.0
+
+Set `worktree: true` on a **new** `profile_delegate` request with an explicit non-bare checkout root and `capability_preset: "build"`. Optional `base_ref` defaults to local `HEAD`; optional `branch` must be new and defaults to `pd/<task_id>`. No fetch, force, stash, source commit, hooks, setup, merge or cleanup is performed. Repositories with configured external `filter.*.smudge` or `filter.*.process` drivers are refused before allocation and checked again before creation; authorize and prepare those checkouts manually, then pass `workdir` without `worktree:true`. Persistent Git config is not changed. Source dirty files are excluded and remain untouched. Parent command approval and existing workdir policy apply to both source and destination; child approval is not parent authorization. `review` cannot create worktrees.
+
+```json
+{"profile":"builder","task":"Implement the bounded change","session_title":"isolated change","workdir":"/allowed/project","worktree":true,"base_ref":"LOCAL_COMMIT_SHA","background":true}
+```
+
+Destinations are `<repo-parent>/.profile-delegate-worktrees/<repo-name>/<task_id>`. `preflight: true` only inspects and reports a destination pattern; it reserves nothing. An optional `workspace` block reports source, requested ref, initial SHA/branch, destination and preparation state (`planned`, `created`, `unknown`) through preflight, dispatch/reuse, status/final and created-run errors. `request.workdir` is the verified effective checkout. Unknown preparation or failed dispatch never means safe to delete resources. Worktrees and branches remain after every outcome and artifact retention does not delete them.
+
+For batch, resolve one local commit SHA first and send that same `base_ref` in every worktree item. Defaults resolved independently do not promise a common base. Batch uses the singular engine and retains partial handles; inspect status/list before repeating a lost request.
+
+Continue using **singular** `session_mode: "resume"`, `session_id`, with creation options omitted. Omitted `workdir` reuses the retained checkout; an explicit one must match. The plugin checks origin authorization, repository association and native effective-session cwd before continuation/retry. Legitimate new commits, renamed branches or detached HEAD are permitted. Missing/mismatched native cwd blocks with manual recovery, never allocates a replacement checkout. Historical generic delegation does not acquire a Git requirement.
+
+Artifact pruning leaves worktrees and branches intact, but automatic resume association and frozen approval lookup depend on retained run artifacts. Retain those artifacts while continuity is needed. After they expire, recover the existing checkout manually; the plugin does not promise indefinite automatic association or allocate a replacement.
+
+Managed CLI checkouts use native `--in`, source `cli` (so Hermes persists native cwd), and a child-only native terminal scope preserving profile settings except local cwd. Non-local terminal backends are refused rather than silently changed. These managed sessions therefore also appear in native CLI history and most-recent-session selection; integrations filtering by source should account for this. Generic launches retain source `profile-delegate`; TUI is unchanged.
+
+Without `worktree`, new generic delegation never consults Git. Passing a manually prepared checkout/copy as `workdir` remains the fallback, including non-Git projects. Real provider CLI/TUI new/resume and a same-base isolated-change integration have passed local independent review. The separate real batch acceptance also passed; none of this establishes that the running gateway has loaded the candidate. Current evidence and activation boundary live in `STATE.md`.
 
 ## Features
 
@@ -244,7 +290,9 @@ Notes:
 - `toolsets` and `skills` are capability-bearing and fail closed unless every requested item is present in the corresponding plugin allowlist.
 - Call `profile_delegate_policy` before using optional overrides. Deterministic preflight failures report all `unsupported_fields` together with a one-shot `retry_patch` and `run_created:false`.
 - `capability_preset` defaults to `build`, which preserves the selected/inherited child capabilities and never bypasses approval policy. `review` selects Hermes' `web` and `file` toolsets, then removes `write_file`, `patch`, `terminal`, `process`, `execute_code`, and other mutating/delegating schemas inside the child before agent construction. It leaves `read_file` and `search_files`; it does not claim a read-only terminal. To avoid ambiguous widening, `review` cannot be combined with a per-call `toolsets` override.
-- `reasoning_mode` defaults to `inherit`, which creates no overlay. `override` requires `reasoning_effort`; `none` is a real explicit override, never inheritance. For compatibility, an effort supplied without a mode still means override. Managed-scope/default-profile conflicts fail in preflight with a corrective patch before run allocation.
+- `reasoning_mode` defaults to `inherit`, which creates no overlay. `override` requires `reasoning_effort`; `none` is a real explicit override, never inheritance. For compatibility, an effort supplied without a mode still means override. Default-profile, administrator-pinned reasoning, and incompatible-runtime conflicts fail in preflight with an inheritance retry before run allocation. An unrelated managed browser/security scope does not block reasoning.
+- Explicit reasoning uses a child-only adapter: native CLI `--reasoning` plus preservation during saved-route restoration, and a TUI construction override after deferred route selection. It retains `HERMES_MANAGED_DIR` and the deployment browser-policy environment; no profile or administrator settings are rewritten. Administrator-pinned `agent.reasoning_effort` (including disabled/null) or nonempty `agent.reasoning_overrides` require inheritance; malformed or unreadable managed policy fails closed. Native helper signatures are checked before admission and again at binding; Hermes upgrades must pass the native reasoning regressions and real new/resume smoke before activation.
+- `profile_delegate_policy` reports `reasoning_state` and `reasoning_blockers`, distinguishing caller-policy denial, administrator reasoning policy, and adapter incompatibility. Provider/model support still determines whether the requested effort can execute.
 - Accepted reasoning requests are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Runtime/provider support still decides whether a request executes successfully. `max` is retained for forward-compatible GPT-5.6 use; `ultra` is a separate multi-agent mode, not a reasoning effort.
 - `request.json`, `status.json`, sync/async responses, and final `result.json` expose `requested_execution`, `effective_execution`, `effective_capabilities`, and `approval_policy`. `approval_events.jsonl` records bootstrap/policy outcomes with timestamp, effective policy, detector/reason, outcome, SHA-256, and input length where applicable.
 - `background=true` returns immediately with `mode: "async"`, `task_id`, and run artifact paths; the delegated run continues in the configured thread or detached worker using persisted request data.
@@ -410,7 +458,6 @@ $HERMES_HOME/profile_delegate/runs/<task_id>/
   stdout.txt
   stderr.txt
   result.json
-  reasoning_config/  # config-only managed overlay when reasoning_effort is requested
 ```
 
 Security posture:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import codecs
 import json
 import re
 import os
@@ -48,6 +49,7 @@ class TuiRpcClient:
         self._stderr_tail = ""
         self._stdout_buffer = bytearray()
         self._stderr_eof = False
+        self._stderr_decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.last_event_type = "none"
         self._frame_context = "idle"
         # Single-owner client: a locally timed-out RPC may still answer later.
@@ -59,6 +61,12 @@ class TuiRpcClient:
     def stderr_tail(self) -> str:
         self._drain_stderr()
         return self._stderr_tail
+
+    def _finish_stderr(self) -> None:
+        if not self._stderr_eof:
+            text = self._stderr_decoder.decode(b"", final=True)
+            self._stderr_tail = (self._stderr_tail + text)[-self.max_diagnostic_chars:] if self.max_diagnostic_chars else ""
+            self._stderr_eof = True
 
     def _drain_stderr(self) -> None:
         """Bound each poll so a continuous diagnostic producer cannot starve RPC."""
@@ -74,13 +82,14 @@ class TuiRpcClient:
                     if not select.select([fd], [], [], 0)[0]:
                         break
                     chunk = os.read(fd, 8192)
+                text = self._stderr_decoder.decode(chunk, final=not chunk)
                 if not chunk:
                     self._stderr_eof = True
+                    self._stderr_tail = (self._stderr_tail + text)[-self.max_diagnostic_chars:] if self.max_diagnostic_chars else ""
                     break
-                text = chunk.decode("utf-8", "replace")
                 self._stderr_tail = (self._stderr_tail + text)[-self.max_diagnostic_chars:] if self.max_diagnostic_chars > 0 else ""
         except (OSError, ValueError):
-            self._stderr_eof = True
+            self._finish_stderr()
 
     def _readline(self, timeout: float) -> bytes:
         stream = self.process.stdout
@@ -132,14 +141,38 @@ class TuiRpcClient:
         )
 
     def _write(self, frame: dict[str, Any]) -> None:
-        if self._closed or self.process.stdin is None:
+        """Dispatch within call's absolute deadline; partial frames poison stdin."""
+        if self._closed or self.process.stdin is None or self.process.stdin.closed:
             raise TuiTransportError("TUI RPC client is closed")
         encoded = (json.dumps(frame, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+        stream = self.process.stdin
         with self._writer_lock:
+            if isinstance(stream, io.BytesIO):
+                stream.write(encoded)
+                return
+            fd = stream.fileno()
+            os.set_blocking(fd, False)
+            written = 0
             try:
-                self.process.stdin.write(encoded)
-                self.process.stdin.flush()
+                while written < len(encoded):
+                    remaining = self._dispatch_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TuiTransportError(
+                            f"TUI RPC dispatch timed out; {self._frame_context}; "
+                            f"budget={self._dispatch_timeout}s; written={written}/{len(encoded)} bytes. "
+                            "Recovery: close this transport and start a new gateway."
+                        )
+                    if not select.select([], [fd], [], remaining)[1]:
+                        continue
+                    try:
+                        written += os.write(fd, memoryview(encoded)[written:])
+                    except BlockingIOError:
+                        continue
             except Exception as exc:
+                # Never append another JSON frame to an incomplete dispatch.
+                stream.close()
+                if isinstance(exc, TuiTransportError):
+                    raise
                 raise TuiTransportError(f"TUI stdin write failed: {exc}") from exc
 
     def _read_raw_frame(self, timeout: float) -> dict[str, Any]:
@@ -241,8 +274,9 @@ class TuiRpcClient:
         request_id = self._next_id
         self._next_id += 1
         self._frame_context = f"stage={stage}, request_id={request_id}, method={method}"
-        self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
         deadline = time.monotonic() + timeout
+        self._dispatch_deadline, self._dispatch_timeout = deadline, timeout
+        self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
         while True:
             try:
                 frame = self.read_frame(deadline - time.monotonic())
@@ -267,33 +301,69 @@ class TuiRpcClient:
                 raise TuiRemoteError(error["code"], error["message"])
             return frame["result"]
 
-    def close(self, *, grace: float = 10.0, deadline: Optional[float] = None) -> None:
+    def _wait_draining(self, deadline: float) -> bool:
+        """Discard stdout and retain only capped stderr while awaiting exit."""
+        stdout = self.process.stdout
+        stdout_eof = stdout is None
+        while True:
+            self._drain_stderr()
+            exited = self.process.poll() is not None
+            # Once reaped, stdout need not be consumed: it is intentionally
+            # discarded and close() releases the pipe descriptors.
+            if exited:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return exited
+            if isinstance(stdout, io.BytesIO):
+                stdout_eof = not stdout.read(8192)
+                # In-memory process doubles have no OS readiness/reaping path.
+                try:
+                    self.process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    return False
+                continue
+            readers = []
+            if stdout is not None and not stdout_eof:
+                readers.append(stdout.fileno())
+            if self.process.stderr is not None and not self._stderr_eof:
+                readers.append(self.process.stderr.fileno())
+            ready = select.select(readers, [], [], min(0.02, remaining))[0]
+            if stdout is not None and not stdout_eof and stdout.fileno() in ready:
+                stdout_eof = not os.read(stdout.fileno(), 8192)
+
+    def _signal_group(self, signum, fallback):
+        """Signal the owned session, falling back to its direct process."""
+        try:
+            os.killpg(self.process.pid, signum)
+        except (ProcessLookupError, PermissionError, AttributeError):
+            try:
+                getattr(self.process, fallback)()
+            except Exception:
+                pass
+
+    def close(self, *, grace: float = 10.0, deadline: Optional[float] = None) -> bool:
         """Close stdin and await gateway session teardown before forced reaping.
 
         A real Builder turn produced a complete result, then gateway teardown
         exceeded the old 2s grace and our SIGTERM made its exit -15. Keep the
         nonzero-exit safety check: if teardown exceeds this bounded reserve it
         remains a failure, rather than relabelling a killed process as success.
-        Cancellation still supplies its shorter explicit deadline.
+        Cancellation still supplies its shorter explicit deadline. Relative grace
+        has a 100ms minimum signal/reap reserve; explicit deadlines are never
+        extended. False means the owner must retain the child and reap obligation.
         """
         if self._closed:
-            return
+            return self.process.poll() is not None
         self._closed = True
 
-        def remaining() -> float:
-            if deadline is None:
-                return max(0.0, grace)
-            return max(0.0, deadline - time.monotonic())
+        explicit_deadline = deadline is not None
+        end = deadline if deadline is not None else time.monotonic() + max(0.1, grace)
+        self._stdout_buffer.clear()
 
         def wait_bounded(*, fraction: float = 1.0) -> bool:
-            wait_timeout = remaining()
-            if deadline is not None:
-                wait_timeout *= max(0.0, min(1.0, fraction))
-            try:
-                self.process.wait(timeout=wait_timeout)
-                return True
-            except Exception:
-                return False
+            now = time.monotonic()
+            return self._wait_draining(now + max(0.0, end - now) * fraction)
 
         try:
             try:
@@ -301,24 +371,30 @@ class TuiRpcClient:
                     self.process.stdin.close()
             except Exception:
                 pass
-            # An explicit cancellation deadline must leave time to signal and
-            # reap a stubborn child; normal completion gets the full grace.
-            if wait_bounded(fraction=0.5 if deadline is not None else 1.0):
-                return
+            # Every close owns one fixed budget, including signal/reap reserves.
+            # Drain both pipes during each stage; wait() alone can deadlock a
+            # gateway writing shutdown diagnostics larger than pipe capacity.
+            if wait_bounded(fraction=0.5 if explicit_deadline else 0.8):
+                return True
             for signum, fallback, fraction in (
                 (signal.SIGTERM, "terminate", 0.5),
                 (signal.SIGKILL, "kill", 1.0),
             ):
-                try:
-                    os.killpg(self.process.pid, signum)
-                except (ProcessLookupError, PermissionError, AttributeError):
+                self._signal_group(signum, fallback)
+                if signum == signal.SIGKILL:
+                    # No writer survives SIGKILL. wait() observes exit promptly;
+                    # selecting on inherited pipes can consume the entire reserve.
                     try:
-                        getattr(self.process, fallback)()
-                    except Exception:
-                        pass
+                        self.process.wait(timeout=max(0.0, end - time.monotonic()))
+                        return True
+                    except subprocess.TimeoutExpired:
+                        return False
                 if wait_bounded(fraction=fraction):
-                    return
+                    return True
+            return self.process.poll() is not None
         finally:
+            self._drain_stderr()
+            self._finish_stderr()
             # Popen.wait() reaps the process but deliberately leaves the three
             # pipe objects open. Detached workers are short-lived, yet callers
             # and tests may create several transports in one process; close all

@@ -29,7 +29,7 @@ def test_frozen_resume_under_compatible_inherit_is_admitted(tmp_path, monkeypatc
     a=tmp_path/'ancestor.json'
     a.write_text(json.dumps({'native_approval':ancestor}))
     monkeypatch.setenv('PROFILE_DELEGATE_APPROVAL_REQUEST',str(a))
-    r=tmp_path/'runs'/'prior'
+    r=tmp_path/'runs'/'pd_prior'
     r.mkdir(parents=True)
     (r/'request.json').write_text(json.dumps({'profile_home':target.home,'native_approval':frozen}))
     (r/'status.json').write_text(json.dumps({'child_session_id':'frozen'}))

@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 if str(PLUGIN_DIR) not in sys.path:
@@ -1554,9 +1553,9 @@ def test_transient_failure_resumes_same_session(tmp_path, monkeypatch, output_mo
             stdout, code = "API call failed after 3 retries: Connection error.\nsession_id: stable_sid", 1
         else:
             prompt = Path(cmd[cmd.index("--query-file") + 1]).read_text()
-            assert f"requested {output_mode} output format" in prompt
+            assert f"resolved {output_mode} output format" in prompt
             if output_mode != "json":
-                assert "PROFILE_DELEGATE_RESULT: ok|blocked|failed" in prompt
+                assert "PROFILE_DELEGATE_RESULT: followed by one value, ok, blocked, or failed" in prompt
                 assert "JSON" not in prompt
             stdout, code = ('{"status":"ok","summary":"done","artifacts":[],"errors":[],"next_steps":[]}' if output_mode == "json" else 'Done\nPROFILE_DELEGATE_RESULT: ok') + '\nsession_id: stable_sid', 0
         return _capped_output(kwargs, stdout, exit_code=code, stdout_diagnostic_tail=stdout, stderr_diagnostic_tail='')
@@ -1590,20 +1589,21 @@ def test_transient_failure_without_session_id_fails_closed(tmp_path, monkeypatch
 def test_delegate_resume_uses_resume_flag_and_skips_rename(tmp_path, monkeypatch):
     mock_delegate_admission(tmp_path, monkeypatch)
     seen = {}
+    origin = {"session_id": "parent-session", "session_key": "cli:fixture", "source": "cli"}
 
     def fake_run_capped(cmd, **kwargs):
         seen["cmd"] = cmd
         return _capped_output(kwargs, _OK_OUTPUT + '\n\nsession_id: sid123', stdout_chars=92)
 
     import native_approval
-    previous = tmp_path / "runs" / "frozen-seed"
+    previous = tmp_path / "runs" / "pd_frozen-seed"
     previous.mkdir(parents=True)
-    core.text_safe_write(previous / "request.json", json.dumps({"profile_home": str(tmp_path / "reviewer"), "native_approval":
+    core.text_safe_write(previous / "request.json", json.dumps({"profile_home": str(tmp_path / "reviewer"), "origin": origin, "native_approval":
                          native_approval.snapshot("deny", "task", "caller", str(tmp_path / "reviewer"), {}, {})}))
     core.text_safe_write(previous / "status.json", json.dumps({"child_session_id": "sid123"}))
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     monkeypatch.setattr(core, "rename_session", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not rename resume")))
-    result = core.delegate_profile("reviewer", "task", session_title="seguir tests", session_mode="resume", session_id="sid123")
+    result = core.delegate_profile("reviewer", "task", session_title="seguir tests", session_mode="resume", session_id="sid123", origin=origin)
     assert result["success"] is True
     assert "--yolo" not in seen["cmd"]
     assert result["child_approval_mode"] == "deny"
@@ -1723,19 +1723,12 @@ def test_execution_override_allowlists_and_exact_argv(tmp_path, monkeypatch):
     ]
 
 
-def test_reasoning_config_without_existing_scope_and_rejects_destination_symlink(tmp_path):
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    managed_dir = core.prepare_reasoning_config(run_dir, "high")
-    assert yaml.safe_load((managed_dir / "config.yaml").read_text()) == {"agent": {"reasoning_effort": "high"}}
-    assert sorted(path.name for path in managed_dir.iterdir()) == ["config.yaml"]
-    assert not (managed_dir / "config.yaml").is_symlink()
-
-    unsafe = tmp_path / "unsafe"
-    unsafe.mkdir()
-    (unsafe / "reasoning_config").symlink_to(tmp_path / "external", target_is_directory=True)
-    with pytest.raises(core.ProfileDelegateError, match="symlink"):
-        core.prepare_reasoning_config(unsafe, "high")
+def test_reasoning_cli_flag_does_not_create_managed_overlay(tmp_path):
+    request = {"profile": "reviewer", "hermes_bin": "/usr/bin/hermes",
+               "requested_execution": {"reasoning_effort": "none"}}
+    cmd = core.build_child_command(request, tmp_path)
+    assert cmd[cmd.index("--reasoning") + 1] == "none"
+    assert not (tmp_path / "reasoning_config").exists()
 
 
 def test_discover_managed_scope_rejects_nonblank_inherited_value_without_filesystem_lookup(monkeypatch):
@@ -1752,13 +1745,13 @@ def test_discover_managed_scope_treats_existing_default_file_as_conflict(tmp_pat
     assert core.discover_managed_scope({}) == default_scope
 
 
-def test_reasoning_override_rejects_existing_scope_before_run_mutation(tmp_path, monkeypatch):
+def test_reasoning_override_rejects_managed_reasoning_before_run_mutation(tmp_path, monkeypatch):
     root = tmp_path / "root"
     profile_home = root / "profiles" / "reviewer"
     profile_home.mkdir(parents=True)
     admin_managed = tmp_path / "admin-managed"
     admin_managed.mkdir()
-    (admin_managed / "config.yaml").write_text("security: {tirith_enabled: true}\n", encoding="utf-8")
+    (admin_managed / "config.yaml").write_text("agent: {reasoning_effort: low}\n", encoding="utf-8")
     monkeypatch.setenv("HERMES_MANAGED_DIR", str(admin_managed))
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -1778,10 +1771,10 @@ def test_reasoning_override_rejects_existing_scope_before_run_mutation(tmp_path,
     monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
     monkeypatch.setattr(core, "run_capped_subprocess", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run")))
 
-    with pytest.raises(core.ProfileDelegateError, match="managed scope") as exc_info:
+    with pytest.raises(core.ProfileDelegateError, match="administrator-managed reasoning") as exc_info:
         core._execute_delegate_run(run_dir)
 
-    assert exc_info.value.code == "reasoning_managed_scope_conflict"
+    assert exc_info.value.code == "reasoning_override_unavailable"
     assert not (run_dir / "reasoning_config").exists()
     assert json.loads((run_dir / "status.json").read_text()) == original_status
 
@@ -1811,17 +1804,17 @@ def test_reasoning_override_without_scope_keeps_canonical_home_and_session(tmp_p
         seen["rename_env"] = args[5]
         return {"session_renamed": True}
     monkeypatch.setenv("PROFILE_DELEGATE_LOCKS_ROOT", str(tmp_path / "locks"))
+    monkeypatch.delenv("HERMES_MANAGED_DIR", raising=False)
     monkeypatch.setattr(core, "discover_managed_scope", lambda env: None)
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run)
     monkeypatch.setattr(core, "rename_session", fake_rename)
     core._execute_delegate_run(run_dir)
     expected_home = str(profile_home.resolve())
-    expected_managed = str(run_dir / "reasoning_config")
     assert seen["run_env"]["HERMES_HOME"] == expected_home
-    assert seen["run_env"]["HERMES_MANAGED_DIR"] == expected_managed
+    assert "HERMES_MANAGED_DIR" not in seen["run_env"]
     assert seen["rename_env"]["HERMES_HOME"] == expected_home
-    assert seen["rename_env"]["HERMES_MANAGED_DIR"] == expected_managed
-    assert yaml.safe_load((run_dir / "reasoning_config" / "config.yaml").read_text()) == {"agent": {"reasoning_effort": "high"}}
+    assert "HERMES_MANAGED_DIR" not in seen["rename_env"]
+    assert not (run_dir / "reasoning_config").exists()
     assert json.loads((run_dir / "result.json").read_text())["session_id"] == "canonical_sid"
 
 

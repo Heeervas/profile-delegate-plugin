@@ -13,3 +13,8 @@ __pycache__/
 .artifacts/
 
 # Project operating contracts under `.agents/` and `.hermes/` are tracked.
+# Regenerable local quality measurement; policy and immutable baseline stay tracked.
+.agents/quality-report.json
+
+# Local private handoffs and temporary notes.
+.trash/

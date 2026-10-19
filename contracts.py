@@ -130,6 +130,13 @@ def parse_json_result(text: str) -> Tuple[Optional[Any], Dict[str, Any]]:
         if len(candidates) > 1:
             return None, _parse_metadata('ambiguous', len(candidates), error='ambiguous_json_candidates')
         return None, {**empty, "candidate_count": len(candidates)}
+    return _select_recognized_candidate(scored)
+
+def _select_recognized_candidate(scored):
+    verdicts = {ensure_text(candidate[0].get("status")).strip().lower()
+                for candidate, _score in scored}
+    if len(verdicts) > 1:
+        return None, _parse_metadata('ambiguous', len(scored), error='ambiguous_json_candidates')
     best_score = max(score for _candidate, score in scored)
     best = [candidate for candidate, score in scored if score == best_score]
     if len(best) != 1:
@@ -159,6 +166,22 @@ def summarize_unstructured_output(raw_output: str, limit: int = 500) -> str:
             return candidate[:limit]
     return text[:limit]
 
+def _has_open_code_fence(lines: List[str]) -> bool:
+    """Recognize Markdown fences before trusting a terminal prose verdict."""
+    fence = ""
+    for line in lines:
+        match = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if match is None:
+            continue
+        run, suffix = match.groups()
+        if fence:
+            if run[0] == fence[0] and len(run) >= len(fence) and not suffix.strip(" \t"):
+                fence = ""
+        elif run[0] != "`" or "`" not in suffix:
+            fence = run
+    return bool(fence)
+
+
 def _recover_text_status(raw_output: str, *, require_terminal: bool = False) -> Optional[str]:
     """Recover one non-negated verdict; new prose contracts require the terminal marker."""
     # Legacy first-line verdicts are accepted only when there is no terminal line.
@@ -169,7 +192,7 @@ def _recover_text_status(raw_output: str, *, require_terminal: bool = False) -> 
     if marker_lines:
         if (len(marker_lines) != 1 or marker_lines[0][1] is None
                 or marker_lines[0][0] != len(lines) - 1
-                or sum(line.strip().startswith("```") for line in lines[:-1]) % 2):
+                or _has_open_code_fence(lines[:-1])):
             return None
         prefix = "\n".join(lines[:-1])
         legacy = _recover_legacy_text_status(prefix)

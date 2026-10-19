@@ -221,22 +221,6 @@ def test_gateway_shaped_sequence_reconciles_identity_turn_and_final_usage(tmp_pa
     assert set(saved[-1]["dropped_fields"]) == {"text", "reasoning", "rendered"}
 
 
-def test_terminal_record_is_allowed_after_exact_ordinary_event_cap(tmp_path):
-    journal = EventJournal(
-        tmp_path, task_id="pd_test", ui_session_id="ui-1",
-        max_events=2, max_bytes=4096, terminal_reserve_bytes=1024,
-    )
-    assert journal.ingest(frame("tool.start", {"tool_id": "one", "name": "terminal"}))
-    assert journal.ingest(frame("tool.start", {"tool_id": "two", "name": "terminal"}))
-    assert not journal.ingest(frame("tool.start", {"tool_id": "three", "name": "terminal"}))
-    assert journal.finalize("completed", child_session_id="child")
-    saved = records(tmp_path / "events.jsonl")
-    assert sum(item["type"] not in {"terminal", "journal.truncated"} for item in saved) == 2
-    assert sum(item["type"] == "journal.truncated" for item in saved) == 1
-    assert saved[-1]["type"] == "terminal"
-    assert (tmp_path / "events.jsonl").stat().st_size <= 4096
-
-
 def _persisted_text(path):
     return "".join(
         item["payload"].get("text", "")
@@ -313,19 +297,6 @@ def test_positive_short_write_degrades_and_reopen_recovers_partial_tail(tmp_path
     assert [item["seq"] for item in records(tmp_path / "events.jsonl")] == [1]
 
 
-def test_second_writer_refreshes_sequence_and_cap_state_under_lock(tmp_path):
-    first = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1", max_events=2)
-    second = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1", max_events=2)
-    assert first.ingest(frame("tool.start", {"tool_id": "one", "name": "terminal"}))
-    assert second.ingest(frame("tool.start", {"tool_id": "two", "name": "terminal"}))
-    assert not first.ingest(frame("tool.start", {"tool_id": "three", "name": "terminal"}))
-    first.close()
-    second.close()
-    saved = records(tmp_path / "events.jsonl")
-    assert [item["seq"] for item in saved] == [1, 2, 3]
-    assert sum(item["type"] == "journal.truncated" for item in saved) == 1
-
-
 def test_two_writers_exact_cap_emit_one_marker_and_keep_terminal_reserve(tmp_path):
     kwargs = {
         "task_id": "pd_test", "ui_session_id": "ui-1", "max_events": 2,
@@ -358,6 +329,121 @@ def test_message_id_transition_force_flushes_identity_order_and_split_secret(tmp
     assert [item["payload"]["message_id"] for item in saved] == ["m1", "m2"]
     assert "".join(item["payload"]["text"] for item in saved).find("obvious-secret") == -1
     assert "[REDACTED]" in saved[1]["payload"]["text"]
+
+
+@pytest.mark.parametrize("writers", [1, 2])
+def test_append_recovery_work_scales_with_new_bytes(tmp_path, monkeypatch, writers):
+    real_read = event_journal.os.read
+    real_loads = event_journal.json.loads
+    work = {"bytes": 0, "parsed": 0}
+
+    def measured_read(fd, size):
+        data = real_read(fd, size)
+        work["bytes"] += len(data)
+        return data
+
+    def measured_loads(data, *args, **kwargs):
+        work["parsed"] += 1
+        return real_loads(data, *args, **kwargs)
+
+    monkeypatch.setattr(event_journal.os, "read", measured_read)
+    monkeypatch.setattr(event_journal.json, "loads", measured_loads)
+    journals = [EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1") for _ in range(writers)]
+    measurements = []
+    for index in range(128):
+        assert journals[index % writers].ingest(frame("tool.start", {"tool_id": str(index), "name": "terminal"}))
+        if index in {63, 127}:
+            measurements.append(dict(work))
+    for journal in journals:
+        journal.close()
+    size = (tmp_path / "events.jsonl").stat().st_size
+    # Each writer reads/parses each unseen peer record at most once, not its
+    # entire growing prefix. Allow constant overhead, not wall-clock noise.
+    assert work["bytes"] <= writers * size, work
+    assert work["parsed"] <= writers * 128, work
+    assert measurements[1]["bytes"] <= 3 * measurements[0]["bytes"] + 1024, measurements
+    assert measurements[1]["parsed"] <= 3 * measurements[0]["parsed"] + 4, measurements
+    assert [item["seq"] for item in records(tmp_path / "events.jsonl")] == list(range(1, 129))
+
+
+@pytest.mark.parametrize("damage", ["json", "schema", "sequence"])
+@pytest.mark.parametrize("reopen", [False, True])
+def test_corrupt_complete_records_never_accept_a_following_append(tmp_path, damage, reopen):
+    journal = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1")
+    assert journal.ingest(frame("tool.start", {"tool_id": "seed", "name": "terminal"}))
+    path = tmp_path / "events.jsonl"
+    item = records(path)[0]
+    item["seq"] = 2
+    if damage == "schema":
+        del item["payload"]
+    elif damage == "sequence":
+        item["seq"] = 9
+    bad = b"not-json\n" if damage == "json" else (json.dumps(item) + "\n").encode()
+    with path.open("ab") as stream:
+        stream.write(bad)
+    if reopen:
+        journal.close()
+        journal = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1")
+    before = path.read_bytes()
+    assert not journal.ingest(frame("tool.start", {"tool_id": "after", "name": "terminal"}))
+    assert journal.disabled and journal.degradation_reason == "corrupt_complete_record"
+    assert path.read_bytes() == before
+    journal.close()
+
+
+@pytest.mark.parametrize("damage", ["shrink", "replace", "lock_replace", "same_size_corruption"])
+def test_checkpoint_invalidations_fail_closed(tmp_path, damage):
+    journal = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1")
+    assert journal.ingest(frame("tool.start", {"tool_id": "seed", "name": "terminal"}))
+    path = tmp_path / "events.jsonl"
+    if damage == "shrink":
+        path.write_bytes(b"")
+    elif damage in {"replace", "lock_replace"}:
+        target = path if damage == "replace" else tmp_path / "events.lock"
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(target.read_bytes())
+        replacement.replace(target)
+    else:
+        before_stat = path.stat()
+        data = path.read_bytes()
+        path.write_bytes(b"!" + data[1:])
+        # Avoid depending on timestamp resolution for the metadata invalidation.
+        os.utime(path, ns=(before_stat.st_atime_ns, before_stat.st_mtime_ns + 1_000_000))
+    before = path.read_bytes()
+    assert not journal.ingest(frame("tool.start", {"tool_id": "after", "name": "terminal"}))
+    assert journal.disabled
+    assert path.read_bytes() == before
+    journal.close()
+
+
+def test_reopen_validates_old_prefix_not_just_last_record(tmp_path):
+    journal = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1")
+    for index in range(3):
+        assert journal.ingest(frame("tool.start", {"tool_id": str(index), "name": "terminal"}))
+    journal.close()
+    path = tmp_path / "events.jsonl"
+    data = path.read_bytes()
+    path.write_bytes(b"!" + data[1:])
+    reopened = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1")
+    assert reopened.disabled and reopened.degradation_reason == "corrupt_complete_record"
+    assert path.read_bytes() == b"!" + data[1:]
+    reopened.close()
+
+
+def test_peer_partial_tail_recovered_before_sequence_and_cap_check(tmp_path):
+    first = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1", max_events=2)
+    second = EventJournal(tmp_path, task_id="pd_test", ui_session_id="ui-1", max_events=2)
+    assert first.ingest(frame("tool.start", {"tool_id": "one", "name": "terminal"}))
+    path = tmp_path / "events.jsonl"
+    with path.open("ab") as stream:
+        stream.write(b'{"partial":')
+    assert second.ingest(frame("tool.start", {"tool_id": "two", "name": "terminal"}))
+    assert not first.ingest(frame("tool.start", {"tool_id": "overflow", "name": "terminal"}))
+    assert second.finalize("completed")
+    first.close()
+    saved = records(path)
+    assert [item["seq"] for item in saved] == [1, 2, 3, 4]
+    assert [item["type"] for item in saved] == ["tool.start", "tool.start", "journal.truncated", "terminal"]
 
 
 def test_recovery_reads_only_bounded_tail_for_last_record(tmp_path, monkeypatch):

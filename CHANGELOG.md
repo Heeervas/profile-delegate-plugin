@@ -4,13 +4,58 @@ All notable changes to Profile Delegate are documented here.
 
 ## [Unreleased]
 
-### Local readiness closure
+- Local senior-review corrections: authorize all retained resumes before frozen approval reuse; keep TUI capacity through teardown/reaping, drain shutdown pipes under a fixed deadline, share resolved worktree SHA across identity/preparation, reject malformed booleans, exclude fenced prose verdicts, and recover append journals incrementally for cooperative writers. Independent final review PASS_WITH_RESIDUAL_RISK: prior unresolved-reap false-success defect closed; exceptional waiter failure can still strand capacity safely.
+- Test maintenance: remove two proven duplicate journal cases, add real-child reap coverage, decouple the historical approval fixture from current normalization, and isolate fresh-child native guard state.
 
-- The independently reviewed local candidate includes profile_multidelegate for one-call new-session dispatch with per-run controls and notifications, plus opt-in worktrees. Real batch overlap, isolated steering/cancellation, both native deliveries, and worktree CLI/TUI new/resume and integration are accepted; gateway activation is not performed.
-- Complete local gates pass: 818 tests, mandatory native and portable partitions, global lint and quality with only the existing exact temporary signature exception. Independent quality and final focal reviews pass with notes; trusted local adoption passes without changing baseline, thresholds or coverage. Remote adoption and publication remain separately gated.
-- Record the pre-existing nonblocking import-order fixture defect in TODO.md. Only closure documentation is committed here; inherited runtime/test/governance work remains preserved in the dirty working tree.
+## [1.12.0] — upcoming local candidate, not published
+
+### Principal feature: optional Git worktrees
+
+- Isolate new delegation edits in an optional assigned Git checkout, with explicit
+  `base_ref` and new `branch` options. Verified CLI/TUI new/resume retain the assigned
+  checkout; batch composition reuses the same singular mechanism.
+- Worktrees are not a security sandbox. Source uncommitted and ignored files are
+  not copied. There is no automatic merge, cleanup, fetch, stash or source commit.
+
+### Release maintenance
+
+- Support Python >=3.11,<3.15 with portable CI 3.11–3.14; pinned installed Hermes
+  integration uses 3.14 only as its test scope.
+- Opt-in native GitHub release preparation with explicit semver input, synchronized
+  manifest/pyproject/README/CHANGELOG/uv.lock, fail-closed consistency and same-input
+  retry safety, reusable full test and trusted quality gates. No automatic bump on tests.
+
+## [1.11.0] — existing published release (remote tag retained)
+
+- Multi-dispatch (`profile_multidelegate`) was released in 1.11.0, not introduced
+  by 1.12.0. Tag `v1.11.0` points to `a5488e0d705ae5347858c2ae8b9079347bb0e0e6`.
+
+## Historical local worktree notes (unreleased intake provenance)
+
+The following inherited notes predate release reconciliation. They are not the
+published 1.11.0 notes or the authoritative 1.12.0 feature summary above.
+
+### Added
+
+- New local `profile_multidelegate` tool for one-call dispatch of independent new sessions, including multiple tasks to one profile. Reuses singular admission, optional worktrees, frozen policy, per-run controls and native notifications; preserves partial/error handles without a scheduler or durable batch ledger. Real two-child overlap, isolated steering/cancellation and both native deliveries passed independent review. Gateway activation remains operator-only and unperformed.
+
+- Local review candidate: optional Git worktrees for new singular delegation and batch composition, workspace metadata and retained-checkout native-cwd checks on continuation/retry. No automatic source commits, merges or cleanup. Real CLI/TUI new/resume and same-base isolated changes plus single-writer integration passed independent functional review. Required local quality gates and independent review now pass; this is not gateway activation.
+
+### Corrected in local worktree candidate
+
+- F7 CLI uses native `--in`, cwd-persisting `cli` source and child-only native terminal scope; profile cwd no longer overrides the assigned local checkout. Native no-inference regression checks terminal execution, native row creation and cwd restoration without a supplied workdir. Real provider CLI new/resume now passes with native cwd and retained files; F7 independently closed. Managed CLI sessions also appear in native CLI history/MRU. No activation.
+
+- Refuse external checkout filters before allocating worktrees; preserve observed creation facts after publication failures, native identity after retry refusal, and workspace metadata in worker final/completion results. Share bounded no-follow resume evidence reads, document artifact-dependent continuity, and separate request admission from allocation/execution. F1–F6 focal review complete; the controller-decided exact temporary public-signature exception passed independent local review. Required worktree real-provider acceptance is complete; subsequent local quality remediation and independent adoption pass. Remote adoption remains unclaimed.
+
+### Fixed
+
+- Local quality-readiness candidate repairs analyzer ownership/E702 without metric changes, records derived provenance and equivalence, preserves RPC/runner scenarios across module split, and reconciles portable Python/lock and CI compile paths. Independent quality and final focal reviews pass with notes; trusted local governance adoption passes. No threshold, baseline, coverage or exception relaxation.
+
+- Child bootstrap resolves its helpers in a plugin-local package, preventing another plugin's preloaded `core`, approval, or reasoning modules from breaking interactive startup. Foreign module entries remain untouched.
 
 ### Changed
+
+- Per-task reasoning no longer replaces the administrator managed directory. A child-only CLI/TUI adapter preserves explicit effort across saved-route restoration and deferred construction, retains browser-policy wiring, and reports administrator reasoning pins or incompatible native interfaces before admission.
 
 - Policy loading shares one field registry for defaults and YAML/environment resolution, preserving supported overrides, source precedence and validation errors.
 

@@ -37,13 +37,14 @@ def _reconcile_exit(run, root):
 
 def test_child_environment_scrubs_caller_execution_overlays(monkeypatch):
     for key in ("HERMES_TUI_TOOLSETS", "HERMES_TUI_SKILLS", "HERMES_TUI_MAX_TURNS",
-                "HERMES_MODEL", "HERMES_PROVIDER", "HERMES_MANAGED_DIR", "HERMES_MAX_ITERATIONS"):
+                "HERMES_MODEL", "HERMES_PROVIDER", "HERMES_MAX_ITERATIONS"):
         monkeypatch.setenv(key, "HOSTILE")
     monkeypatch.setenv("OPENAI_API_KEY", "credential-not-to-persist")
     monkeypatch.setenv("CUSTOM_1_API_KEY", "provider-credential")
     monkeypatch.setenv("SPARTAN_REASONING_BINDING_SECRET", "realm-binding")
     monkeypatch.setenv("SPARTAN_REASONING_REALM", "realm-name")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy")
+    monkeypatch.setenv("HERMES_MANAGED_DIR", "/administrator-managed")
     child = core.child_environment(0)
     assert all("HOSTILE" not in str(value) for value in child.values())
     assert child["OPENAI_API_KEY"] == "credential-not-to-persist"
@@ -51,6 +52,7 @@ def test_child_environment_scrubs_caller_execution_overlays(monkeypatch):
     assert child["SPARTAN_REASONING_BINDING_SECRET"] == "realm-binding"
     assert child["SPARTAN_REASONING_REALM"] == "realm-name"
     assert child["HTTPS_PROXY"] == "http://proxy"
+    assert child["HERMES_MANAGED_DIR"] == "/administrator-managed"
     tui = tui_runner._environment({"profile_home": "/tmp/target", "effective_execution": {}},
                                    __import__("pathlib").Path("/tmp/run"))
     assert tui["HERMES_HOME"] == "/tmp/target"

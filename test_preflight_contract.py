@@ -18,6 +18,8 @@ def _plugin():
 
 
 def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOWED_PROFILES", "builder")
+    monkeypatch.delenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", raising=False)
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
     monkeypatch.delenv("PROFILE_DELEGATE_PARENT_TASK_ID", raising=False)
     monkeypatch.delenv("PROFILE_DELEGATE_APPROVAL_REQUEST", raising=False)
@@ -42,6 +44,8 @@ def test_preflight_conflicts_return_actionable_patch_without_run(tmp_path, monke
         "allow_child_approval_override": False,
         "allow_reasoning_override": False,
     })
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOWED_PROFILES", "builder")
+    monkeypatch.delenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", raising=False)
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
     monkeypatch.delenv("PROFILE_DELEGATE_PARENT_TASK_ID", raising=False)
     monkeypatch.delenv("PROFILE_DELEGATE_APPROVAL_REQUEST", raising=False)

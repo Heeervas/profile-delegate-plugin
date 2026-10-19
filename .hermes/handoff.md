@@ -1,8 +1,21 @@
-CURRENT HANDOFF — LOCAL READINESS COMPLETE; activation is Alberto-only. Q4 and final focal review PASS_WITH_NOTES; Q5 local independent trusted adoption PASS. Full818/native581/portable237, canonical/vendor QUALITY_PASS_WITH_EXCEPTION with only existing max29 exception, gaps[], global lint/lock/registration/compile/discovery/secrets/diff pass. Real batch alpha/beta overlap, observed alpha steering uptake, isolated beta cancellation and both native notifications delivered/attempts1 independently verified. Worktree real CLI/TUI new/resume and same-base integration remain accepted. Current truth/evidence: STATE.md, plans/quality-readiness.md and .artifacts/quality-readiness/{review,closure-review,batch-acceptance,adoption.json,adoption-gate.json}. F3 docs/compile omissions corrected; pre-existing N1 fixture-order note is in TODO.md. Original 152-file reviewed identity remains immutable; closure docs/compile-list delta is separately recorded. No product/policy/test bytes changed in closure, no remote CI or activation claim. Keep inherited dirty work intact; only separable closure docs are committed. Runtime/test/governance changes remain uncommitted because their Git hunks overlap inherited work; no clean-clone release is claimed. Next: deliver restart decision to Alberto, then fresh loaded-tool check after HIS restart. No autonomous restart/push/publication/core/profile/global-config edits. Everything below is historical.
+CURRENT PACKAGING AUTHORITY — Alberto requested commit/push of the complete reviewed candidate on 2026-10-19. Use review/senior-corrections-20261019; preserve divergent origin/main, no force push/rebase/activation/tag/merge. Generated quality report remains local; reviewed source/test bytes unchanged. Git history owns packaged identity.
 
-## Historical handoff from HEAD — superseded above
+PRE-PACKAGING HANDOFF — LOCAL CORRECTIONS/TEST AUDIT COMPLETE. Independent final review PASS_WITH_RESIDUAL_RISK, prior MAJOR closed. Full931/native656/portable275 pass; TOP QUALITY_PASS_WITH_EXCEPTION, existing exception unchanged. Reviewed 158-file candidate: .artifacts/test-deslop/candidate.json; final-review/review.md under same directory. Documentation-only closure follows review. LOW follow-up: wait exception can strand capacity/status (fails closed), tracked in TODO.md. Scripted-MODEL completion/cancel receipt ok; actual-provider and gateway activation unclaimed. No commit/restart/publication/config changes. Acceptance belongs to Alberto. Prior handoff below is historical.
+
+HISTORICAL HANDOFF — LOCAL READINESS COMPLETE; activation is Alberto-only. Q4 and final focal review PASS_WITH_NOTES; Q5 local independent trusted adoption PASS. Full818/native581/portable237, canonical/vendor QUALITY_PASS_WITH_EXCEPTION with only existing max29 exception, gaps[], global lint/lock/registration/compile/discovery/secrets/diff pass. Real batch alpha/beta overlap, observed alpha steering uptake, isolated beta cancellation and both native notifications delivered/attempts1 independently verified. Worktree real CLI/TUI new/resume and same-base integration remain accepted. Current truth/evidence: STATE.md, plans/quality-readiness.md and .artifacts/quality-readiness/{review,closure-review,batch-acceptance,adoption.json,adoption-gate.json}. F3 docs/compile omissions corrected; pre-existing N1 fixture-order note is in TODO.md. Original 152-file reviewed identity remains immutable; closure docs/compile-list delta is separately recorded. No product/policy/test bytes changed in closure, no remote CI or activation claim. Keep inherited dirty work intact; only separable closure docs are committed. Runtime/test/governance changes remain uncommitted because their Git hunks overlap inherited work; no clean-clone release is claimed. Next: deliver restart decision to Alberto, then fresh loaded-tool check after HIS restart. No autonomous restart/push/publication/core/profile/global-config edits. Everything below is historical.
+
 
 # Profile Delegate handoff
+
+LATEST OVERRIDE (2026-10-19): upcoming local **1.12.0**, principal feature optional
+worktrees, not multi-dispatch (published 1.11.0). Python support >=3.11,<3.15 with
+portable CI3.11–3.14; native3.14 is test scope only. Release automation and version
+metadata are implemented locally; full834, portable253 on3.13/3.14, focused16 on
+both, TOP PASS_WITH_EXCEPTION/gaps[]; exact evidence/limits in STATE.md and
+.artifacts/release-automation/. Prior top-of-file restart/published1.10 statements
+are historical, not current. Parent owns independent review and integration of
+the inherited dirty tree. No push/tag/publication/remote dispatch/restart/core or
+profile/global writes. No complete clean-clone commit or remote-CI pass claimed.
 
 Current authority, implementation and validation: [STATE.md](../STATE.md).
 Accepted implementation: [native simplification plan](../docs/plans/2026-10-03-native-simplification.md).
@@ -10,7 +23,7 @@ Canonical checks: [.agents/validation.md](../.agents/validation.md).
 
 Policy resolution now shares one field registry, with ordered values/sources and error priority verified. Runtime metrics and final gates are recorded in STATE.md.
 
-The latest CLI/TUI reasoning candidates were rejected; runtime files were restored. See STATE.md and the accepted plan for native restore/build limits before retrying overlay removal. Candidate-only gates are not release acceptance.
+The earlier direct-native-only CLI/TUI reasoning candidates were rejected; runtime files were restored. See STATE.md and the accepted plan for native restore/build limits before retrying overlay removal. Candidate-only gates are not release acceptance.
 
 Codex is the single implementation writer. Work proceeds in verified, scoped local commit batches with a clean checkout at boundaries. Preserve artifacts and unrelated changes. No Hermes-core/profile/global-config edits, push, publication or gateway restart. Optimization/integration and real net reduction take priority over complementary goal work.
 
