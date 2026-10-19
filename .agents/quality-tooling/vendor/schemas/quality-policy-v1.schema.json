@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "quality-policy-v1.schema.json",
+  "title": "Builder Assurance quality policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "policy_id", "minimum_quality_expected", "change_scope", "scope", "baseline", "adapters", "thresholds", "policy", "exceptions", "extensions"],
+  "$defs": {
+    "relativePath": {"type": "string", "minLength": 1, "maxLength": 4096, "not": {"pattern": "(^/|(^|/)\\.\\.(/|$)|\\u0000)"}},
+    "level": {"enum": ["soft", "standard", "top"]},
+    "requiredLevel": {"enum": ["never", "soft", "standard", "top"]}
+  },
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "policy_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "minimum_quality_expected": {"$ref": "#/$defs/level"},
+    "change_scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["default", "include_untracked", "detect_file_renames"],
+      "properties": {
+        "default": {"enum": ["committed", "index", "worktree", "all"]},
+        "include_untracked": {"type": "boolean"},
+        "detect_file_renames": {"type": "boolean"}
+      }
+    },
+    "scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["include", "exclude", "languages"],
+      "properties": {
+        "include": {"type": "array", "maxItems": 1000, "uniqueItems": true, "items": {"$ref": "#/$defs/relativePath"}},
+        "exclude": {"type": "array", "maxItems": 1000, "uniqueItems": true, "items": {"$ref": "#/$defs/relativePath"}},
+        "languages": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9_+-]{0,31}$"}}
+      }
+    },
+    "baseline": {
+      "type": "object", "additionalProperties": false,
+      "required": ["strategy", "ref", "unavailable"],
+      "properties": {
+        "strategy": {"const": "merge_base"},
+        "ref": {"type": "string", "minLength": 1, "maxLength": 512},
+        "unavailable": {"const": "error"}
+      }
+    },
+    "adapters": {
+      "type": "array", "minItems": 1, "maxItems": 100,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object", "additionalProperties": false,
+            "required": ["id", "type", "implementation", "languages", "required_at"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+              "type": {"const": "builtin"},
+              "implementation": {"enum": ["core_source_v1", "python_ast_v1"]},
+              "languages": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9_+-]{0,31}$"}},
+              "required_at": {"$ref": "#/$defs/requiredLevel"}
+            }
+          },
+          {
+            "type": "object", "additionalProperties": false,
+            "required": ["id", "type", "implementation", "paths", "languages", "required_at"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+              "type": {"const": "external_json"},
+              "implementation": {"const": "external_findings_v1"},
+              "paths": {"type": "array", "maxItems": 1000, "uniqueItems": true, "items": {"$ref": "#/$defs/relativePath"}},
+              "languages": {"type": "array", "minItems": 1, "maxItems": 24, "uniqueItems": true, "items": {"enum": ["python", "javascript", "typescript", "yaml", "json", "toml", "shell", "rust", "go", "java", "kotlin", "c", "cpp", "csharp", "ruby", "php", "swift", "sql", "html", "css", "scss"]}},
+              "required_at": {"$ref": "#/$defs/requiredLevel"}
+            }
+          },
+          {
+            "type": "object", "additionalProperties": false,
+            "required": ["id", "type", "implementation", "paths", "languages", "required_at"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+              "type": {"const": "external_json"},
+              "implementation": {"const": "external_metrics_v2"},
+              "paths": {"type": "array", "maxItems": 1000, "uniqueItems": true, "items": {"$ref": "#/$defs/relativePath"}},
+              "languages": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": {"enum": ["javascript", "typescript"]}},
+              "required_at": {"$ref": "#/$defs/requiredLevel"}
+            }
+          }
+        ]
+      }
+    },
+    "thresholds": {
+      "type": "object", "minProperties": 1, "maxProperties": 1000,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*_v[0-9]+\\.[a-z][a-z0-9_]*$"},
+      "additionalProperties": {
+        "type": "object", "additionalProperties": false, "required": ["warning", "strong"],
+        "properties": {"warning": {"type": "number", "minimum": 0, "maximum": 1000000000}, "strong": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000000}}
+      }
+    },
+    "policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["changed_code_only", "untouched_existing_debt", "soft_new_strong", "standard_new_strong", "top_new_strong", "required_adapter_failure"],
+      "properties": {
+        "changed_code_only": {"const": true},
+        "untouched_existing_debt": {"const": "report"},
+        "soft_new_strong": {"enum": ["report", "exception_or_fail"]},
+        "standard_new_strong": {"const": "exception_or_fail"},
+        "top_new_strong": {"const": "exception_or_fail"},
+        "required_adapter_failure": {"const": "incomplete"}
+      }
+    },
+    "exceptions": {
+      "type": "array", "maxItems": 1000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "selector", "metric", "allowance", "rationale", "approval", "created_at", "expires_at"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+          "selector": {
+            "type": "object", "additionalProperties": false, "required": ["path", "language", "symbol", "kind"],
+            "properties": {
+              "path": {"$ref": "#/$defs/relativePath"},
+              "language": {"type": "string", "minLength": 1, "maxLength": 64},
+              "symbol": {"type": "string", "minLength": 1, "maxLength": 1024},
+              "kind": {"enum": ["file", "function", "method", "class"]}
+            }
+          },
+          "metric": {"type": "string", "pattern": "^[a-z][a-z0-9_]*_v[0-9]+\\.[a-z][a-z0-9_]*$"},
+          "allowance": {"type": "object", "additionalProperties": false, "required": ["maximum"], "properties": {"maximum": {"type": "number", "minimum": 0, "maximum": 1000000000}}},
+          "rationale": {"type": "string", "minLength": 10, "maxLength": 4000},
+          "approval": {"type": "object", "additionalProperties": false, "required": ["authority", "reference"], "properties": {"authority": {"type": "string", "minLength": 1, "maxLength": 256}, "reference": {"$ref": "#/$defs/relativePath"}}},
+          "created_at": {"type": "string", "format": "date"},
+          "expires_at": {"type": "string", "format": "date"}
+        }
+      }
+    },
+    "extensions": {"type": "object", "maxProperties": 100, "additionalProperties": true}
+  }
+}

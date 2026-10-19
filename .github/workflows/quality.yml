@@ -1,0 +1,73 @@
+name: Changed-code quality
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+    inputs:
+      candidate:
+        required: true
+        type: string
+      trusted_base:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    env:
+      TRUSTED_BASE: ${{ inputs.trusted_base || github.event.pull_request.base.sha || github.event.before }}
+      CANDIDATE_SHA: ${{ inputs.candidate || github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: candidate
+      - name: Require established trusted governance
+        shell: bash
+        run: |
+          test "${#TRUSTED_BASE}" -eq 40
+          test "$TRUSTED_BASE" != 0000000000000000000000000000000000000000
+          git -C candidate cat-file -e "$TRUSTED_BASE:.agents/quality.yaml" || {
+            echo 'QUALITY_GOVERNANCE_BLOCKED: trusted base lacks policy; separately reviewed adoption required'
+            exit 3
+          }
+          git -C candidate cat-file -e "$TRUSTED_BASE:scripts/check_quality_gate.py" || {
+            echo 'QUALITY_GOVERNANCE_BLOCKED: trusted base lacks tooling; separately reviewed adoption required'
+            exit 3
+          }
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ env.TRUSTED_BASE }}
+          persist-credentials: false
+          path: trusted
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.6"
+          enable-cache: false
+      - name: Install isolated hash-locked trusted analyzer dependencies
+        run: |
+          uv venv "$RUNNER_TEMP/quality-venv" --python "${{ matrix.python-version }}"
+          uv pip install --python "$RUNNER_TEMP/quality-venv/bin/python" --require-hashes --only-binary :all: -r trusted/.agents/quality-tooling/requirements.txt
+      - name: Exercise trusted gate positive and negative cases
+        env:
+          QUALITY_GATE_PYTHON: ${{ runner.temp }}/quality-venv/bin/python
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          "$RUNNER_TEMP/quality-venv/bin/python" -I -B -m unittest discover -s trusted/.agents/quality-tooling/tests -v
+      - name: Enforce governance and measure the actual candidate
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          "$RUNNER_TEMP/quality-venv/bin/python" -I -B trusted/scripts/check_quality_gate.py --repo candidate --trusted-base "$TRUSTED_BASE"

@@ -1,0 +1,24 @@
+{
+  "source": "builder-assurance 1.1.0 locally derived snapshot",
+  "skill_version": "1.1.0",
+  "algorithm_changes": false,
+  "snapshot_id": "269fad81b593e56698e96cca350e9b1d09e17685652896a58c92d4b9a162a6d1",
+  "files": {
+    "vendor/schemas/normalized-findings-v1.schema.json": "53ddf7638a56fcd1dd3569d9d0618ef0cc6f27bda033b2f836a29d4e748a5b98",
+    "vendor/schemas/normalized-metrics-v2.schema.json": "aa229be9eccd9f2a3579c3263991090d40ebaf68bfe0098c283b68ad8917ffa3",
+    "vendor/schemas/quality-policy-v1.schema.json": "efdba12739e73895b2db0db2d0b6cb4683a07e2228753f1494bfee705e3c792a",
+    "vendor/scripts/quality_core.py": "5152b35f0caf579fe1361bb6dc52106eee057cbce980591733cdc4133aa762af",
+    "vendor/scripts/quality_report.py": "0aebd345e29cc400cbd52965b3677d407f92642514419df1e7721e4ae96036fa",
+    "vendor/scripts/validate_quality_policy.py": "46b7fb5c78502a023af63f3660b7beb08c863511e9fa3f9535a6d0a2c93f2339"
+  },
+  "original_snapshot_id": "ce656b81014a5e2293fd57f6227902fc5e8b8f110dbf80ce08b84386c4e0aa66",
+  "original_files": {
+    "vendor/schemas/normalized-findings-v1.schema.json": "53ddf7638a56fcd1dd3569d9d0618ef0cc6f27bda033b2f836a29d4e748a5b98",
+    "vendor/schemas/normalized-metrics-v2.schema.json": "aa229be9eccd9f2a3579c3263991090d40ebaf68bfe0098c283b68ad8917ffa3",
+    "vendor/schemas/quality-policy-v1.schema.json": "efdba12739e73895b2db0db2d0b6cb4683a07e2228753f1494bfee705e3c792a",
+    "vendor/scripts/quality_core.py": "67cc5a80eadeaa3c9d37f2efa70f9476822ee868677e1c2059876787bda63c77",
+    "vendor/scripts/quality_report.py": "1f60ec16e28c1be90c90f48d3ab7e2f109363bae3aa609c59503d34c25b51da0",
+    "vendor/scripts/validate_quality_policy.py": "7b4300a4ff74fd19d3569e1489bc3556f4ff4e0845f86618192e21f82e0c1d15"
+  },
+  "derivation": "Responsibility-preserving report adapter/file/coverage owners, exception validation and finding action helper; E702 formatting only. Metrics, schemas, trust and policy unchanged."
+}

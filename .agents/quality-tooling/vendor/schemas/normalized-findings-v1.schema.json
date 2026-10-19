@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "normalized-findings-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "adapter_id", "adapter_version", "metric_spec", "tool_name", "tool_version", "source_snapshot", "coverage", "findings"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "adapter_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "adapter_version": {"type": "string", "minLength": 1, "maxLength": 64},
+    "metric_spec": {"type": "string", "minLength": 1, "maxLength": 256},
+    "tool_name": {"type": "string", "minLength": 1, "maxLength": 128},
+    "tool_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "source_snapshot": {"type": "string", "minLength": 1, "maxLength": 256},
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files"],
+      "properties": {
+        "files": {
+          "type": "array",
+          "maxItems": 100000,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "language"],
+            "properties": {
+              "path": {"type": "string", "minLength": 1, "maxLength": 4096, "not": {"pattern": "(^/|(^|/)\\.\\.(/|$))"}},
+              "language": {"type": "string", "minLength": 1, "maxLength": 64}
+            }
+          }
+        }
+      }
+    },
+    "findings": {"type": "array", "maxItems": 100000, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["metric", "path", "language", "symbol", "symbol_kind", "current", "baseline", "mapping_status", "severity", "message"],
+      "properties": {
+        "metric": {"type": "string", "minLength": 1, "maxLength": 256},
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096, "not": {"pattern": "(^/|(^|/)\\.\\.(/|$))"}},
+        "language": {"type": "string", "minLength": 1, "maxLength": 64},
+        "symbol": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "symbol_kind": {"type": "string", "minLength": 1, "maxLength": 64},
+        "current": {"type": "number"},
+        "baseline": {"type": "null"},
+        "mapping_status": {"enum": ["NEW", "UNMAPPED", "SYMBOL_MAPPING_UNKNOWN"]},
+        "severity": {"enum": ["info", "warning", "strong"]},
+        "message": {"type": "string", "maxLength": 8192}
+      }
+    }}
+  }
+}

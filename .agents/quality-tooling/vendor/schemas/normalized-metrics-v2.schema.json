@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "normalized-metrics-v2.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "adapter_id", "adapter_version", "metric_spec", "tool_name", "tool_version", "source_snapshot", "baseline_commit", "coverage", "measurements"],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "adapter_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "adapter_version": {"type": "string", "minLength": 1, "maxLength": 64},
+    "metric_spec": {"type": "string", "pattern": "^[a-z][a-z0-9_]*_v[0-9]+\\.[a-z][a-z0-9_]*$"},
+    "tool_name": {"type": "string", "minLength": 1, "maxLength": 128},
+    "tool_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "source_snapshot": {"type": "string", "minLength": 1, "maxLength": 256},
+    "baseline_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "coverage": {
+      "type": "object", "additionalProperties": false, "required": ["files"],
+      "properties": {"files": {"type": "array", "maxItems": 100000, "uniqueItems": true, "items": {
+        "type": "object", "additionalProperties": false, "required": ["path", "language"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 4096, "not": {"pattern": "(^/|(^|/)\\.\\.(/|$)|\\u0000)"}},
+          "language": {"enum": ["javascript", "typescript"]}
+        }
+      }}}
+    },
+    "measurements": {"type": "array", "maxItems": 100000, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["metric", "path", "language", "symbol", "symbol_kind", "current", "baseline", "mapping_status", "message"],
+      "properties": {
+        "metric": {"type": "string", "pattern": "^[a-z][a-z0-9_]*_v[0-9]+\\.[a-z][a-z0-9_]*$"},
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096, "not": {"pattern": "(^/|(^|/)\\.\\.(/|$)|\\u0000)"}},
+        "language": {"enum": ["javascript", "typescript"]},
+        "symbol": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "symbol_kind": {"enum": ["function", "method"]},
+        "current": {"type": "number", "minimum": 0},
+        "baseline": {"type": ["number", "null"], "minimum": 0},
+        "mapping_status": {"enum": ["NEW", "EXACT", "FILE_RENAME", "SYMBOL_MAPPING_UNKNOWN"]},
+        "message": {"type": "string", "maxLength": 8192}
+      }
+    }}
+  }
+}
