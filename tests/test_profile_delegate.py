@@ -1588,6 +1588,7 @@ def test_transient_failure_without_session_id_fails_closed(tmp_path, monkeypatch
 
 def test_delegate_resume_uses_resume_flag_and_skips_rename(tmp_path, monkeypatch):
     mock_delegate_admission(tmp_path, monkeypatch)
+    origin = {"session_id": "parent-session", "session_key": "cli:fixture", "source": "cli"}
     seen = {}
 
     def fake_run_capped(cmd, **kwargs):
@@ -1597,12 +1598,12 @@ def test_delegate_resume_uses_resume_flag_and_skips_rename(tmp_path, monkeypatch
     import native_approval
     previous = tmp_path / "runs" / "pd_frozen-seed"
     previous.mkdir(parents=True)
-    core.text_safe_write(previous / "request.json", json.dumps({"profile_home": str(tmp_path / "reviewer"), "native_approval":
+    core.text_safe_write(previous / "request.json", json.dumps({"profile_home": str(tmp_path / "reviewer"), "origin": origin, "native_approval":
                          native_approval.snapshot("deny", "task", "caller", str(tmp_path / "reviewer"), {}, {})}))
     core.text_safe_write(previous / "status.json", json.dumps({"child_session_id": "sid123"}))
     monkeypatch.setattr(core, "run_capped_subprocess", fake_run_capped)
     monkeypatch.setattr(core, "rename_session", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not rename resume")))
-    result = core.delegate_profile("reviewer", "task", session_title="seguir tests", session_mode="resume", session_id="sid123")
+    result = core.delegate_profile("reviewer", "task", session_title="seguir tests", session_mode="resume", session_id="sid123", origin=origin)
     assert result["success"] is True
     assert "--yolo" not in seen["cmd"]
     assert result["child_approval_mode"] == "deny"

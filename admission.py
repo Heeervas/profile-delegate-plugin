@@ -15,8 +15,9 @@ def _core():
 def normalize_transport(raw):
     c = _core()
     transport = c.ensure_text(raw['transport_mode'] or 'auto').strip().lower()
-    if type(raw['preflight']) is not bool:
-        raise c.ProfileDelegateError('preflight must be a boolean', 'validation_error')
+    for field in ('background', 'notify_on_complete', 'preflight'):
+        if type(raw[field]) is not bool:
+            raise c.ProfileDelegateError(f'{field} must be a boolean', 'validation_error')
     if transport not in {'auto', 'interactive', 'simple'}:
         raise c.ProfileDelegateError('transport_mode must be auto, interactive, or simple', 'validation_error')
     if transport == 'interactive' and (not raw['background'] or c._background_mode() != 'detached'):
@@ -50,7 +51,7 @@ def normalize(raw):
     request = dict(session_title=c.normalize_session_title(raw['session_title']), session_mode=mode,
                    requested_session_id=sid, requested_transport=transport, reasoning_mode=reasoning_mode,
                    requested_output_mode=requested_mode, resolved_output_mode=output_mode,
-                   background=bool(raw['background']), notify_on_complete=bool(raw['notify_on_complete']),
+                   background=raw['background'], notify_on_complete=raw['notify_on_complete'],
                    origin=c.normalize_origin(raw['origin'], raw['origin_session_key']))
     return request, text, reasoning, approval, duplicate
 
@@ -70,6 +71,10 @@ def admit(raw):
     c.validate_preflight(execution, policy, reasoning_mode=request['reasoning_mode'], capability_preset=raw['capability_preset'],
                          target_profile=target.canonical, child_approval_explicit=approval is not None and approval != 'deny')
     records = c.matching_resume_records(target, request['requested_session_id']) if request['session_mode'] == 'resume' else None
+    # Authorize every retained record before any frozen authority is consumed,
+    # including ordinary (non-worktree) sessions and preflight requests.
+    for retained, _status in records or ():
+        c.authorize_run('resume', request['origin'], retained)
     envelope = c.resolve_request_approval(policy, target, request['session_mode'], request['requested_session_id'], approval, records)
     effective, capabilities = c.resolve_capability_preset(raw['capability_preset'], execution)
     cwd, workspace = c.worktrees.resolve_workspace(request, target, raw['workdir'], options, policy, records)
@@ -94,6 +99,7 @@ def fingerprint_payload(request, text, options):
     payload.update({key + '_sha256': hashlib.sha256(value.encode()).hexdigest() for key, value in zip(('task', 'context', 'contract'), text)})
     if options:
         payload['workspace_options'] = options
+        payload['workspace_initial_sha'] = request['workspace']['initial_sha']
     return payload
 
 

@@ -141,7 +141,6 @@ def prepare(request, run_dir, policy):
     workspace.update(destination=str(destination(Path(request["workdir"]), request["task_id"])),
                      initial_branch=workspace["initial_branch"] or f'pd/{request["task_id"]}')
     workspace.pop("destination_pattern", None)
-    workspace["initial_sha"] = git(Path(workspace["source_root"]), "rev-parse", "--verify", "--end-of-options", workspace["requested_ref"] + "^{commit}")
     core.json_safe_write(run_dir / "request.json", request)
     try:
         request["workdir"] = str(create(workspace, request["task_id"], policy))

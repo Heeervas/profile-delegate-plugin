@@ -92,6 +92,7 @@ class EventJournal:
         self.seq = 0
         self.event_count = 0
         self.bytes_written = 0
+        self._verified_stat: Optional[os.stat_result] = None
         self.truncated = False
         self.truncation_marker_written = False
         self.degraded = False
@@ -155,48 +156,69 @@ class EventJournal:
                 self.lock_fd = None
             self._degrade(f"open:{type(exc).__name__}")
 
+    def _checked_stat_locked(self) -> os.stat_result:
+        """Do not append to an unlinked destination or a replaced lock inode."""
+        assert self.fd is not None and self.lock_fd is not None
+        for fd, path in ((self.fd, self.path), (self.lock_fd, self.lock_path)):
+            opened = os.fstat(fd)
+            named = os.stat(path, follow_symlinks=False)
+            if not stat.S_ISREG(named.st_mode) or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                raise OSError("journal file replaced")
+        return os.fstat(self.fd)
+
     def _recover_locked(self) -> None:
+        """Validate all records on open, then only unseen bytes under events.lock.
+
+        Checkpoints are process-local and advance only after validation or a
+        successful complete write. Cooperative writers must append under the
+        same stable lock; partial tails are discarded before the next append.
+        Shrink/replacement fails closed. Same-size metadata changes trigger full
+        validation. Arbitrary old-prefix rewrites combined with growth cannot be
+        detected by offsets/stat: this is not an adversarial tamper-proof log.
+        """
         assert self.fd is not None
-        self.seq = 0
-        self.event_count = 0
-        self.bytes_written = 0
-        self.truncated = False
-        self.truncation_marker_written = False
-        size = os.fstat(self.fd).st_size
-        self.bytes_written = size
-        if size == 0:
+        current = self._checked_stat_locked()
+        previous = self._verified_stat
+        if previous is not None and current.st_size < previous.st_size:
+            self._degrade("journal_shrunk")
             return
-        os.lseek(self.fd, 0, os.SEEK_SET)
+        offset = self.bytes_written
+        if previous is None or (
+            current.st_size == previous.st_size
+            and (current.st_mtime_ns, current.st_ctime_ns) != (previous.st_mtime_ns, previous.st_ctime_ns)
+        ):
+            self.seq = self.event_count = self.bytes_written = offset = 0
+            self.truncated = self.truncation_marker_written = False
+        os.lseek(self.fd, offset, os.SEEK_SET)
         data = bytearray()
-        while len(data) < size:
-            chunk = os.read(self.fd, min(65_536, size - len(data)))
+        while offset + len(data) < current.st_size:
+            chunk = os.read(self.fd, min(65_536, current.st_size - offset - len(data)))
             if not chunk:
-                break
+                raise OSError("short journal read")
             data.extend(chunk)
-        data = bytes(data)
-        last_newline = data.rfind(b"\n")
-        if last_newline < len(data) - 1:
-            os.ftruncate(self.fd, last_newline + 1 if last_newline >= 0 else 0)
-            data = data[:last_newline + 1] if last_newline >= 0 else b""
-            self.bytes_written = len(data)
-        lines = data.splitlines()
-        if not lines:
-            return
+        complete = data.rfind(b"\n") + 1
+        if complete < len(data):
+            os.ftruncate(self.fd, offset + complete)
         try:
-            kinds = []
-            for seq, line in enumerate(lines, 1):
+            for line in bytes(data[:complete]).splitlines():
                 item = json.loads(line)
                 if not isinstance(item, dict) or set(item) != contracts.COMMON_KEYS:
                     raise ValueError("invalid record schema")
-                if int(item["seq"]) != seq:
+                if int(item["seq"]) != self.seq + 1:
                     raise ValueError("invalid sequence")
-                kinds.append(item["type"])
-            self.seq = len(kinds)
-            self.event_count = sum(kind not in {"journal.truncated", "terminal"} for kind in kinds)
-            self.truncation_marker_written = "journal.truncated" in kinds
-            self.truncated = self.truncation_marker_written
+                kind = item["type"]
+                self.event_count += kind not in {"journal.truncated", "terminal"}
+                self.truncation_marker_written |= kind == "journal.truncated"
+                self.truncated |= self.truncation_marker_written
+                self.seq += 1
         except Exception:
+            self.seq = self.event_count = 0
+            self.truncated = self.truncation_marker_written = False
+            self.bytes_written = offset + complete
             self._degrade("corrupt_complete_record")
+            return
+        self.bytes_written = offset + complete
+        self._verified_stat = os.fstat(self.fd)
 
     def set_session(self, session_id: str) -> None:
         if self.ui_session_id:
@@ -440,6 +462,7 @@ class EventJournal:
                 self.seq += 1
                 self.event_count += 1 if counted else 0
                 self.bytes_written += len(encoded)
+                self._verified_stat = os.fstat(self.fd)
                 return True
             finally:
                 fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
@@ -456,6 +479,7 @@ class EventJournal:
 
     def _truncate_locked(self, reason: str) -> None:
         """Append the unique marker while the caller holds ``events.lock``."""
+        assert self.fd is not None
         if self.truncation_marker_written:
             self.truncated = True
             return
@@ -470,6 +494,7 @@ class EventJournal:
             self._write_bytes(encoded)
             self.seq += 1
             self.bytes_written += len(encoded)
+            self._verified_stat = os.fstat(self.fd)
             self.truncation_marker_written = True
         self.truncated = True
 

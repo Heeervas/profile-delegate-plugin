@@ -11,6 +11,13 @@ This is unresolved public-checkout work, not an issue tracker or implementation 
 These fixes and their regression tests are included in the integrated 1.12 source;
 they no longer represent open housekeeping proposals.
 
+## Lifecycle residual risk
+
+- [ ] Reconcile an exceptional background reaper `process.wait()` failure.
+  The permit remains held unless exit is confirmed; this cannot produce false
+  success but may strand status/capacity. Add bounded recovery only with focused
+  lifecycle evidence, not by releasing capacity while a child may be alive.
+
 ## Evidence-led follow-up
 
 - [ ] Publish sanitized independent-installation CLI/TUI completion, resume/recovery, cancellation, consumed steering and notification evidence. Use existing opt-in harnesses and operator approval, never frozen-authority bypass. Fixture/native import checks do not establish real provider or platform delivery.

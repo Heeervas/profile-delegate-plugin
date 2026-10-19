@@ -8,30 +8,31 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import core
-from test_profile_delegate import mock_delegate_admission
 
 
 def _plugin():
     spec = importlib.util.spec_from_file_location("profile_delegate_preflight_plugin", Path(__file__).parents[1] / "__init__.py")
-    assert spec is not None and spec.loader is not None
     plugin = importlib.util.module_from_spec(spec)
-    # Bind the synthetic package's seams to the same modules patched by fixtures.
-    plugin.__package__ = ""
-    plugin.__spec__ = importlib.util.spec_from_loader(spec.name, spec.loader, is_package=False)
     spec.loader.exec_module(plugin)
     return plugin
 
 
-@pytest.fixture
-def preflight_admission(tmp_path, tmp_path_factory, monkeypatch):
-    # Admission is a fixture; native policy/config resolution remains real.
-    home = tmp_path_factory.mktemp("preflight-caller")
-    mock_delegate_admission(home, monkeypatch)
+@pytest.fixture(autouse=True)
+def isolated_preflight_runtime(tmp_path, monkeypatch):
+    # Exercise real admission against native profile APIs without installed personas
+    # or a globally installed executable on the invoking machine.
+    from hermes_cli import profiles
+    home = tmp_path.parent / (tmp_path.name + "-home")
+    (home / "profiles" / "builder").mkdir(parents=True)
     monkeypatch.setenv("HERMES_HOME", str(home))
-    monkeypatch.setattr(core, "_plugin_entry", lambda: {"allowed_profiles": ["builder"], "allowed_capability_presets": ["review", "build"]})
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "builder")
+    monkeypatch.setattr(profiles, "get_profile_dir", lambda name: home / "profiles" / name)
+    monkeypatch.setattr(core, "resolve_hermes_bin", lambda: "/fixture/bin/hermes")
 
 
-def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch, preflight_admission):
+def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOWED_PROFILES", "builder")
+    monkeypatch.delenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", raising=False)
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
     monkeypatch.delenv("PROFILE_DELEGATE_PARENT_TASK_ID", raising=False)
     monkeypatch.delenv("PROFILE_DELEGATE_APPROVAL_REQUEST", raising=False)
@@ -39,7 +40,7 @@ def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch, preflight
     payload = {"profile": "builder", "task": "Return JSON", "session_title": "dry run",
                "background": True, "preflight": True}
     observed = json.loads(plugin._handler(payload))
-    assert observed["success"] is True
+    assert observed["success"] is True, observed
     assert observed["preflight"] is True
     assert observed["run_created"] is False
     assert observed["normalized_request"]["selected_transport"] == "interactive"
@@ -49,13 +50,15 @@ def test_preflight_model_handler_creates_no_run(tmp_path, monkeypatch, preflight
     assert "preflight" in plugin._schema()["parameters"]["properties"]
 
 
-def test_preflight_conflicts_return_actionable_patch_without_run(tmp_path, monkeypatch, preflight_admission):
+def test_preflight_conflicts_return_actionable_patch_without_run(tmp_path, monkeypatch):
     # This refusal contract must not inherit the invoking caller's live grant.
     monkeypatch.setattr(core, "_plugin_entry", lambda: {
-        "allowed_profiles": ["builder"], "allowed_capability_presets": ["review", "build"],
+        "allowed_profiles": ["builder"],
         "allow_child_approval_override": False,
         "allow_reasoning_override": False,
     })
+    monkeypatch.setenv("PROFILE_DELEGATE_ALLOWED_PROFILES", "builder")
+    monkeypatch.delenv("PROFILE_DELEGATE_ALLOW_ALL_PROFILES", raising=False)
     monkeypatch.setenv("PROFILE_DELEGATE_RUNS_ROOT", str(tmp_path))
     monkeypatch.delenv("PROFILE_DELEGATE_PARENT_TASK_ID", raising=False)
     monkeypatch.delenv("PROFILE_DELEGATE_APPROVAL_REQUEST", raising=False)

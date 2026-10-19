@@ -301,33 +301,69 @@ class TuiRpcClient:
                 raise TuiRemoteError(error["code"], error["message"])
             return frame["result"]
 
-    def close(self, *, grace: float = 10.0, deadline: Optional[float] = None) -> None:
+    def _wait_draining(self, deadline: float) -> bool:
+        """Discard stdout and retain only capped stderr while awaiting exit."""
+        stdout = self.process.stdout
+        stdout_eof = stdout is None
+        while True:
+            self._drain_stderr()
+            exited = self.process.poll() is not None
+            # Once reaped, stdout need not be consumed: it is intentionally
+            # discarded and close() releases the pipe descriptors.
+            if exited:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return exited
+            if isinstance(stdout, io.BytesIO):
+                stdout_eof = not stdout.read(8192)
+                # In-memory process doubles have no OS readiness/reaping path.
+                try:
+                    self.process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    return False
+                continue
+            readers = []
+            if stdout is not None and not stdout_eof:
+                readers.append(stdout.fileno())
+            if self.process.stderr is not None and not self._stderr_eof:
+                readers.append(self.process.stderr.fileno())
+            ready = select.select(readers, [], [], min(0.02, remaining))[0]
+            if stdout is not None and not stdout_eof and stdout.fileno() in ready:
+                stdout_eof = not os.read(stdout.fileno(), 8192)
+
+    def _signal_group(self, signum, fallback):
+        """Signal the owned session, falling back to its direct process."""
+        try:
+            os.killpg(self.process.pid, signum)
+        except (ProcessLookupError, PermissionError, AttributeError):
+            try:
+                getattr(self.process, fallback)()
+            except Exception:
+                pass
+
+    def close(self, *, grace: float = 10.0, deadline: Optional[float] = None) -> bool:
         """Close stdin and await gateway session teardown before forced reaping.
 
         A real Builder turn produced a complete result, then gateway teardown
         exceeded the old 2s grace and our SIGTERM made its exit -15. Keep the
         nonzero-exit safety check: if teardown exceeds this bounded reserve it
         remains a failure, rather than relabelling a killed process as success.
-        Cancellation still supplies its shorter explicit deadline.
+        Cancellation still supplies its shorter explicit deadline. Relative grace
+        has a 100ms minimum signal/reap reserve; explicit deadlines are never
+        extended. False means the owner must retain the child and reap obligation.
         """
         if self._closed:
-            return
+            return self.process.poll() is not None
         self._closed = True
 
-        def remaining() -> float:
-            if deadline is None:
-                return max(0.0, grace)
-            return max(0.0, deadline - time.monotonic())
+        explicit_deadline = deadline is not None
+        end = deadline if deadline is not None else time.monotonic() + max(0.1, grace)
+        self._stdout_buffer.clear()
 
         def wait_bounded(*, fraction: float = 1.0) -> bool:
-            wait_timeout = remaining()
-            if deadline is not None:
-                wait_timeout *= max(0.0, min(1.0, fraction))
-            try:
-                self.process.wait(timeout=wait_timeout)
-                return True
-            except Exception:
-                return False
+            now = time.monotonic()
+            return self._wait_draining(now + max(0.0, end - now) * fraction)
 
         try:
             try:
@@ -335,23 +371,27 @@ class TuiRpcClient:
                     self.process.stdin.close()
             except Exception:
                 pass
-            # An explicit cancellation deadline must leave time to signal and
-            # reap a stubborn child; normal completion gets the full grace.
-            if wait_bounded(fraction=0.5 if deadline is not None else 1.0):
-                return
+            # Every close owns one fixed budget, including signal/reap reserves.
+            # Drain both pipes during each stage; wait() alone can deadlock a
+            # gateway writing shutdown diagnostics larger than pipe capacity.
+            if wait_bounded(fraction=0.5 if explicit_deadline else 0.8):
+                return True
             for signum, fallback, fraction in (
                 (signal.SIGTERM, "terminate", 0.5),
                 (signal.SIGKILL, "kill", 1.0),
             ):
-                try:
-                    os.killpg(self.process.pid, signum)
-                except (ProcessLookupError, PermissionError, AttributeError):
+                self._signal_group(signum, fallback)
+                if signum == signal.SIGKILL:
+                    # No writer survives SIGKILL. wait() observes exit promptly;
+                    # selecting on inherited pipes can consume the entire reserve.
                     try:
-                        getattr(self.process, fallback)()
-                    except Exception:
-                        pass
+                        self.process.wait(timeout=max(0.0, end - time.monotonic()))
+                        return True
+                    except subprocess.TimeoutExpired:
+                        return False
                 if wait_bounded(fraction=fraction):
-                    return
+                    return True
+            return self.process.poll() is not None
         finally:
             self._drain_stderr()
             self._finish_stderr()

@@ -8,6 +8,9 @@ import pytest
 import core
 
 
+RESUME_ORIGIN = {'session_id': 'parent-session', 'session_key': 'cli:fixture', 'source': 'cli'}
+
+
 @pytest.fixture(autouse=True)
 def isolated_caller_home(tmp_path, monkeypatch):
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
@@ -185,7 +188,7 @@ def test_cli_resume_footer_requires_native_compression(tmp_path, monkeypatch, fo
     import native_approval
     previous = tmp_path / 'runs' / 'pd_frozen-seed'
     previous.mkdir(parents=True)
-    core.text_safe_write(previous / 'request.json', json.dumps({'profile_home': str(target), 'native_approval':
+    core.text_safe_write(previous / 'request.json', json.dumps({'profile_home': str(target), 'origin': RESUME_ORIGIN, 'native_approval':
                          native_approval.snapshot('deny', 'task', 'caller', str(target), {}, {})}))
     core.text_safe_write(previous / 'status.json', json.dumps({'child_session_id': 'a'}))
     def run(cmd, **kwargs):
@@ -193,7 +196,7 @@ def test_cli_resume_footer_requires_native_compression(tmp_path, monkeypatch, fo
         core.text_safe_write(kwargs['stderr_path'], '')
         return {'exit_code': 0, 'timed_out': False, 'stdout_limit': 200000, 'stderr_limit': 100000}
     monkeypatch.setattr(core, 'run_capped_subprocess', run)
-    result = core.delegate_profile('reviewer', 'task', session_title='resume', session_mode='resume', session_id='a')
+    result = core.delegate_profile('reviewer', 'task', session_title='resume', session_mode='resume', session_id='a', origin=RESUME_ORIGIN)
     assert result['success'] is success
     if success:
         assert result['child_session_id'] == 'b'
@@ -274,7 +277,7 @@ def dispatch_fixture(tmp_path, monkeypatch):
     import native_approval
     previous = tmp_path / 'runs' / 'pd_frozen-seed'
     previous.mkdir(parents=True)
-    core.text_safe_write(previous / 'request.json', json.dumps({'profile_home': str(tmp_path / 'target'), 'native_approval':
+    core.text_safe_write(previous / 'request.json', json.dumps({'profile_home': str(tmp_path / 'target'), 'origin': RESUME_ORIGIN, 'native_approval':
                          native_approval.snapshot('deny', 'task', 'caller', str(tmp_path / 'target'), {}, {})}))
     core.text_safe_write(previous / 'status.json', json.dumps({'child_session_id': 'a'}))
     monkeypatch.setattr(core, '_start_background_run', lambda run_dir: None)
@@ -469,7 +472,7 @@ def test_present_invalid_footer_blocks_success_and_recovery(tmp_path, monkeypatc
         return {'exit_code': 1 if transient else 0, 'timed_out': False, 'stdout_limit': 200000, 'stderr_limit': 100000}
     monkeypatch.setattr(core, 'run_capped_subprocess', run)
     result = core.delegate_profile('worker', 'task', session_title='test', session_mode=mode,
-                                   session_id='a' if mode == 'resume' else '')
+                                   session_id='a' if mode == 'resume' else '', origin=RESUME_ORIGIN)
     assert result['success'] is False
     assert result['error_code'] == 'resume_session_mismatch'
     assert len(calls) == 1
@@ -498,7 +501,7 @@ def test_cli_multiple_recovery_rotations(tmp_path, monkeypatch, dispatch_fixture
                 'stdout_limit': 200000, 'stderr_limit': 100000}
     monkeypatch.setattr(core, 'run_capped_subprocess', run)
     result = core.delegate_profile('worker', 'task', session_title='test', session_mode=mode,
-                                   session_id='a' if mode == 'resume' else '', timeout_seconds=120)
+                                   session_id='a' if mode == 'resume' else '', timeout_seconds=120, origin=RESUME_ORIGIN)
     assert len(commands) == 3
     assert '--resume' in commands[1] and 'b' in commands[1]
     assert '--resume' in commands[2] and 'c' in commands[2]

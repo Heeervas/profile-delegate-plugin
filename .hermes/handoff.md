@@ -1,5 +1,14 @@
 # Hermes handoff
 
+Senior corrections are integrated from review branch `243521e` onto published
+main `13c23a5`, preserving main's layout, managed-scope guard and governance.
+932 local tests passed; lint/lock/registration/secrets and TOP quality passed.
+User authorized normal main integration/push, not activation or a new release.
+Main exact-head CI/quality readback remains the final gate. Reaper wait-error
+residual risk is recorded in TODO.md. Historical review evidence belongs to the
+review-branch candidate; this merge needs its own integration verification.
+
+
 Current candidate/authority: [STATE.md](../STATE.md).
 Canonical gates: [.agents/validation.md](../.agents/validation.md).
 Worktree journey: [README](../README.md#optional-git-worktrees--principal-feature-of-1120).

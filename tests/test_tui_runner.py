@@ -14,6 +14,168 @@ import tui_runner
 import core
 from test_tui_rpc import _execute_with_control, runner_run, runner_slot, runner_complete, RecordingJournal, CompleteClient
 
+def test_pending_reap_retains_capacity_until_wait_completes(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    run = runner_run(tmp_path, "pd_pending_slot")
+    coordinator = tui_runner._RunCoordinator(run)
+    released, waiting, allow_exit = (threading.Event() for _ in range(3))
+    state = {"exit": None}
+
+    @contextmanager
+    def slot(_maximum):
+        try:
+            yield SimpleNamespace(slot=0)
+        finally:
+            released.set()
+
+    def wait():
+        waiting.set()
+        assert allow_exit.wait(2)
+        state["exit"] = -9
+        return -9
+
+    coordinator.client = SimpleNamespace(process=SimpleNamespace(
+        poll=lambda: state["exit"], wait=wait))
+    monkeypatch.setattr(core, "acquire_concurrency_slot", slot)
+    try:
+        with coordinator.execution_slot(1):
+            pass
+        assert waiting.wait(1)
+        assert not released.is_set()
+    finally:
+        allow_exit.set()
+    assert released.wait(2)
+    assert core.read_json_file(run / "status.json")["transport_alive"] is False
+
+
+def test_unreaped_transport_cannot_publish_success(tmp_path):
+    run = runner_run(tmp_path, "pd_unreaped")
+    coordinator = tui_runner._RunCoordinator(run)
+    coordinator.message_status = "complete"
+    coordinator.final_status = "completed"
+    coordinator.final_text = '{"status":"ok","summary":"settled"}'
+    coordinator.client = SimpleNamespace(
+        close=lambda **kwargs: False,
+        process=SimpleNamespace(poll=lambda: None), stderr_tail="",
+    )
+    coordinator.teardown()
+    final = coordinator.publish()
+    assert final["success"] is False
+    assert final["error_code"] == "tui_reap_pending"
+    assert core.read_json_file(run / "status.json")["transport_alive"] is True
+
+
+def test_reaper_keeps_real_child_slot_until_process_exit(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    from contextlib import contextmanager
+
+    run = runner_run(tmp_path, "pd_real_reap_slot")
+    coordinator = tui_runner._RunCoordinator(run)
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(.25)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    released = threading.Event()
+
+    @contextmanager
+    def slot(_maximum):
+        try:
+            yield SimpleNamespace(slot=0)
+        finally:
+            released.set()
+
+    monkeypatch.setattr(core, "acquire_concurrency_slot", slot)
+    coordinator.client = SimpleNamespace(process=process)
+    try:
+        with coordinator.execution_slot(1):
+            pass
+        assert not released.wait(.05)
+        assert process.poll() is None or released.is_set()
+        assert released.wait(2)
+        assert process.poll() is not None
+        assert core.read_json_file(run / "status.json")["transport_alive"] is False
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=2)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+
+
+@pytest.mark.parametrize("outcome", ["complete", "cancel", "steer", "startup_error", "turn_error"])
+def test_runner_holds_slot_until_blocking_teardown_but_not_publish(tmp_path, monkeypatch, outcome):
+    from contextlib import contextmanager
+
+    run = runner_run(tmp_path, "pd_slot_lifecycle")
+    coordinator = tui_runner._RunCoordinator(run)
+    permit = threading.Lock()
+    teardown_started, allow_reap, competitor_acquired = (threading.Event() for _ in range(3))
+    errors = []
+
+    @contextmanager
+    def slot(_maximum):
+        with permit:
+            yield SimpleNamespace(slot=0)
+
+    def startup(_slot):
+        if outcome == "startup_error":
+            raise tui_rpc.TuiTransportError("startup failed after child launch")
+
+    def turn():
+        coordinator.cancelled = outcome == "cancel"
+        coordinator.accepted_steer = outcome == "steer"
+        coordinator.message_status = "complete"
+        if outcome == "turn_error":
+            raise tui_rpc.TuiTransportError("turn failed")
+
+    def teardown():
+        teardown_started.set()
+        assert allow_reap.wait(2), "test did not release simulated child reaping"
+
+    def publish():
+        assert permit.acquire(timeout=1), "notification retained child permit"
+        permit.release()
+        return {"published": True}
+
+    monkeypatch.setattr(core, "acquire_concurrency_slot", slot)
+    monkeypatch.setattr(coordinator, "start_gateway", startup)
+    monkeypatch.setattr(coordinator, "start_agent", lambda: None)
+    monkeypatch.setattr(coordinator, "observe_turn", turn)
+    monkeypatch.setattr(coordinator, "observe_followup", lambda: None)
+    monkeypatch.setattr(coordinator, "close_session", lambda: None)
+    monkeypatch.setattr(coordinator, "teardown", teardown)
+    monkeypatch.setattr(coordinator, "publish", publish)
+
+    def execute():
+        try:
+            assert coordinator.run() == {"published": True}
+        except BaseException as exc:
+            errors.append(exc)
+
+    def compete():
+        with slot(1):
+            competitor_acquired.set()
+
+    worker = threading.Thread(target=execute)
+    worker.start()
+    competitor = threading.Thread(target=compete)
+    try:
+        assert teardown_started.wait(2)
+        competitor.start()
+        assert not competitor_acquired.wait(0.1), "slot released while child teardown was blocked"
+    finally:
+        allow_reap.set()
+        worker.join(2)
+        if competitor.ident is not None:
+            competitor.join(2)
+    assert not worker.is_alive() and not competitor.is_alive()
+    assert competitor_acquired.is_set()
+    assert not errors
+
+
 def test_gateway_command_uses_hermes_runtime_python(tmp_path):
     hermes_dir = tmp_path / "runtime"
     hermes_dir.mkdir()

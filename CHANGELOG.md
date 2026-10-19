@@ -4,6 +4,16 @@ All notable changes to Profile Delegate are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Authorize generic resume before frozen approval; reject non-boolean controls.
+- Keep worktree preparation and deduplication on the admitted commit SHA.
+- Ignore verdicts inside Markdown fences and incrementally recover journals.
+- Retain concurrency capacity through TUI teardown/reaping; uncertain exit is
+  failure, not success. Drain subprocess output within fixed shutdown budgets.
+- Isolate native admission tests from operator profiles and executable PATH.
+
+
 ## [1.12.0] — source release candidate
 
 ### Principal feature: optional Git worktrees

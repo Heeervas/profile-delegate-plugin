@@ -1,5 +1,22 @@
 # Profile Delegate — v1.12.0 source candidate
 
+## Senior corrections integration into main
+
+Alberto explicitly authorized merging `review/senior-corrections-20261019`
+(`243521e3813f82866d31f080833562377c719d06`) into main. Integration preserves
+published main `13c23a54407c7845b7145f9d73cb450ead709b05`, including tests/ layout,
+public documentation, trusted governance (both existing exceptions), and the
+inherited-managed-scope security fix in core.py. No force push or activation.
+
+The reviewed resume authorization, strict booleans, admitted worktree SHA,
+fenced verdict, incremental journal and TUI teardown/reaping fixes are retained.
+Integrated local suite: 932 passed (includes main's extra managed-scope case).
+Lint, lock, registration, secret scan and TOP quality gate passed with existing
+exceptions. Exact-head GitHub checks must pass before claiming remote completion.
+Exceptional process.wait failure can retain a stale slot/status: documented
+conservative residual risk, not false success; see TODO.md.
+
+
 ## Authority and identity
 
 Alberto authorized committing and pushing the complete accepted worktree candidate

@@ -110,6 +110,23 @@ while True:
     assert p.poll() is not None
 
 
+@pytest.mark.parametrize("expired", [False, True])
+def test_close_exhausted_budget_reports_reaping(expired):
+    p = child("import time; time.sleep(30)")
+    c = TuiRpcClient(p)
+    start = time.monotonic()
+    try:
+        reaped = c.close(deadline=start - 1) if expired else c.close(grace=0)
+        assert time.monotonic() - start < .5
+        assert reaped is (not expired)
+        if reaped:
+            assert p.poll() is not None
+    finally:
+        if p.poll() is None:
+            p.kill()
+        p.wait(timeout=2)
+
+
 def test_invalid_reader_bounds():
     for cap, tail in [(0, 1), (1, -1)]:
         with pytest.raises(ValueError):

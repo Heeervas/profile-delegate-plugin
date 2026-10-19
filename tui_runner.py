@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import threading
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -64,6 +65,7 @@ class _RunCoordinator:
     """Single run state owner; core.finish_run remains terminal authority."""
 
     def __init__(self, run_dir: Path) -> None:
+        self._cleanup_lock = threading.Lock()
         self.run_dir = run_dir
         self.request = core.read_json_file(self.run_dir / "request.json")
         self.timeout = int(self.request.get("timeout_seconds") or core.DEFAULT_TIMEOUT_SECONDS)
@@ -548,37 +550,46 @@ class _RunCoordinator:
             + (self.client.stderr_tail if self.client else ""),
         )
 
+    def observe_cancel_identity(self):
+        # Observe trailing identity after ACK, never spend the reap
+        # reserve or restart normal controls/turn polling.
+        observation_end = min(self.cancel_deadline, time.monotonic() + min(
+            0.15, max(0.0, self.cancel_deadline - time.monotonic()) * 0.1))
+        try:
+            for _ in range(self.journal.max_pre_session_events):
+                remaining = observation_end - time.monotonic()
+                if remaining <= 0:
+                    break
+                frame = _poll_event(self.client, remaining, self.journal)
+                if frame is None:
+                    break
+                self.persist_event(frame)
+                params = frame.get("params") or {}
+                if (params.get("session_id") == self.ui_session_id
+                        and params.get("type") == "session.info"
+                        and "stored_session_id" in (params.get("payload") or {})):
+                    self.cancel_identity_observed = True
+        except Exception as exc:
+            self.cancel_transport_diagnostic = self.cancel_transport_diagnostic or f"identity observation unavailable: {exc}"
+
     def teardown(self):
         if self.client is not None:
             if self.cancelled:
                 if self.cancel_deadline is None:
                     self.cancel_deadline = time.monotonic()
                 if self.cancel_interrupt_accepted:
-                    # Observe trailing identity after ACK, never spend the reap
-                    # reserve or restart normal controls/turn polling.
-                    observation_end = min(self.cancel_deadline, time.monotonic() + min(
-                        0.15, max(0.0, self.cancel_deadline - time.monotonic()) * 0.1))
-                    try:
-                        for _ in range(self.journal.max_pre_session_events):
-                            remaining = observation_end - time.monotonic()
-                            if remaining <= 0:
-                                break
-                            frame = _poll_event(self.client, remaining, self.journal)
-                            if frame is None:
-                                break
-                            self.persist_event(frame)
-                            params = frame.get("params") or {}
-                            if (params.get("session_id") == self.ui_session_id
-                                    and params.get("type") == "session.info"
-                                    and "stored_session_id" in (params.get("payload") or {})):
-                                self.cancel_identity_observed = True
-                    except Exception as exc:
-                        self.cancel_transport_diagnostic = self.cancel_transport_diagnostic or f"identity observation unavailable: {exc}"
+                    self.observe_cancel_identity()
                 self.client.close(deadline=self.cancel_deadline)
             else:
                 self.client.close()
             self.exit_code = self.client.process.poll()
-        core.merge_run_status(self.run_dir, {"transport_alive": False})
+            if self.exit_code is None:
+                # close() is bounded, not a promise that the OS reaped the child.
+                # Preserve the unresolved lifecycle as a failure for publication;
+                # execution_slot transfers the still-held permit to its reaper.
+                self.final_status, self.error_code = "failed", "tui_reap_pending"
+        pending = self.client is not None and self.exit_code is None
+        core.merge_run_status(self.run_dir, {"transport_alive": pending})
 
     def build_result(self):
         if self.timed_out:
@@ -600,12 +611,16 @@ class _RunCoordinator:
         return result
 
     def publish(self):
+        with self._cleanup_lock:
+            return self._publish()
+
+    def _publish(self):
         # The transport process is authoritative. A complete message followed by a
         # nonzero gateway exit is an execution failure, never completed+ok.
         if (
             not self.timed_out
             and not self.cancelled
-            and self.exit_code not in (None, 0)
+            and self.exit_code != 0
         ):
             self.final_status = "failed"
             self.error_code = self.error_code or "tui_nonzero_exit"
@@ -630,7 +645,7 @@ class _RunCoordinator:
             "timed_out": self.timed_out,
             "error_code": self.error_code,
             "child_session_id": self.child_session_id,
-            "transport_alive": False,
+            "transport_alive": self.client is not None and self.client.process.poll() is None,
         }
         final = core.finish_run(self.run_dir, self.request, result, {**terminal_updates, **self.journal.snapshot_fields()}, mode="async")
         self.final_status, self.error_code, self.child_session_id = final["status"], final["error_code"], final["child_session_id"]
@@ -641,21 +656,61 @@ class _RunCoordinator:
             self.merge_status({"observability_degraded": True}, force=True)
         return final
 
+    def execution_slot(self, maximum):
+        """Transfer the permit to a reaper if bounded teardown cannot reap."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def owned_slot():
+            slot_manager = core.acquire_concurrency_slot(maximum)
+            slot = slot_manager.__enter__()
+            try:
+                yield slot
+            finally:
+                process = self.client.process if self.client is not None else None
+                if process is None or process.poll() is not None:
+                    slot_manager.__exit__(None, None, None)
+                else:
+                    # Keep the acquired permit itself alive; do not move a
+                    # generator context-manager's __exit__ across threads.
+                    def reap():
+                        # A failed wait is not evidence of death: retain ownership.
+                        process.wait()
+                        with self._cleanup_lock:
+                            try:
+                                core.merge_run_status(self.run_dir, {"transport_alive": False})
+                            finally:
+                                slot_manager.__exit__(None, None, None)
+
+                    reaper = threading.Thread(
+                        target=reap, name="profile-delegate-reaper", daemon=False,
+                    )
+                    try:
+                        reaper.start()
+                    except RuntimeError:
+                        # Thread creation failure cannot justify releasing the
+                        # permit while the child is live. Reap here, then release.
+                        reap()
+        return owned_slot()
+
     def run(self) -> Dict[str, Any]:
         try:
             limits = ((self.request.get("effective_policy") or {}).get("limits") or {})
             maximum = int(limits.get("max_concurrent", core.DEFAULT_MAX_CONCURRENT))
-            with core.acquire_concurrency_slot(maximum) as slot:
-                self.start_gateway(slot)
-                self.start_agent()
-                self.observe_turn()
-                self.observe_followup()
-                self.close_session()
-            self.classify()
+            with self.execution_slot(maximum) as slot:
+                try:
+                    self.start_gateway(slot)
+                    self.start_agent()
+                    self.observe_turn()
+                    self.observe_followup()
+                    self.close_session()
+                    self.classify()
+                finally:
+                    # The permit accounts for the live child, not just its turn.
+                    # Publish/notification happens only after reaping and release.
+                    self.teardown()
         except Exception as exc:
             self.record_error(exc)
-        finally:
-            self.teardown()
         return self.publish()
 
 

@@ -570,6 +570,41 @@ def test_oversized_frame_diagnostic_is_bounded_safe_and_actionable(exact):
     assert secret not in diagnostic
 
 
+@pytest.mark.parametrize("continuous", [False, True])
+def test_close_drains_large_shutdown_output_with_fixed_budget(continuous):
+    source = (
+        "import os,signal,sys; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "print('ready',flush=True); sys.stdin.read(); "
+        + ("\nwhile True: os.write(1,b'o'*8192); os.write(2,b'e'*8192)"
+           if continuous else
+           "\nfor _ in range(256): os.write(1,b'o'*8192); os.write(2,b'e'*8192)\nos.write(2,b'END')")
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", source], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    )
+    client = tui_rpc.TuiRpcClient(proc, max_diagnostic_chars=32)
+    try:
+        assert proc.stdout is not None and proc.stdout.readline() == b"ready\n"
+        started = time.monotonic()
+        client.close(grace=0.8)
+        assert time.monotonic() - started < 1.2
+        assert proc.returncode == (-signal.SIGKILL if continuous else 0)
+        assert len(client.stderr_tail) <= 32
+        if not continuous:
+            assert client.stderr_tail == "e" * 29 + "END"
+        assert client._stdout_buffer == b""
+        assert all(s is not None and s.closed for s in (proc.stdin, proc.stdout, proc.stderr))
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+
+
 def test_close_reaps_process_and_is_idempotent():
     proc = FakeProcess([])
     client = tui_rpc.TuiRpcClient(proc)

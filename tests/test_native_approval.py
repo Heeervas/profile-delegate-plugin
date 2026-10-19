@@ -11,13 +11,26 @@ import native_approval as policy
 
 
 def historical_deny(config):
-    """Exact pre-repair v1 snapshot algorithm (not current normalization)."""
-    native = policy.subset(config)
+    """Independent literal v1 fixture; do not derive it via current policy helpers."""
+    raw = config.get("approvals") or {}
+    mode = raw.get("mode", "manual")
+    if mode is False:
+        mode = "off"
+    native = {
+        "approvals": {
+            "mode": mode,
+            "single_query_mode": "approve" if str(raw.get("single_query_mode", "deny")).lower() in {"approve", "off", "allow", "yes"} else "deny",
+            "unattended_mode": "approve" if str(raw.get("unattended_mode", "deny")).lower() in {"approve", "off", "allow", "yes"} else "deny",
+            "deny": list(raw.get("deny", [])),
+        },
+        "command_allowlist": list(config.get("command_allowlist") or []),
+    }
     value = {"schema_version": 1, "effective": "deny", "source": "yaml",
              "caller": "caller", "target": "target", "native": native,
              "bypass": native["approvals"]["mode"] == "off",
              "unattended_context": "single_query", "lineage_admission": "operator_target"}
-    value["fingerprint"] = policy.fingerprint(value)
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    value["fingerprint"] = __import__("hashlib").sha256(encoded).hexdigest()
     return value
 
 
@@ -135,9 +148,8 @@ assert approval.check_all_command_guards('rm -rf /tmp/permanent-grant-never-exec
 '''.replace('REPO', repr(str(Path(__file__).parents[1]))).replace('MODE', repr(mode)).replace('POSTURE', repr(unattended)).replace('SELECTION', repr(selection)).replace('EVENTS', "__import__('pathlib').Path("+repr(str(tmp_path/'events.jsonl'))+")"))
     env = dict(os.environ)
     env.pop("HERMES_YOLO_MODE", None)
-    home = tmp_path / "home"
-    home.mkdir()
-    env["HERMES_HOME"] = str(home)
+    env["HERMES_HOME"] = str(tmp_path / "hermes-home")
+    Path(env["HERMES_HOME"]).mkdir()
     observed = subprocess.run([str(Path(os.environ.get("PROFILE_DELEGATE_TEST_RUNTIME", "/opt/hermes")) / ".venv/bin/python"), str(script)], env=env, text=True, capture_output=True, timeout=30)
     assert observed.returncode == 0, observed.stderr
     result = json.loads(observed.stdout.splitlines()[-1])

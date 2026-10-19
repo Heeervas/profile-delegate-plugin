@@ -128,3 +128,105 @@ def test_shared_resume_scan_is_bounded_and_ignores_foreign(repository, monkeypat
     (bad / 'status.json').write_text(json.dumps({'child_session_id': 'child'}))
     with pytest.raises(core.ProfileDelegateError, match='Relevant resume evidence'):
         core.matching_resume_records(target, 'child')
+
+
+@pytest.mark.parametrize('caller,allowed', [('parent', True), ('foreign', False), ('compressed', True)])
+def test_generic_resume_authorizes_before_frozen_yolo(repository, monkeypatch, caller, allowed):
+    from test_compression_continuity import database, row
+    home = repository.parent / 'caller'
+    database(home, [row('parent', reason='compression', source='cli', lane='cli:fixture'),
+                    row('compressed', 'parent', source='cli', lane='cli:fixture'),
+                    row('foreign', source='cli', lane='cli:fixture')])
+    monkeypatch.setattr(core, 'get_hermes_home_path', lambda: home)
+    start = launch(repository)
+    run = Path(start['paths']['request']).parent
+    stored = core.read_json_file(run / 'request.json')
+    stored['native_approval'] = core.native_approval.snapshot('yolo', 'task', str(home), stored['profile_home'], {}, {})
+    stored['child_approval_mode'] = 'yolo'
+    core.json_safe_write(run / 'request.json', stored)
+    status = core.read_json_file(run / 'status.json')
+    core.json_safe_write(run / 'status.json', {**status, 'child_session_id': 'native-child', 'status': 'completed'})
+    before = (run / 'request.json').read_bytes()
+    original = core.resolve_request_approval
+    consumed = []
+    def approval(*args, **kwargs):
+        consumed.append(True)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(core, 'resolve_request_approval', approval)
+    args = dict(profile='worker', task='continue', session_title='resume', session_mode='resume',
+                session_id='native-child', workdir=str(repository), preflight=True,
+                origin={'session_key': 'cli:fixture', 'session_id': caller})
+    if allowed:
+        result = core.delegate_profile(**args)
+        assert result['approval_policy'] == stored['native_approval']
+        assert consumed == [True]
+    else:
+        with pytest.raises(core.ProfileDelegateError) as error:
+            core.delegate_profile(**args)
+        assert error.value.code == 'origin_mismatch'
+        assert not consumed
+    assert (run / 'request.json').read_bytes() == before
+    assert len(list(core.get_runs_root().glob('pd_*'))) == 1
+
+
+def test_worktree_moved_ref_is_not_duplicate(repository, monkeypatch):
+    monkeypatch.setenv('PROFILE_DELEGATE_MAX_CONCURRENT', '3')
+    monkeypatch.setenv('PROFILE_DELEGATE_MAX_ASYNC', '3')
+    first = launch(repository, worktree=True)
+    assert launch(repository, worktree=True)['task_id'] == first['task_id']
+    command(repository, 'add', 'base.txt')
+    command(repository, 'commit', '-qm', 'advance base')
+    moved_sha = command(repository, 'rev-parse', 'HEAD')
+    second = launch(repository, worktree=True)
+    assert not second['deduplicated']
+    assert second['task_id'] != first['task_id']
+    assert second['workspace']['initial_sha'] == moved_sha
+    assert command(Path(second['workspace']['destination']), 'rev-parse', 'HEAD') == moved_sha
+
+
+def test_worktree_preparation_keeps_admitted_sha_when_ref_moves(repository, monkeypatch):
+    admitted_sha = command(repository, 'rev-parse', 'HEAD')
+    original = worktrees.prepare
+    def prepare(request, run_dir, policy):
+        command(repository, 'add', 'base.txt')
+        command(repository, 'commit', '-qm', 'move between admission and preparation')
+        return original(request, run_dir, policy)
+    monkeypatch.setattr(worktrees, 'prepare', prepare)
+    result = launch(repository, worktree=True)
+    assert command(repository, 'rev-parse', 'HEAD') != admitted_sha
+    assert result['workspace']['initial_sha'] == admitted_sha
+    assert command(Path(result['workspace']['destination']), 'rev-parse', 'HEAD') == admitted_sha
+
+
+@pytest.mark.parametrize('field', ['background', 'notify_on_complete', 'preflight', 'worktree'])
+@pytest.mark.parametrize('value', ['false', 'true', 0, 1, None, [], {}])
+@pytest.mark.parametrize('entry', ['handler', 'core'])
+def test_single_admission_rejects_non_boolean(repository, monkeypatch, field, value, entry):
+    from test_preflight_contract import _plugin
+    args = dict(profile='worker', task='bounded', session_title='booleans', workdir=str(repository),
+                background=True, notify_on_complete=False, transport_mode='simple', preflight=True)
+    args[field] = value
+    monkeypatch.setattr(core, '_start_background_run', lambda *a: pytest.fail('invalid boolean launched a child'))
+    monkeypatch.setattr(core, '_execute_delegate_run', lambda *a: pytest.fail('invalid boolean launched a child'))
+    if entry == 'handler':
+        result = json.loads(_plugin()._handler(args))
+        assert result['error_code'] == 'validation_error'
+        assert field + ' must be a boolean' in result['error']
+    else:
+        with pytest.raises(core.ProfileDelegateError, match=field + ' must be a boolean') as error:
+            core.delegate_profile(**args)
+        assert error.value.code == 'validation_error'
+    assert not list(core.get_runs_root().glob('pd_*'))
+
+
+@pytest.mark.parametrize('entry', ['handler', 'core'])
+@pytest.mark.parametrize('background,notify', [(False, False), (True, True)])
+def test_single_admission_preserves_boolean_values(repository, entry, background, notify):
+    from test_preflight_contract import _plugin
+    args = dict(profile='worker', task='bounded', session_title='booleans', workdir=str(repository),
+                background=background, notify_on_complete=notify, transport_mode='simple', preflight=True)
+    result = json.loads(_plugin()._handler(args)) if entry == 'handler' else core.delegate_profile(**args)
+    assert result['success']
+    assert result['normalized_request']['background'] is background
+    assert result['normalized_request']['notify_on_complete'] is notify
+    assert not list(core.get_runs_root().glob('pd_*'))
