@@ -18,6 +18,29 @@ except ImportError:
 
 
 CANCEL_GRACE_SECONDS = 5.0
+# Only unresolved reap obligations are retained; not a run manager or task state.
+_pending_reaps = {}
+_pending_reaps_lock = threading.Lock()
+
+
+def _confirmed_process_exit(process):
+    """An unavailable poll is uncertainty, never permission to drop a live permit."""
+    try:
+        return process.poll() is not None
+    except Exception:
+        return False
+
+
+def _reconcile_pending_reaps():
+    """Next local admission may release only an already-confirmed owned exit."""
+    with _pending_reaps_lock:
+        for key, (owner, process, slot_manager) in list(_pending_reaps.items()):
+            if _confirmed_process_exit(process):
+                try:
+                    owner.release_reaped_slot(slot_manager)
+                finally:
+                    del _pending_reaps[key]
+
 # Twice the 0.6s delayed follow-up regression observation in test_tui_rpc.py.
 # This only bounds observation of an unobserved follow-up, never proves delivery.
 PENDING_FOLLOWUP_OBSERVATION_SECONDS = 1.2
@@ -100,6 +123,7 @@ class _RunCoordinator:
         self.final_status = "failed"
         self.error_code: Optional[str] = None
         self.exit_code: Optional[int] = None
+        self.transport_alive: Optional[bool] = False
         self.journal = EventJournal(
             self.run_dir, task_id=core.ensure_text(self.request.get("task_id") or self.run_dir.name),
             persist_message_text=bool(self.request.get("persist_message_text", False)),
@@ -107,6 +131,10 @@ class _RunCoordinator:
         self.last_snapshot = 0.0
         self.last_observed_event = "none"
         self.startup_identity_events: list[Dict[str, Any]] = []
+        self.event_cursors = {}
+        self.return_observation = None
+        self.return_diagnostic = ""
+        self.required_returns = set()
 
     def merge_status(self, updates: Dict[str, Any], *, force: bool = False, terminal: bool = False) -> None:
 
@@ -148,23 +176,39 @@ class _RunCoordinator:
                         profile=self.profile, ui_correlated=True,
                     ):
                         raise tui_rpc.TuiProtocolError("unproven child compression identity")
+                    if self.return_observation is not None:
+                        self.return_observation.continue_session(proposed)
                     self.child_session_id = proposed
                     core.merge_run_status(self.run_dir, {"child_session_id": proposed})
 
-    def persist_event(self, frame: Dict[str, Any]) -> None:
+    def persist_event(self, frame: Dict[str, Any]) -> bool:
 
 
         raw_params = frame.get("params")
         params: Dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
         if frame.get("method") != "event":
-            return
-        self.last_observed_event = core.ensure_text(params.get("type") or "unknown")
+            return False
         event_sid = params.get("session_id")
         if not self.ui_session_id:
+            if isinstance(event_sid, str) and type(params.get('seq')) is int:
+                self.event_cursors[event_sid] = params['seq']
             self.retain_startup_identity(frame, params, event_sid)
-            return
+            return False
         if event_sid != self.ui_session_id:
-            return
+            return False
+        if self.return_observation is not None:
+            if self.return_diagnostic:
+                return False
+            try:
+                if not self.return_observation.event(params):
+                    return False
+            except ValueError as exc:
+                self.return_diagnostic = str(exc)
+                return False
+        # One accepted native frame governs observer, identity, journal and answer.
+        self.last_observed_event = core.ensure_text(params.get("type") or "unknown")
+        if type(params.get('seq')) is int:
+            self.event_cursors[event_sid] = params['seq']
         self.observe_identity(params)
         try:
             self.journal.ingest(frame)
@@ -172,6 +216,7 @@ class _RunCoordinator:
         except Exception:
             self.merge_status({"observability_degraded": True}, force=True)
         self.observe_message(params)
+        return True
 
     def observe_message(self, params):
         if params.get("type") == "message.complete":
@@ -210,6 +255,8 @@ class _RunCoordinator:
                     self.apply_steer(command_path, command)
                     if self.timed_out:
                         return
+                elif command_type == "command":
+                    core.child_commands.apply_live(self, command_path, command)
                 elif command_type == "cancel":
                     self.apply_cancel(command_path, command)
                     return
@@ -218,8 +265,9 @@ class _RunCoordinator:
                         self.run_dir, command_path, command, "rejected", "unsupported command type"
                     )
             except Exception as exc:
+                uncertain_command = command_type == "command" and isinstance(exc, (tui_rpc.TuiProtocolError, tui_rpc.TuiTransportError))
                 core._ack_control(
-                    self.run_dir, command_path, command, "rejected",
+                    self.run_dir, command_path, command, "delivery_unknown" if uncertain_command else "rejected",
                     f"{type(exc).__name__}: {exc}",
                 )
                 if command_type != "cancel" and isinstance(
@@ -339,6 +387,7 @@ class _RunCoordinator:
             core.merge_run_status(self.run_dir, {
                 "actual_transport": "tui_stdio", "steerability": "unavailable",
                 "transport_pid": self.client.process.pid, "transport_alive": True,
+                "transport_identity": core._process_identity(self.client.process.pid),
             })
             gateway_timeout = min(
                 _stage_timeout("PROFILE_DELEGATE_GATEWAY_STARTUP_TIMEOUT_SECONDS", 30.0),
@@ -393,6 +442,7 @@ class _RunCoordinator:
             "phase": "agent_initializing",
         })
         prompt = (self.run_dir / "prompt.txt").read_text(encoding="utf-8")
+        self.prepare_return_observation()
         tui_rpc.submit(
             self.client, self.ui_session_id, prompt, timeout=max(0.0, agent_init_deadline - time.monotonic()),
             on_event=self.persist_event,
@@ -437,8 +487,65 @@ class _RunCoordinator:
                                                   self.child_session_id, profile=self.profile, ui_correlated=True):
                 raise tui_rpc.TuiProtocolError("contradictory startup response identity")
 
+    def prepare_return_observation(self):
+        if __package__:
+            from .return_observation import ReturnObservation
+        else:
+            from return_observation import ReturnObservation
+        try:
+            if self.ui_session_id not in self.event_cursors:
+                # Native lazy create can precede every session event. Obtain
+                # evidence of zero from the native counter, never a default.
+                snapshot = self.client.call(
+                    'session.events.since', {'session_id': self.ui_session_id, 'last_seen': 0},
+                    timeout=min(15.0, max(0.0, self.deadline - time.monotonic())),
+                    on_event=self.persist_event, stage='native_startup_cursor',
+                )
+                if (type(snapshot.get('latest_seq')) is not int or snapshot['latest_seq'] != 0
+                        or snapshot.get('truncated') is not False
+                        or snapshot.get('events') != [] or snapshot.get('count') != 0
+                        or not isinstance(snapshot.get('epoch'), str) or not snapshot['epoch']):
+                    raise ValueError('native startup stream is not proven empty')
+                self.event_cursors.setdefault(self.ui_session_id, snapshot['latest_seq'])
+            self.return_observation = ReturnObservation(
+                self.request['profile_home'], self.child_session_id, self.ui_session_id,
+                core._process_identity(self.client.process.pid), self.deadline,
+                cursor=self.event_cursors.get(self.ui_session_id),
+                unpersisted_new=self.mode == 'new',
+            )
+        except Exception as exc:
+            # Non-nested runs retain old compatibility. A discovered obligation
+            # cannot succeed without a complete pre-task baseline.
+            self.return_diagnostic = f'{type(exc).__name__}: {exc}'
+
+    def nested_ready(self):
+        required, pending = core.descendants.return_obligations(
+            self.run_dir, {**self.request, 'runs_root': str(self.run_dir.parent)},
+            self.child_session_id, self.ui_session_id,
+        )
+        self.required_returns.update(required)
+        if not self.required_returns and not pending:
+            return self.terminal_event
+        if self.return_diagnostic or self.return_observation is None:
+            raise core.ProfileDelegateError(
+                'native child return unproven: ' + self.return_diagnostic, 'nested_return_uncertain',
+            )
+        if core._process_identity(self.client.process.pid) != self.return_observation.epoch or not self.return_observation.epoch:
+            raise core.ProfileDelegateError('native parent epoch changed', 'nested_return_uncertain')
+        try:
+            joined = self.return_observation.joined(self.required_returns)
+        except Exception as exc:
+            raise core.ProfileDelegateError(str(exc), 'nested_return_uncertain') from exc
+        self.merge_status({'nested_return': {
+            'required': sorted(self.required_returns),
+            'joined': sorted(self.return_observation.joins), 'pending': sorted(pending),
+        }})
+        if pending - self.required_returns and self.terminal_event:
+            raise core.ProfileDelegateError('pending child has no native return enabled', 'nested_return_incomplete')
+        return self.terminal_event and self.turn_settled and not pending and joined
+
     def observe_turn(self):
-        while not self.terminal_event:
+        while not self.nested_ready():
             self.process_controls()
             if self.cancelled:
                 # Preserve the cleanup reserve: accepted local cancellation
@@ -540,6 +647,8 @@ class _RunCoordinator:
             self.cancel_transport_diagnostic = self.cancel_transport_diagnostic or (
                 f"{type(exc).__name__}: {exc}"
             )
+        elif self.timed_out:
+            self.error_code, self.final_status = "timeout", "timed_out"
         else:
             self.error_code = getattr(exc, "code", "tui_transport_error")
             self.final_status = "failed"
@@ -563,7 +672,8 @@ class _RunCoordinator:
                 frame = _poll_event(self.client, remaining, self.journal)
                 if frame is None:
                     break
-                self.persist_event(frame)
+                if not self.persist_event(frame):
+                    continue
                 params = frame.get("params") or {}
                 if (params.get("session_id") == self.ui_session_id
                         and params.get("type") == "session.info"
@@ -573,7 +683,9 @@ class _RunCoordinator:
             self.cancel_transport_diagnostic = self.cancel_transport_diagnostic or f"identity observation unavailable: {exc}"
 
     def teardown(self):
-        if self.client is not None:
+        if self.client is None:
+            return
+        try:
             if self.cancelled:
                 if self.cancel_deadline is None:
                     self.cancel_deadline = time.monotonic()
@@ -582,14 +694,17 @@ class _RunCoordinator:
                 self.client.close(deadline=self.cancel_deadline)
             else:
                 self.client.close()
-            self.exit_code = self.client.process.poll()
-            if self.exit_code is None:
-                # close() is bounded, not a promise that the OS reaped the child.
-                # Preserve the unresolved lifecycle as a failure for publication;
-                # execution_slot transfers the still-held permit to its reaper.
+        finally:
+            # One explicit observation survives close/poll errors and publication.
+            # Unknown is not live, dead, or permission to drop the owned permit.
+            try:
+                self.exit_code = self.client.process.poll()
+                self.transport_alive = self.exit_code is None
+            except Exception:
+                self.exit_code, self.transport_alive = None, None
+            if self.exit_code is None and not self.cancelled and not self.timed_out:
                 self.final_status, self.error_code = "failed", "tui_reap_pending"
-        pending = self.client is not None and self.exit_code is None
-        core.merge_run_status(self.run_dir, {"transport_alive": pending})
+            core.merge_run_status(self.run_dir, {"transport_alive": self.transport_alive})
 
     def build_result(self):
         if self.timed_out:
@@ -645,7 +760,7 @@ class _RunCoordinator:
             "timed_out": self.timed_out,
             "error_code": self.error_code,
             "child_session_id": self.child_session_id,
-            "transport_alive": self.client is not None and self.client.process.poll() is None,
+            "transport_alive": self.transport_alive,
         }
         final = core.finish_run(self.run_dir, self.request, result, {**terminal_updates, **self.journal.snapshot_fields()}, mode="async")
         self.final_status, self.error_code, self.child_session_id = final["status"], final["error_code"], final["child_session_id"]
@@ -656,31 +771,52 @@ class _RunCoordinator:
             self.merge_status({"observability_degraded": True}, force=True)
         return final
 
+    def release_reaped_slot(self, slot_manager):
+        with self._cleanup_lock:
+            if self.client is not None:
+                self.exit_code = getattr(self.client.process, "returncode", self.exit_code)
+            self.transport_alive = False
+            try:
+                with core._locked_run_status(self.run_dir) as status:
+                    status.update(transport_alive=False, reaping_state="reaped")
+                    core._write_locked_status_snapshot(self.run_dir, status)
+            finally:
+                slot_manager.__exit__(None, None, None)
+
     def execution_slot(self, maximum):
         """Transfer the permit to a reaper if bounded teardown cannot reap."""
         from contextlib import contextmanager
 
         @contextmanager
         def owned_slot():
+            _reconcile_pending_reaps()
             slot_manager = core.acquire_concurrency_slot(maximum)
             slot = slot_manager.__enter__()
             try:
                 yield slot
             finally:
                 process = self.client.process if self.client is not None else None
-                if process is None or process.poll() is not None:
+                if process is None or _confirmed_process_exit(process):
                     slot_manager.__exit__(None, None, None)
                 else:
                     # Keep the acquired permit itself alive; do not move a
                     # generator context-manager's __exit__ across threads.
                     def reap():
-                        # A failed wait is not evidence of death: retain ownership.
-                        process.wait()
-                        with self._cleanup_lock:
-                            try:
-                                core.merge_run_status(self.run_dir, {"transport_alive": False})
-                            finally:
-                                slot_manager.__exit__(None, None, None)
+                        # A failed wait is not evidence of death: retain ownership
+                        # even after this thread returns (generator GC unlocks).
+                        try:
+                            process.wait()
+                        except Exception as exc:
+                            with _pending_reaps_lock:
+                                _pending_reaps[id(slot_manager)] = (self, process, slot_manager)
+                            with self._cleanup_lock:
+                                self.transport_alive = None
+                                core.merge_run_status_best_effort(self.run_dir, {
+                                    "reaping_state": "unknown", "transport_alive": None,
+                                    "reaping_error": type(exc).__name__,
+                                })
+                            return
+                        self.release_reaped_slot(slot_manager)
 
                     reaper = threading.Thread(
                         target=reap, name="profile-delegate-reaper", daemon=False,
@@ -703,11 +839,13 @@ class _RunCoordinator:
                     self.start_agent()
                     self.observe_turn()
                     self.observe_followup()
+                    if not self.cancelled and not self.timed_out:
+                        self.observe_turn()
                     self.close_session()
                     self.classify()
                 finally:
                     # The permit accounts for the live child, not just its turn.
-                    # Publish/notification happens only after reaping and release.
+                    # An uncertain exit stays visible/held, never a completed+ok result.
                     self.teardown()
         except Exception as exc:
             self.record_error(exc)

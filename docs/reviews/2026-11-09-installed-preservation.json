@@ -1,0 +1,42 @@
+{
+  "purpose": "Exact installed runtime source preservation; not release acceptance",
+  "captured_at_utc": "2026-11-09T18:45:51.654616+00:00",
+  "base_commit": "16c7c42bcbe99db918a398ec366b61761e92ccfe",
+  "branch": "preserve/installed-profile-delegate-2026-11-09",
+  "files_sha256": {
+    "__init__.py": "b2f1399bcf0c39c00fb0a69de34fe518f2e12391f6d821dd4f04e2aa3eef751b",
+    "admission.py": "c2b7ef96db9d398183203d0ad19db9dbc68bdff4566c298726bda9bacb48a9bf",
+    "batch.py": "f686d06d9363589479979fe6f1165613f7013a0bf94476197199c3aa370e1456",
+    "capacity.py": "894f38d9752e108e4eddd802648035766536ff6da8a8f84b3f6bbceb00c2e6ee",
+    "child_bootstrap.py": "9ea248ad43a9365405eba6bad98a8c0dc23cf9bc0cea3b53c70dec30a5df9d34",
+    "child_commands.py": "e5ac892bc71cdc6c39b5aadc393aeea9743dadbb50b421231fa14b75b3cbe636",
+    "child_reasoning.py": "4c97a7037d7e1cb702cc1b5c7576c5095fe49da07b03b79354a721b970e25db4",
+    "child_session.py": "4d562e4f87bd5f9aaf3666d14b5bf56bf475a01dcd215ac0f606f79682167dc2",
+    "child_session_cli.py": "5d21a25b40ec51f6f39a0cd510f8a41b13e67ec425644b85e5aa19925d0be6b1",
+    "child_session_history.py": "6f6f356a6d9b56bc4cdbedd71947f4a283c6ebcc8e7e0861f59343b214d6aed4",
+    "child_session_tui.py": "2914707b126f90e794f504be7b71ed0c1a6a9cb408f2ea74e02336f432b7c6a1",
+    "cli.py": "18a9bb8355f0a72f5710e1b5713ea4eebefdc832ccc27b67e50dee9152c9e68a",
+    "contracts.py": "4e84a389ebbe2985f23936b16638b77f0dad9e8019850f3d0801cd0b76a45ed8",
+    "core.py": "9af7988d510005832a9d05ab9d9d49e194d17e4c35742c74fc02b95edc11f4be",
+    "descendants.py": "5a351e9a52bc6d32ae58d85be038f1d1682340f6cae65eb43cfcf9616559f1d0",
+    "event_journal.py": "dbbb270df54239bd5498c3f310fbc90a310f9be761bc7e0893ad62b554978ab5",
+    "execution.py": "e47d66e6f0ea0c6e08eb422fa3769d9411069a7d1a1af6d423faee4f930b6755",
+    "execution_context.py": "963c6fd83a31843b33349ac5f9ffd0a7b4dfc2e2419547b201c672895cd461b8",
+    "native.py": "baca4d55740018bd408c7c284bc8b66795ec1a175f611582fdf24b4856b9980e",
+    "native_approval.py": "ba23433a9826eb260ca39153017d1733165c2c70a32dcc0e9d9a0e0e154ac5b6",
+    "native_resolution.py": "cab642334f02ee4479a1bfd0da0a0575414982d23b167109f48e7b073a0b11f2",
+    "plugin.yaml": "9d37bd0eb7bf3353f9bc76d4204b3fcb6ad4d5fa8c40190edae15bff919c21ce",
+    "result_slices.py": "4b523a008f69719cb3f91b349ade09dead06f3f78e8d2554f6c71d7ad9286938",
+    "return_observation.py": "aeee7d3f53aae2ab350eed1ad1eb52469b6eaff5ab99a2bd1e37e62687a24154",
+    "session_admission.py": "89399bc2c7dfcfbd3b34069a59cf8939466eb7689c5c38dc691e8192cb5cebbf",
+    "spectator.py": "5037c5e7561da20e9a5cd71025c20dc3d961a01af1fc5c0209139ec6bef2206b",
+    "tui_rpc.py": "fb59e6c728fbc281033f7d2a036c12d3260af2254f184dfc1dee81c1a8c28002",
+    "tui_runner.py": "03e107c263028db82d6b3c027706d6dea4576fca9bffe52a8dd9cd6d9baf9b84",
+    "worktrees.py": "2a009317b18f113e90dfd8490a489a4e0ca227aa4174d932837ad72f26ae7c66"
+  },
+  "retained_repository_only_runtime_helper": [
+    "cli_smoke.py"
+  ],
+  "validation": "Python syntax parsed; secret-pattern scan and git diff --check; full behavioral acceptance deferred by operator",
+  "known_failure": "Interactive smoke refused unsupported effective TUI boundary: _admit_prompt_turn"
+}

@@ -175,7 +175,7 @@ def admit_resume(frozen: dict, ancestor: dict | None) -> dict:
     return frozen
 
 
-def bind(envelope: dict) -> None:
+def bind(envelope: dict) -> dict:
     """Bind exact native config before importing guards/agent in a child process."""
     import os
     from hermes_cli import config
@@ -212,6 +212,7 @@ def bind(envelope: dict) -> None:
         approval._permanent_approved_by_home.clear()
         approval._session_approved.clear()
         approval._session_yolo.clear()
+    return envelope
 
 
 def read_request(path: Path) -> dict | None:

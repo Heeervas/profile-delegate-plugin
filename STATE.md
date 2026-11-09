@@ -1,5 +1,27 @@
 # Profile Delegate — v1.12.0 source candidate
 
+## Installed variant preservation — 2026-11-09
+
+Alberto explicitly requested a separate pushed preservation branch and deferred
+any repair, merge or runtime decision. Branch:
+`preserve/installed-profile-delegate-2026-11-09`, based on
+`16c7c42bcbe99db918a398ec366b61761e92ccfe`.
+
+All 29 installed root runtime source/manifest files are captured byte-for-byte;
+12 modules are additional, nine existing Python modules and plugin.yaml differ.
+Repository-only development helpers, tests and documentation are retained; their
+absence from an installation is not treated as a requested deletion. Byte manifest:
+[installed snapshot](docs/reviews/2026-11-09-installed-preservation.json).
+
+This is an archival safety checkpoint, NOT an accepted implementation, release or
+compatible runtime candidate. The installed variant failed a real interactive
+smoke at the `_admit_prompt_turn` signature guard. The base repository separately
+had 928 passing and four failing tests against the current runtime; those results
+do not validate this snapshot. Full suites, integration/quality review and live
+compatibility remain pending. Preservation checks cover Python syntax, source
+byte identity, secret patterns and Git whitespace only. No runtime files, settings,
+version, tag or main branch are changed by preservation.
+
 ## Senior corrections integration into main
 
 Alberto explicitly authorized merging `review/senior-corrections-20261019`

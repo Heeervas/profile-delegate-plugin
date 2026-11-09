@@ -67,7 +67,19 @@ def observe_attempt(request, stable_id, stdout, stderr, meta, integrity_error):
     return stable_id, observed, integrity_error, transient
 
 
-def bootstrap_command(request: Dict[str, Any], run_dir: Path) -> List[str]:
+def attempt_path(request, run_dir, session_id):
+    if not session_id or not request.get('native_boundary'):
+        return run_dir / 'request.json'
+    from importlib import import_module
+    c = import_module('.core', __package__) if __package__ else __import__('core')
+    value = dict(request, session_mode='resume', requested_session_id=session_id)
+    value['native_boundary'] = c.session_admission.admit_attempt(value, request, run_dir)
+    path = run_dir / 'attempt_request.json'
+    c.json_safe_write(path, value)
+    return path
+
+
+def bootstrap_command(request: Dict[str, Any], run_dir: Path, resume_session_id=None) -> List[str]:
     """Shared interpreter/authority prefix for CLI and native TUI gateway."""
     try:
         native_approval.validate_request(request)
@@ -82,7 +94,7 @@ def bootstrap_command(request: Dict[str, Any], run_dir: Path) -> List[str]:
         child_python = Path(sys.executable)
     blocked = (request.get("effective_capabilities") or {}).get("blocked_tools") or []
     return [str(child_python), str(CHILD_BOOTSTRAP), "--approval-mode", approval_mode,
-            "--request-path", str(run_dir / "request.json"),
+            "--request-path", str(attempt_path(request, run_dir, resume_session_id)),
             "--events-path", str(run_dir / "approval_events.jsonl"),
             "--blocked-tools", ",".join(ensure_text(item) for item in blocked)]
 
@@ -92,7 +104,7 @@ def build_child_command(
     prompt_path: Optional[Path] = None,
     resume_session_id: Optional[str] = None,
 ) -> List[str]:
-    prefix = bootstrap_command(request, run_dir)
+    prefix = bootstrap_command(request, run_dir, resume_session_id)
     requested = request.get("effective_execution") or request.get("requested_execution") or {}
     hermes_cmd = [ensure_text(request.get("hermes_bin")), "-p", ensure_text(request.get("profile")),
                   "chat", "--query-file", str(prompt_path or (run_dir / "prompt.txt")), "-Q"]

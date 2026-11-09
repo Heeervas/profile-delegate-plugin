@@ -70,7 +70,8 @@ def destination(source, task_id):
 def resolve_workspace(request, target, workdir, requested, policy, records):
     core = _core()
     retained = resume(target, request['requested_session_id'], request['origin'], workdir, policy, records) if request['session_mode'] == 'resume' else None
-    cwd = core.resolve_workdir(retained['workdir'] if retained else workdir, policy)
+    effective = retained['workdir'] if retained else core.session_admission.retained_workdir(workdir, records)
+    cwd = core.resolve_workdir(effective, policy, explicit_workdir=request['workdir_explicit'])
     workspace = inspect(cwd, requested, policy) if requested else (retained['workspace'] if retained else None)
     return cwd, workspace
 

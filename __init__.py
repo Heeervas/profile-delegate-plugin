@@ -91,6 +91,7 @@ def _schema() -> Dict[str, Any]:
                 'boolean', 'Run asynchronously, return a task_id immediately, and keep the originating conversation responsive. Prefer background for long, multi-stage, or independently monitorable work; short bounded specialist work may remain foreground. Advisory only: no automatic mode selection or rejection.', default=False),
             'notify_on_complete': _field(
                 'boolean', 'When background=true, notify the originating chat when the delegated profile finishes. Default true.', default=True),
+            'commands': _field('array', 'Ordered session commands before the first model request. Supported: /fast fast, /fast normal. Omit to inherit. No global flags or prompt execution.', items={'type': 'string', 'enum': ['/fast fast', '/fast normal']}, maxItems=8),
             'model': _field(
                 'string', 'Optional requested model for this call. Overrides the target profile default temporarily; blank means inherit.'),
             'provider': _field(
@@ -148,6 +149,9 @@ def _status_schema() -> Dict[str, Any]:
                 'string', 'Task id returned by profile_delegate, e.g. pd_20260613_083528_9hksdn.'),
             'tail_chars': _field(
                 'integer', 'Maximum stdout/stderr tail chars to return, 0-20000.', default=4000),
+            'result_offset_bytes': _field('integer', 'Canonical result byte offset. Any slice field requests base64 retrieval.', minimum=0),
+            'result_limit_bytes': _field('integer', 'Page length 1..8192; default 8192 for slicing. Assemble base64 decoded bytes then UTF-8 JSON.', minimum=1, maximum=8192),
+            'result_sha256': _field('string', 'Canonical lowercase SHA-256, required after offset zero. Hash is not authorization.', pattern='^[0-9a-f]{64}$'),
         }, ['task_id'])
 
 
@@ -159,6 +163,20 @@ def _steer_schema() -> Dict[str, Any]:
             'text': _field(
                 'string', 'Bounded steering instruction delivered through native session.steer.', minLength=1, maxLength=12000),
         }, ['task_id', 'text'])
+
+
+def _command_schema() -> Dict[str, Any]:
+    return _tool_schema('profile_delegate_command', 'Apply a supported session command to an active background TUI child from its exact originating session. Changes subsequent model requests; pending/unknown is not applied.', {
+        'task_id': _field('string', 'Active task id.'),
+        'command': _field('string', 'Session command; no global flags.', enum=['/fast fast', '/fast normal']),
+    }, ['task_id', 'command'])
+
+
+def _command_handler(args=None, **kwargs) -> str:
+    from importlib import import_module
+    commands = import_module('.child_commands', __package__) if __package__ else import_module('child_commands')
+    payload = {**kwargs, **(args if isinstance(args, dict) else {})}
+    return _invoke('profile_delegate_command', commands.command, payload.get('task_id', ''), payload.get('command', ''), caller_origin=_current_origin())
 
 
 def _cancel_schema() -> Dict[str, Any]:
@@ -250,6 +268,7 @@ def _handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
             origin_session_key=origin["session_key"],
             origin=origin,
             child_approval_mode=payload.get("child_approval_mode", None),
+            commands=payload.get("commands"),
             model=payload.get("model"),
             provider=payload.get("provider"),
             reasoning_effort=payload.get("reasoning_effort"),
@@ -289,7 +308,8 @@ def _invoke(name: str, function, *args, **kwargs) -> str:
 def _status_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
     payload = {**kwargs, **(args if isinstance(args, dict) else {})}
     return _invoke("profile_delegate_status", profile_delegate_status, payload.get("task_id", ""),
-                   payload.get("tail_chars", 4000), caller_origin=_current_origin())
+                   payload.get("tail_chars", 4000), caller_origin=_current_origin(),
+                   **{k: payload[k] for k in ('result_offset_bytes', 'result_limit_bytes', 'result_sha256') if k in payload})
 
 
 def _steer_handler(args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
@@ -390,6 +410,7 @@ def register(ctx: Any) -> None:
         ("profile_multidelegate", _multischema(), _multihandler, "Dispatch independent profile tasks."),
         ("profile_delegate_status", _status_schema(), _status_handler, "Inspect a Profile Delegate run by task_id."),
         ("profile_delegate_steer", _steer_schema(), _steer_handler, "Steer an active Profile Delegate run."),
+        ("profile_delegate_command", _command_schema(), _command_handler, "Apply a session command to an active child."),
         ("profile_delegate_cancel", _cancel_schema(), _cancel_handler, "Cancel an active Profile Delegate run."),
         ("profile_delegate_list", _list_schema(), _list_handler, "List recent Profile Delegate runs."),
         ("profile_delegate_policy", _policy_schema(), _policy_handler, "Inspect effective non-secret Profile Delegate policy."),

@@ -46,6 +46,9 @@ class TuiRpcClient:
         self._next_id = 1
         self._writer_lock = threading.Lock()
         self._closed = False
+        from importlib import import_module
+        self._core = import_module('.core', __package__) if __package__ else __import__('core')
+        self._group_identity = self._core._owned_group_identity(process.pid)
         self._stderr_tail = ""
         self._stdout_buffer = bytearray()
         self._stderr_eof = False
@@ -227,6 +230,21 @@ class TuiRpcClient:
             if remaining <= 0:
                 raise TuiTransportError("TUI RPC response timed out")
             frame = self._read_raw_frame(remaining)
+            # Hermes is a JSON-RPC peer: renderer prompts are requests, not
+            # responses. This unattended client cannot answer or approve them.
+            # Return an explicit error so the native waiter settles immediately.
+            if isinstance(frame.get("id"), str) and "method" in frame:
+                if (not frame["id"] or not isinstance(frame["method"], str)
+                        or not frame["method"] or frame["method"] == "event"
+                        or not isinstance(frame.get("params"), dict)
+                        or "result" in frame or "error" in frame):
+                    raise TuiProtocolError("malformed TUI server request")
+                self._dispatch_deadline, self._dispatch_timeout = deadline, timeout
+                self._write({"jsonrpc": "2.0", "id": frame["id"], "error": {
+                    "code": -32601,
+                    "message": "Profile Delegate is noninteractive; client requests are unavailable",
+                }})
+                continue
             response_id = frame.get("id")
             if type(response_id) is int and response_id in self._abandoned_ids:
                 validated_id = self._validate_response(frame)
@@ -242,7 +260,7 @@ class TuiRpcClient:
             raise TuiProtocolError(f"unexpected idle response id {response_id!r}")
         return frame
 
-    def wait_ready(self, timeout: float = 15.0, *, on_event: Optional[Callable[[dict], None]] = None) -> dict:
+    def wait_ready(self, timeout: float = 15.0, *, on_event: Optional[Callable[[dict], object]] = None) -> dict:
         self._frame_context = "stage=gateway_starting, request_id=none"
         deadline = time.monotonic() + timeout
         while True:
@@ -265,7 +283,7 @@ class TuiRpcClient:
             raise TuiProtocolError("unexpected response before gateway.ready")
 
     def call(self, method: str, params: dict[str, Any], *, timeout: float = 30.0,
-             on_event: Optional[Callable[[dict], None]] = None,
+             on_event: Optional[Callable[[dict], object]] = None,
              stage: str = "rpc_waiting") -> dict[str, Any]:
         if not method or not isinstance(params, dict):
             raise ValueError("method and object params are required")
@@ -332,15 +350,15 @@ class TuiRpcClient:
             if stdout is not None and not stdout_eof and stdout.fileno() in ready:
                 stdout_eof = not os.read(stdout.fileno(), 8192)
 
-    def _signal_group(self, signum, fallback):
-        """Signal the owned session, falling back to its direct process."""
+    def _signal_group(self, signum):
+        """Only the pinned, unreaped process session may receive group signals."""
+        if (self.process.poll() is not None or not self._group_identity
+                or self._core._owned_group_identity(self.process.pid) != self._group_identity):
+            return
         try:
             os.killpg(self.process.pid, signum)
-        except (ProcessLookupError, PermissionError, AttributeError):
-            try:
-                getattr(self.process, fallback)()
-            except Exception:
-                pass
+        except (ProcessLookupError, PermissionError):
+            pass
 
     def close(self, *, grace: float = 10.0, deadline: Optional[float] = None) -> bool:
         """Close stdin and await gateway session teardown before forced reaping.
@@ -376,14 +394,14 @@ class TuiRpcClient:
             # gateway writing shutdown diagnostics larger than pipe capacity.
             if wait_bounded(fraction=0.5 if explicit_deadline else 0.8):
                 return True
-            for signum, fallback, fraction in (
-                (signal.SIGTERM, "terminate", 0.5),
-                (signal.SIGKILL, "kill", 1.0),
+            for signum, fraction in (
+                (signal.SIGTERM, 0.5),
+                (signal.SIGKILL, 1.0),
             ):
-                self._signal_group(signum, fallback)
+                self._signal_group(signum)
                 if signum == signal.SIGKILL:
-                    # No writer survives SIGKILL. wait() observes exit promptly;
-                    # selecting on inherited pipes can consume the entire reserve.
+                    # Only an owned group was signalled; detached descendants
+                    # are outside this boundary. Confirm direct exit with wait().
                     try:
                         self.process.wait(timeout=max(0.0, end - time.monotonic()))
                         return True
@@ -409,10 +427,12 @@ class TuiRpcClient:
 
 def launch_gateway(*, python: str, cwd: str, env: dict[str, str],
                    command: Optional[list[str]] = None) -> TuiRpcClient:
+    from importlib import import_module
+    capacity = import_module('.capacity', __package__) if __package__ else __import__('capacity')
     proc = subprocess.Popen(
         command or [python, "-m", "tui_gateway.entry"], cwd=cwd, env=env,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True, bufsize=0,
+        start_new_session=True, bufsize=0, pass_fds=capacity.inherited_fds(),
     )
     if proc.stderr is not None:
         try:
@@ -425,7 +445,7 @@ def launch_gateway(*, python: str, cwd: str, env: dict[str, str],
 def start_session(client: Any, *, profile: str, mode: str, session_id: str,
                   title: str, cwd: str, model: str = "", provider: str = "",
                   reasoning_effort: str = "", timeout: float = 60.0,
-                  on_event: Optional[Callable[[dict], None]] = None) -> dict[str, str]:
+                  on_event: Optional[Callable[[dict], object]] = None) -> dict[str, str]:
     if reasoning_effort and reasoning_effort not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
         raise TuiProtocolError("reasoning selection must be an effort level, never a display command")
     deadline = time.monotonic() + timeout
@@ -492,19 +512,19 @@ def start_session(client: Any, *, profile: str, mode: str, session_id: str,
 
 
 def submit(client: Any, session_id: str, text: str, *, timeout: float = 60.0,
-           on_event: Optional[Callable[[dict], None]] = None) -> dict:
+           on_event: Optional[Callable[[dict], object]] = None) -> dict:
     return client.call(
         "prompt.submit", {"session_id": session_id, "text": text}, timeout=timeout,
         on_event=on_event, stage="agent_initializing",
     )
 
 
-def steer(client: Any, session_id: str, text: str, *, on_event: Optional[Callable[[dict], None]] = None) -> dict:
+def steer(client: Any, session_id: str, text: str, *, on_event: Optional[Callable[[dict], object]] = None) -> dict:
     return client.call("session.steer", {"session_id": session_id, "text": text}, timeout=15, on_event=on_event)
 
 
 def interrupt(client: Any, session_id: str, *, timeout: float = 15.0,
-              on_event: Optional[Callable[[dict], None]] = None) -> dict:
+              on_event: Optional[Callable[[dict], object]] = None) -> dict:
     return client.call(
         "session.interrupt", {"session_id": session_id}, timeout=timeout,
         on_event=on_event,

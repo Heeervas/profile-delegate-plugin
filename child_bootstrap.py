@@ -94,12 +94,17 @@ def _install_capability_filter(blocked_tools: list[str], write_event) -> None:
                 reason="blocked_tools=" + ",".join(sorted(blocked)))
 
 
+def _execute_grant_home_matches(target: Path) -> bool:
+    from hermes_constants import get_hermes_home
+    return get_hermes_home().resolve() == target
+
+
 def install_policy(mode: str, events_path: Path, blocked_tools: list[str], envelope: dict | None = None) -> None:
     """Install policy in this process before Hermes constructs the child agent."""
     if mode not in {"deny", "approve_yolo", "yolo", "profile", "inherit"}:
         raise ValueError(f"unsupported child approval mode: {mode}")
     if envelope is not None:
-        native_approval.bind(envelope)
+        envelope = native_approval.bind(envelope)
     elif mode in {"profile", "inherit", "yolo"}:
         raise ValueError("native approval mode requires frozen envelope")
     if envelope is not None and envelope["effective"] != ("yolo" if mode == "approve_yolo" else mode):
@@ -112,6 +117,11 @@ def install_policy(mode: str, events_path: Path, blocked_tools: list[str], envel
 
     original_guard = approval.check_all_command_guards
     original_execute_guard = approval.check_execute_code_guard
+    # Only the validated frozen authority can supply this exception, never live
+    # native/session allowlists (which may belong to a routed foreign profile).
+    grant_home = None
+    if envelope and mode in {"profile", "inherit"} and "execute_code" in envelope["native"]["command_allowlist"]:
+        grant_home = Path(envelope["target"]).resolve()
 
     def terminal_guard(command: str, env_type: str, approval_callback=None,
                        has_host_access: bool = False) -> dict[str, Any]:
@@ -149,6 +159,8 @@ def install_policy(mode: str, events_path: Path, blocked_tools: list[str], envel
                 "outcome": "blocked",
                 "user_consent": False,
             }
+        elif grant_home is not None and _execute_grant_home_matches(grant_home):
+            result = {"approved": True, "description": "exact frozen execute_code permanent grant"}
         else:
             result = original_execute_guard(code, env_type, has_host_access=has_host_access)
         decision = "allowed" if result.get("approved", False) else ("policy_denied" if mode == "deny" else "approval_required")
@@ -228,27 +240,28 @@ def main(argv: list[str] | None = None) -> int:
             elapsed_ms=int((time.monotonic() - origin) * 1000),
         )
 
+    request = import_module(".core", _PLUGIN_PACKAGE).operator_read_json(Path(args.request_path)) if args.request_path else {}
     stage_event("bootstrap_policy_filter", "enter")
     try:
         install_policy(
             args.approval_mode,
             Path(args.events_path).expanduser().resolve(),
             [item for item in args.blocked_tools.split(",") if item],
-            native_approval.read_request(Path(args.request_path)) if args.request_path else None,
+            request.get("native_approval"),
         )
     except ModuleNotFoundError as exc:
         raise RuntimeError("native approval installation failed; delegated launch refused") from exc
     finally:
         stage_event("bootstrap_policy_filter", "exit")
-    request = {}
-    if args.request_path:
-        request = import_module(".core", _PLUGIN_PACKAGE).operator_read_json(Path(args.request_path))
     if request:
         child_reasoning = import_module(".child_reasoning", _PLUGIN_PACKAGE)
     if args.tui_gateway:
         prepare_tui_runtime(stage_event)
         if request:
             child_reasoning.install(request, tui=True)
+            import_module('.child_commands', _PLUGIN_PACKAGE).install(request, tui=True)
+            if request.get('native_boundary'):
+                import_module('.child_session', _PLUGIN_PACKAGE).install(request, args.request_path, tui=True)
         stage_event("native_entry_import", "enter")
         try:
             from tui_gateway.entry import main as tui_main
@@ -268,7 +281,11 @@ def run_cli(command, request):
     sys.argv = [command[0], *command[1:]]
     if request:
         child_reasoning.install(request)
+        import_module('.child_commands', _PLUGIN_PACKAGE).install(request)
         import_module(".execution", _PLUGIN_PACKAGE).bind_cli_workspace(request)
+        if request.get('native_boundary'):
+            import_module('.child_session', _PLUGIN_PACKAGE).install(
+                request, os.environ['PROFILE_DELEGATE_APPROVAL_REQUEST'])
     from hermes_cli.main import main as hermes_main
 
     result = hermes_main()

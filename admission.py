@@ -29,6 +29,7 @@ def normalize_transport(raw):
 
 def normalize(raw):
     c = _core()
+    commands = c.child_commands.normalize(raw.get("commands"))
     transport = normalize_transport(raw)
     mode = c.coerce_session_mode(raw['session_mode'])
     sid = c.validate_session_id(raw['session_id'], required=mode == 'resume')
@@ -48,7 +49,7 @@ def normalize(raw):
     duplicate = c.ensure_text(raw['duplicate_policy'] or 'reuse').strip().lower()
     if duplicate not in {'reuse', 'new'}:
         raise c.ProfileDelegateError('duplicate_policy must be reuse or new', 'validation_error')
-    request = dict(session_title=c.normalize_session_title(raw['session_title']), session_mode=mode,
+    request = dict(commands=commands, session_title=c.normalize_session_title(raw['session_title']), session_mode=mode,
                    requested_session_id=sid, requested_transport=transport, reasoning_mode=reasoning_mode,
                    requested_output_mode=requested_mode, resolved_output_mode=output_mode,
                    background=raw['background'], notify_on_complete=raw['notify_on_complete'],
@@ -61,11 +62,13 @@ def admit(raw):
     options = c.worktrees.options(raw['worktree'], raw['base_ref'], raw['branch'], raw['session_mode'], raw['workdir'], raw['capability_preset'])
     request, text, reasoning, approval, duplicate = normalize(raw)
     policy = c.load_effective_policy()
+    if request["commands"]:
+        c.child_commands.require_policy(policy)
+        c.child_commands.require_runtime()
+    request["command_policy"] = policy.values["allow_fast_override"]
     depth, max_depth = c.enforce_depth_policy(policy)
     target = c.validate_profile(raw['profile'], policy)
     parent = c.ensure_text(os.getenv('PROFILE_DELEGATE_PARENT_TASK_ID', ''))[:c.MAX_SESSION_ID_CHARS]
-    if parent and Path(target.home).resolve() == c.get_hermes_home_path().resolve():
-        raise c.ProfileDelegateError('recursive same-home delegation would contend with its ancestor', 'same_profile_delegation_not_supported')
     execution = c.normalize_requested_execution(model=raw['model'], provider=raw['provider'], reasoning_effort=reasoning,
                                                max_turns=raw['max_turns'], toolsets=raw['toolsets'], skills=raw['skills'], policy=policy, validate_policy=False)
     c.validate_preflight(execution, policy, reasoning_mode=request['reasoning_mode'], capability_preset=raw['capability_preset'],
@@ -77,6 +80,7 @@ def admit(raw):
         c.authorize_run('resume', request['origin'], retained)
     envelope = c.resolve_request_approval(policy, target, request['session_mode'], request['requested_session_id'], approval, records)
     effective, capabilities = c.resolve_capability_preset(raw['capability_preset'], execution)
+    request['workdir_explicit'] = bool((raw['workdir'] or '').strip())
     cwd, workspace = c.worktrees.resolve_workspace(request, target, raw['workdir'], options, policy, records)
     request.update(c.worktrees.projection({'workspace': workspace}))
     request.update(profile=target.canonical, requested_profile=target.requested, profile_home=target.home, target_home=str(Path(target.home).resolve()),
@@ -85,6 +89,8 @@ def admit(raw):
                    parent_task_id=parent, child_approval_mode=envelope['effective'], native_approval=envelope, approval_policy=envelope,
                    capability_preset=capabilities['preset'], effective_capabilities=capabilities, requested_execution=execution,
                    effective_execution=effective, origin_session_key=request['origin']['session_key'])
+    request['execution_context'] = c.execution_context.resolve(request, policy)
+    request['native_boundary'] = c.session_admission.admit(request, records)
     if request['background'] and request['notify_on_complete'] and not raw['preflight']:
         c.require_native_async_ledger_compatibility()
     return request, policy, text, options, duplicate
@@ -97,6 +103,8 @@ def fingerprint_payload(request, text, options):
     payload.update(origin=next((request['origin'][k] for k in ('ui_session_id', 'session_id', 'session_key') if request['origin'][k]), ''),
                    session_mode=request['session_mode'], session_id=request['requested_session_id'], transport_mode=request['requested_transport'])
     payload.update({key + '_sha256': hashlib.sha256(value.encode()).hexdigest() for key, value in zip(('task', 'context', 'contract'), text)})
+    if request.get("commands"):
+        payload["commands"] = request["commands"]
     if options:
         payload['workspace_options'] = options
         payload['workspace_initial_sha'] = request['workspace']['initial_sha']
@@ -106,11 +114,12 @@ def fingerprint_payload(request, text, options):
 def preflight_result(request, duplicate):
     selected = 'interactive' if request['background'] and request['requested_transport'] != 'simple' else 'simple'
     keys = ('profile', 'session_title', 'session_mode', 'timeout_seconds', 'workdir', 'background', 'notify_on_complete', 'capability_preset')
-    return dict(success=True, preflight=True, run_created=False,
+    return dict(success=True, preflight=True, run_created=False, commands=request['commands'],
                 normalized_request={**{k: request[k] for k in keys}, 'session_id': request['requested_session_id'],
                                     'output_mode': request['resolved_output_mode'], 'duplicate_policy': duplicate,
                                     'transport_mode': request['requested_transport'], 'selected_transport': selected},
                 requested_execution=request['requested_execution'], preflight_execution=request['effective_execution'],
+                execution_context=request['execution_context'], native_boundary=request['native_boundary'],
                 runtime_observed_execution='unknown', preflight_capabilities=request['effective_capabilities'],
                 runtime_observed_capabilities='unknown', approval_policy=request['approval_policy'], retry_shape=None,
                 **_core().worktrees.projection(request))
